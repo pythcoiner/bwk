@@ -1,8 +1,9 @@
 [package]
 name = "bwk-backoff"
-version = "0.0.1"
+version = "0.0.2"
 readme = "README.md"
 description = "A simple backoff feature used in bwk"
+documentation = "https://docs.rs/bwk-backoff"
 license-file.workspace = true
 edition.workspace = true
 authors.workspace = true
