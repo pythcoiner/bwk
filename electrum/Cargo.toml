@@ -1,7 +1,7 @@
 [package]
 name = "bwk-electrum"
-version = "0.0.2"
-readme = "README.md"
+version = "0.0.3"
+readme.workspace = true
 description = "Electrum client used by bwk"
 documentation = "https://docs.rs/bwk-electrum"
 license-file.workspace = true

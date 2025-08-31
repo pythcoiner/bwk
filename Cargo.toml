@@ -13,6 +13,7 @@ authors = ["pythcoiner"]
 license-file = "LICENSE"
 repository = "https://github.com/pythcoiner/bwk"
 keywords = ["bitcoin"]
+readme = "README.md"
 
 [workspace.dependencies]
 base64ct = "=1.6.0"
