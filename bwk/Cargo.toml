@@ -7,6 +7,7 @@ license-file.workspace = true
 edition.workspace = true
 authors.workspace = true
 repository.workspace = true
+exclude = ["tests/**"]
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
