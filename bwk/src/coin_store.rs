@@ -11,13 +11,14 @@ use std::{
 use crate::{
     account::{
         AddrAccount, AddressStatus, CoinState, CoinStatus, Notification, RustAddress, RustCoin,
+        Transaction,
     },
     address_store::{AddressEntry, AddressStore, AddressTip},
     coin,
     config::Config,
     derivator::Derivator,
     label_store::{LabelKey, LabelStore},
-    tx_store::TxStore,
+    tx_store::{InputMetadata, OutputMetadata, TxStore},
 };
 
 #[derive(Debug)]
@@ -506,10 +507,69 @@ impl CoinStore {
             }
         });
 
+        self.populate_tx_metadata();
+
         // FIXME: update statuses of those w/ CoinStatus::BeeingSpent
 
         if let Err(e) = self.notification.send(Notification::CoinUpdate) {
             log::error!("CoinStore::generate() fail to send notification: {e:?}");
+        }
+    }
+
+    pub fn populate_tx_metadata(&mut self) {
+        let unpopulated = self.tx_store.unpopulated_metadata();
+        for txid in unpopulated {
+            if let Some(tx) = self.tx_store.get_mut(&txid) {
+                // populate inputs
+                let outpoints: Vec<_> = tx
+                    .tx()
+                    .input
+                    .iter()
+                    .enumerate()
+                    .map(|(i, inp)| (i, inp.previous_output))
+                    .collect();
+                for (i, op) in outpoints {
+                    let mut input = InputMetadata {
+                        value: None,
+                        owned: Some(false),
+                    };
+                    if let Some(coin) = self.store.get(&op) {
+                        input.value = Some(coin.amount_sat());
+                        input.owned = Some(true);
+                    }
+                    tx.inputs.insert(i, input);
+                    // FIXME: we do not populate values of non owned inputs as we do not have their
+                    // coin in the store
+                }
+                // populate outputs
+                let outpoints: Vec<_> = tx
+                    .tx()
+                    .output
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| {
+                        (
+                            i,
+                            OutPoint {
+                                txid,
+                                vout: i as u32,
+                            },
+                        )
+                    })
+                    .collect();
+                for (i, op) in outpoints {
+                    let mut output = OutputMetadata { owned: Some(false) };
+                    if self.store.contains_key(&op) {
+                        output.owned = Some(true);
+                    }
+                    tx.outputs.insert(i, output);
+                }
+
+                // FIXME: as inputs values of non owned coins are unknown, we cannot update the tx
+                // fees
+            } else {
+                log::error!("CoinStore.populate_tx_metadata() => tx {txid} missing.");
+            }
         }
     }
 
@@ -592,6 +652,11 @@ impl CoinStore {
         }
         state.coins = coins;
         state
+    }
+
+    /// Returns a list of all historical transactions
+    pub fn tx_history(&self) -> Vec<Transaction> {
+        self.tx_store.transactions()
     }
 
     /// Returns all coins in the store.

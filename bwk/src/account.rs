@@ -122,6 +122,29 @@ impl From<u32> for AddrAccount {
     }
 }
 
+pub struct Transaction {
+    pub height: Option<u64>,
+    pub txid: String,
+    pub inputs: Vec<TxInput>,
+    pub outputs: Vec<TxOutput>,
+    pub fees: u64,
+    pub weight: u64,
+}
+
+pub struct TxInput {
+    pub vin: usize,
+    pub outpoint: String,
+    pub value: u64,
+    pub owned: bool,
+}
+
+pub struct TxOutput {
+    pub vout: usize,
+    pub spk: ScriptBuf,
+    pub value: u64,
+    pub owned: bool,
+}
+
 /// Represents different types of errors that can occur.
 #[derive(Debug)]
 pub enum Notification {
@@ -396,6 +419,11 @@ impl Account {
     /// Returns spendable coins for the account.
     pub fn spendable_coins(&self) -> CoinState {
         self.coin_store.lock().expect("poisoned").spendable_coins()
+    }
+
+    /// Returns a list of all historical transactions
+    pub fn tx_history(&self) -> Vec<Transaction> {
+        self.coin_store.lock().expect("poisoned").tx_history()
     }
 
     /// Calculates the satisfaction size for an input, returning the result
