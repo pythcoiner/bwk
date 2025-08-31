@@ -1,0 +1,22 @@
+[package]
+name = "bwk-electrum"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+doctest = false
+
+[dependencies]
+miniscript = { workspace = true, features = ["serde", "base64"] }
+bitcoin_slices.workspace = true
+log.workspace = true
+openssl = { workspace = true, features = ["vendored"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+hex-conservative.workspace = true
+bwk-backoff.workspace = true
+
+[dev-dependencies]
+hex_lit.workspace = true
+electrsd = {version = "0.29.0", features = []}

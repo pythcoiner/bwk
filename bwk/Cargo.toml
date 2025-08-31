@@ -1,0 +1,26 @@
+[package]
+name = "bwk"
+version = "0.0.1"
+edition = "2021"
+authors = ["pythcoiner"]
+license-file = "../LICENSE"
+repository = "https://github.com/pythcoiner/bwk"
+keywords = ["bitcoin"]
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+doctest = false
+
+[dependencies]
+miniscript.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+dirs.workspace = true
+bwk-electrum.workspace = true
+bip39 = { workspace = true, features = ["serde", "rand"] }
+
+[dev-dependencies]
+electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffered_logs"}
+rand = "0.9.0"
