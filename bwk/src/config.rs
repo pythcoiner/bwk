@@ -8,12 +8,12 @@ use std::{
 
 use bip39::Mnemonic;
 use miniscript::{
-    bitcoin::{self, bip32::DerivationPath, ScriptBuf},
+    bitcoin::{self, ScriptBuf},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::signer::{wpkh, HotSigner};
+use crate::{descriptor::ScriptType, signer::HotSigner};
 
 const CONFIG_FILENAME: &str = "config.json";
 
@@ -78,10 +78,100 @@ pub struct Config {
 }
 
 impl Config {
+    /// Creates a new `Config` instance with the specified descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `mnemonic` - A string representing the mnemonic words.
+    /// * `account` - A string representing the account name.
+    /// * `network` - the bitcoin network for this config.
+    ///
+    /// # Returns
+    ///
+    /// A `Config` instance initialized with the provided descriptor.
+    pub fn new(
+        mnemonic: String,
+        account: String,
+        network: bitcoin::Network,
+        script: ScriptType,
+        dir_name: &'static str,
+        persist: bool,
+    ) -> Config {
+        let signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
+        let descriptor = script.to_descriptor(network, |d| signer.xpub(&d)).unwrap();
+        Config {
+            dir_name,
+            account,
+            electrum_url: None,
+            electrum_port: None,
+            network,
+            look_ahead: 20,
+            mnemonic,
+            descriptor,
+            persist,
+        }
+    }
     /// Allow to disable persistance of data, useful for tests
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
+    }
+
+    /// Returns the Electrum URL as a string.
+    pub fn electrum_url(&self) -> String {
+        self.electrum_url.clone().unwrap_or_default()
+    }
+    /// Returns the Electrum port as a string.
+    pub fn electrum_port(&self) -> String {
+        self.electrum_port
+            .map(|v| format!("{v}"))
+            .unwrap_or_default()
+    }
+    /// Returns the look-ahead value as a string.
+    pub fn look_ahead(&self) -> String {
+        self.look_ahead.to_string()
+    }
+    /// Returns the network as a `Network` instance.
+    pub fn network(&self) -> bitcoin::Network {
+        self.network
+    }
+    /// Sets the Electrum URL.
+    pub fn set_electrum_url(&mut self, url: String) {
+        self.electrum_url = Some(url);
+    }
+    /// Sets the Electrum port from a string.
+    pub fn set_electrum_port(&mut self, port: String) {
+        self.electrum_port = port.parse::<u16>().ok();
+    }
+    /// Sets the look-ahead value from a string.
+    pub fn set_look_ahead(&mut self, look_ahead: String) {
+        if let Ok(la) = look_ahead.parse::<u32>() {
+            self.look_ahead = la;
+        }
+    }
+    /// Sets the network.
+    pub fn set_network(&mut self, network: bitcoin::Network) {
+        self.network = network;
+    }
+    /// Sets the mnemonic.
+    pub fn set_mnemonic(&mut self, mnemonic: String) {
+        self.mnemonic = mnemonic;
+    }
+    /// Sets the account name.
+    pub fn set_account(&mut self, name: String) {
+        self.account = name;
+    }
+    /// Saves the configuration to a file.
+    pub fn to_file(&self) {
+        let mut path = self.path(self.account.clone());
+        maybe_create_dir(&path);
+        path.push(CONFIG_FILENAME);
+
+        log::warn!("Config::to_file() {:?}", path);
+
+        let mut file = File::create(path).unwrap();
+        let content = serde_json::to_string_pretty(&self).unwrap();
+        file.write_all(content.as_bytes()).unwrap();
     }
 
     pub fn dir_name(&self) -> &'static str {
@@ -283,103 +373,4 @@ pub struct Tip {
 /// * `descriptor` - A string representing the descriptor to validate.
 pub fn is_descriptor_valid(descriptor: String) -> bool {
     Descriptor::<DescriptorPublicKey>::from_str(&descriptor).is_ok()
-}
-
-impl Config {
-    /// Creates a new `Config` instance with the specified descriptor.
-    ///
-    /// # Arguments
-    ///
-    /// * `mnemonic` - A string representing the mnemonic words.
-    /// * `account` - A string representing the account name.
-    /// * `network` - the bitcoin network for this config.
-    ///
-    /// # Returns
-    ///
-    /// A `Config` instance initialized with the provided descriptor.
-    pub fn new(
-        mnemonic: String,
-        account: String,
-        network: bitcoin::Network,
-        dir_name: &'static str,
-        persist: bool,
-    ) -> Config {
-        let signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
-        let n_path = match network {
-            bitcoin::Network::Bitcoin => 0,
-            _ => 1,
-        };
-        let a_path = 0;
-        let deriv_path =
-            DerivationPath::from_str(&format!("m/84'/{}'/{}'", n_path, a_path)).unwrap();
-        let oxpub = signer.xpub(&deriv_path);
-        let descriptor = wpkh(oxpub);
-        Config {
-            dir_name,
-            account,
-            electrum_url: None,
-            electrum_port: None,
-            network,
-            look_ahead: 20,
-            mnemonic,
-            descriptor,
-            persist,
-        }
-    }
-    /// Returns the Electrum URL as a string.
-    pub fn electrum_url(&self) -> String {
-        self.electrum_url.clone().unwrap_or_default()
-    }
-    /// Returns the Electrum port as a string.
-    pub fn electrum_port(&self) -> String {
-        self.electrum_port
-            .map(|v| format!("{v}"))
-            .unwrap_or_default()
-    }
-    /// Returns the look-ahead value as a string.
-    pub fn look_ahead(&self) -> String {
-        self.look_ahead.to_string()
-    }
-    /// Returns the network as a `Network` instance.
-    pub fn network(&self) -> bitcoin::Network {
-        self.network
-    }
-    /// Sets the Electrum URL.
-    pub fn set_electrum_url(&mut self, url: String) {
-        self.electrum_url = Some(url);
-    }
-    /// Sets the Electrum port from a string.
-    pub fn set_electrum_port(&mut self, port: String) {
-        self.electrum_port = port.parse::<u16>().ok();
-    }
-    /// Sets the look-ahead value from a string.
-    pub fn set_look_ahead(&mut self, look_ahead: String) {
-        if let Ok(la) = look_ahead.parse::<u32>() {
-            self.look_ahead = la;
-        }
-    }
-    /// Sets the network.
-    pub fn set_network(&mut self, network: bitcoin::Network) {
-        self.network = network;
-    }
-    /// Sets the mnemonic.
-    pub fn set_mnemonic(&mut self, mnemonic: String) {
-        self.mnemonic = mnemonic;
-    }
-    /// Sets the account name.
-    pub fn set_account(&mut self, name: String) {
-        self.account = name;
-    }
-    /// Saves the configuration to a file.
-    pub fn to_file(&self) {
-        let mut path = self.path(self.account.clone());
-        maybe_create_dir(&path);
-        path.push(CONFIG_FILENAME);
-
-        log::warn!("Config::to_file() {:?}", path);
-
-        let mut file = File::create(path).unwrap();
-        let content = serde_json::to_string_pretty(&self).unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-    }
 }

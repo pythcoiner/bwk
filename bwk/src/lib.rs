@@ -4,6 +4,7 @@ pub mod coin;
 pub mod coin_store;
 pub mod config;
 pub mod derivator;
+pub mod descriptor;
 pub mod label_store;
 pub mod log;
 pub mod signer;

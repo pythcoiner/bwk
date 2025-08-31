@@ -1423,7 +1423,8 @@ mod tests {
     use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
     use crate::{
-        signer::{wpkh, HotSigner},
+        descriptor::wpkh,
+        signer::HotSigner,
         test_utils::{funding_tx, setup_logger, spending_tx},
         tx_store::TxStore,
     };

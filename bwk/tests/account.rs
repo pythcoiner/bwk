@@ -1,17 +1,14 @@
 pub mod utils;
-use std::{collections::BTreeMap, str::FromStr, sync::Once, thread::sleep, time::Duration};
+use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
-use bwk::{
-    config::Config,
-    signer::{wpkh, HotSigner},
-    Account,
-};
+use bwk::{config::Config, descriptor::ScriptType, Account};
 use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
+use miniscript::bitcoin::bip32::ChildNumber;
 use utils::{dump_logs, generate, get_block_hash, get_block_height, reorg_chain, send_to_address};
 use {
     bip39::Mnemonic,
-    miniscript::bitcoin::{self, bip32::DerivationPath, Amount, Network},
+    miniscript::bitcoin::{self, Amount, Network},
 };
 
 static INIT: Once = Once::new();
@@ -19,17 +16,13 @@ static INIT: Once = Once::new();
 pub fn setup_logger() {
     INIT.call_once(|| {
         env_logger::builder()
-            // Ensures output is only printed in test mode
             .is_test(true)
             .filter_level(log::LevelFilter::Debug)
             .filter_module("bitcoind", log::LevelFilter::Info)
             .filter_module("bitcoincore_rpc", log::LevelFilter::Info)
-            .filter_module("cpp_joinstr::account", log::LevelFilter::Debug)
-            .filter_module("joinstr::electrum", log::LevelFilter::Debug)
-            .filter_module(
-                "simple_electrum_client::raw_client",
-                log::LevelFilter::Debug,
-            )
+            .filter_module("bwk::account", log::LevelFilter::Debug)
+            .filter_module("bwk-electrum::electrum", log::LevelFilter::Debug)
+            .filter_module("bwk-electrum::raw_client", log::LevelFilter::Debug)
             .init();
     });
 }
@@ -71,18 +64,14 @@ fn simple_wallet() {
     let look_ahead = 20;
 
     let mnemonic = Mnemonic::generate(12).unwrap();
-    let signer =
-        HotSigner::new_from_mnemonics(bitcoin::Network::Regtest, &mnemonic.to_string()).unwrap();
-    let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1'").unwrap());
-    let descriptor = wpkh(xpub);
     let mut config = Config::new(
         mnemonic.to_string(),
         "account".to_string(),
         bitcoin::Network::Regtest,
+        ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
         ".bwk",
         false,
     );
-    config.descriptor = descriptor;
     config.network = Network::Regtest;
     config.look_ahead = look_ahead;
     config.set_electrum_url(url);
@@ -191,18 +180,14 @@ fn simple_reorg() {
     let look_ahead = 20;
 
     let mnemonic = Mnemonic::generate(12).unwrap();
-    let signer =
-        HotSigner::new_from_mnemonics(bitcoin::Network::Regtest, &mnemonic.to_string()).unwrap();
-    let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1'").unwrap());
-    let descriptor = wpkh(xpub);
     let mut config = Config::new(
         mnemonic.to_string(),
         "account".to_string(),
         bitcoin::Network::Regtest,
+        ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
         ".bwk",
         false,
     );
-    config.descriptor = descriptor;
     config.look_ahead = look_ahead;
     config.set_electrum_url(url);
     config.set_electrum_port(port.to_string());
@@ -289,7 +274,6 @@ fn simple_reorg() {
     let coins = account.coins();
     // there is still 2 coins
     assert_eq!(coins.len(), 2);
-
 }
 
 fn test_conf_unconf() {

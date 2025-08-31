@@ -19,7 +19,8 @@ use miniscript::bitcoin::{self, bip32};
 
 use crate::{
     config,
-    signer::{wpkh, HotSigner, JsonSigner, Signer, SignerNotif},
+    descriptor::wpkh,
+    signer::{HotSigner, JsonSigner, Signer, SignerNotif},
 };
 
 #[derive(Debug, Clone)]

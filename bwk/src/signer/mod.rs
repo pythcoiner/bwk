@@ -180,21 +180,6 @@ pub struct JsonSigner {
     network: bitcoin::Network,
 }
 
-/// Creates a WPKH descriptor from the given extended public key (OXpub).
-///
-/// # Arguments
-/// * `xpub` - An instance of `OXpub` representing the extended public key.
-///
-/// # Returns
-/// A `Descriptor<DescriptorPublicKey>` that represents the wpkh descriptor.
-pub fn wpkh(xpub: OXpub) -> Descriptor<DescriptorPublicKey> {
-    let descr_str = format!(
-        "wpkh([{}/{}]{}/<0;1>/*)",
-        xpub.origin.0, xpub.origin.1, xpub.xkey
-    );
-    Descriptor::<DescriptorPublicKey>::from_str(&descr_str).expect("hardcoded descriptor")
-}
-
 /// A struct that represents an extended private key.
 ///
 /// This struct contains the origin fingerprint and derivation path
@@ -546,7 +531,10 @@ pub fn account_path(path: &DerivationPath) -> Result<(AddrAccount, u32), Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{random_output, setup_logger, txid};
+    use crate::{
+        descriptor::wpkh,
+        test_utils::{random_output, setup_logger, txid},
+    };
     use bitcoin::Network;
     use miniscript::bitcoin::{absolute::Height, Amount, ScriptBuf, TxIn, Witness};
     use std::sync::mpsc;
