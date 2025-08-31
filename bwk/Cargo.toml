@@ -23,6 +23,7 @@ env_logger.workspace = true
 dirs.workspace = true
 bwk-electrum.workspace = true
 bip39 = { workspace = true, features = ["serde", "rand"] }
+bwk-backoff.workspace = true
 
 [dev-dependencies]
 electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffered_logs"}

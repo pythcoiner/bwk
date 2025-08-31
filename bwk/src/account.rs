@@ -6,9 +6,9 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 
+use bwk_backoff::Backoff;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
 use miniscript::{
     bitcoin::{self, absolute, EcdsaSighashType, OutPoint, ScriptBuf, TxOut},
@@ -1285,6 +1285,7 @@ fn listen_txs<T: From<TxListenerNotif>>(
         }
     }
 
+    let mut backoff = Backoff::new_ms(20);
     loop {
         // stop request from consumer side
         if stop_request.load(Ordering::Relaxed) {
@@ -1439,14 +1440,13 @@ fn listen_txs<T: From<TxListenerNotif>>(
         if received {
             continue;
         }
-        // FIXME: 20 ms is likely WAY too much
-        thread::sleep(Duration::from_millis(20));
+        backoff.snooze();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::mpsc::TryRecvError};
+    use std::{str::FromStr, sync::mpsc::TryRecvError, time::Duration};
 
     use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
