@@ -70,10 +70,6 @@ pub struct Config {
     pub electrum_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrum_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nostr_relay: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nostr_back: Option<u64>,
     pub network: bitcoin::Network,
     pub look_ahead: u32,
     pub mnemonic: String,
@@ -323,8 +319,6 @@ impl Config {
             account,
             electrum_url: None,
             electrum_port: None,
-            nostr_relay: None,
-            nostr_back: None,
             network,
             look_ahead: 20,
             mnemonic,
@@ -342,14 +336,6 @@ impl Config {
             .map(|v| format!("{v}"))
             .unwrap_or_default()
     }
-    /// Returns the Nostr relay URL as a string.
-    pub fn nostr_url(&self) -> String {
-        self.nostr_relay.clone().unwrap_or_default()
-    }
-    /// Returns the Nostr back value as a string.
-    pub fn nostr_back(&self) -> String {
-        self.nostr_back.map(|v| format!("{v}")).unwrap_or_default()
-    }
     /// Returns the look-ahead value as a string.
     pub fn look_ahead(&self) -> String {
         self.look_ahead.to_string()
@@ -365,14 +351,6 @@ impl Config {
     /// Sets the Electrum port from a string.
     pub fn set_electrum_port(&mut self, port: String) {
         self.electrum_port = port.parse::<u16>().ok();
-    }
-    /// Sets the Nostr relay URL.
-    pub fn set_nostr_relay(&mut self, relay: String) {
-        self.nostr_relay = Some(relay);
-    }
-    /// Sets the Nostr back value from a string.
-    pub fn set_nostr_back(&mut self, back: String) {
-        self.nostr_back = back.parse::<u64>().ok();
     }
     /// Sets the look-ahead value from a string.
     pub fn set_look_ahead(&mut self, look_ahead: String) {

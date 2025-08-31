@@ -129,7 +129,6 @@ pub enum Notification {
     AddressTipChanged,
     CoinUpdate,
     InvalidElectrumConfig,
-    InvalidNostrConfig,
     InvalidLookAhead,
     Stopped,
     Error(Error),
@@ -1080,7 +1079,7 @@ impl Account {
             self.config.to_file();
         } else {
             self.sender
-                .send(Notification::InvalidNostrConfig)
+                .send(Notification::InvalidLookAhead)
                 .expect("cannot fail");
         }
     }
