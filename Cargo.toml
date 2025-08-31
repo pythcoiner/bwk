@@ -7,6 +7,13 @@ members = [
     "backoff"
 ]
 
+[workspace.package]
+edition = "2021"
+authors = ["pythcoiner"]
+license-file = "LICENSE"
+repository = "https://github.com/pythcoiner/bwk"
+keywords = ["bitcoin"]
+
 [workspace.dependencies]
 base64ct = "=1.6.0"
 url = "=2.5.2"

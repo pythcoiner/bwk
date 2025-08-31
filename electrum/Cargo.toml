@@ -1,7 +1,12 @@
 [package]
 name = "bwk-electrum"
 version = "0.0.1"
-edition = "2021"
+readme = "README.md"
+description = "Electrum client used by bwk"
+license-file.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]

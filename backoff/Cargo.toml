@@ -1,7 +1,12 @@
 [package]
 name = "bwk-backoff"
 version = "0.0.1"
-edition = "2021"
+readme = "README.md"
+description = "A simple backoff feature used in bwk"
+license-file.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
 rand.workspace = true

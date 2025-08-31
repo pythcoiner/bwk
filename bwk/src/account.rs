@@ -173,7 +173,7 @@ pub enum TxListenerNotif {
 pub struct Account {
     coin_store: Arc<Mutex<CoinStore>>,
     label_store: Arc<Mutex<LabelStore>>,
-    receiver: mpsc::Receiver<Notification>,
+    receiver: Option<mpsc::Receiver<Notification>>,
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,
     config: Config,
@@ -239,7 +239,7 @@ impl Account {
             label_store,
             tx_listener: None,
             electrum_stop: None,
-            receiver,
+            receiver: Some(receiver),
             sender,
             config,
             signing_manager,
@@ -297,6 +297,10 @@ impl Account {
         });
         self.tx_listener = Some(poller);
         (sender, stop)
+    }
+
+    pub fn receiver(&mut self) -> Option<mpsc::Receiver<Notification>> {
+        self.receiver.take()
     }
 
     /// Returns the derivator associated with the account.

@@ -1,11 +1,12 @@
 [package]
 name = "bwk"
 version = "0.0.1"
-edition = "2021"
-authors = ["pythcoiner"]
-license-file = "../LICENSE"
-repository = "https://github.com/pythcoiner/bwk"
-keywords = ["bitcoin"]
+readme = "README.md"
+description = "Bitcoin wallet kit"
+license-file.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
