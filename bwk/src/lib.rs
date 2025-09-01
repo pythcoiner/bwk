@@ -14,3 +14,4 @@ pub mod test_utils;
 pub mod tx_store;
 
 pub use account::Account;
+pub use config::Config;
