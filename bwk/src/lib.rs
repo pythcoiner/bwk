@@ -15,3 +15,4 @@ pub mod tx_store;
 
 pub use account::Account;
 pub use config::Config;
+pub use miniscript;
