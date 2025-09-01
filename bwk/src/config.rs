@@ -6,7 +6,6 @@ use std::{
     str::FromStr,
 };
 
-use bip39::Mnemonic;
 use miniscript::{
     bitcoin::{self, ScriptBuf},
     Descriptor, DescriptorPublicKey,
@@ -177,7 +176,7 @@ impl Config {
     }
     /// Saves the configuration to a file.
     pub fn to_file(&self) {
-        let mut path = self.path(self.account.clone());
+        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         maybe_create_dir(&path);
         path.push(CONFIG_FILENAME);
 
@@ -203,9 +202,9 @@ impl Config {
     /// A vector of strings representing the account names of the configurations
     /// found in the data directory.
     /// Lists all configuration directories in the data directory.
-    pub fn list_configs(&self) -> Vec<String> {
-        let mut path = self.data_dir.clone();
-        path.push(self.dir_name);
+    pub fn list_configs(data_dir: PathBuf, dir_name: &'static str) -> Vec<String> {
+        let mut path = data_dir.clone();
+        path.push(dir_name);
         let mut out = vec![];
         if let Ok(folders) = fs::read_dir(path) {
             folders.for_each(|account| {
@@ -213,7 +212,8 @@ impl Config {
                     if let Ok(md) = entry.metadata() {
                         if md.is_dir() {
                             let acc_name = entry.file_name().to_str().unwrap().to_string();
-                            let parsed = self.from_file(acc_name.clone());
+                            let path = Self::path(data_dir.clone(), dir_name, acc_name.clone());
+                            let parsed = Self::from_file(path);
                             if !parsed.account.is_empty() {
                                 out.push(acc_name);
                             }
@@ -236,8 +236,8 @@ impl Config {
     ///
     /// A boolean value indicating whether the configuration file exists.
     /// Checks if a configuration file exists for the given account.
-    pub fn config_exists(&self, account: String) -> bool {
-        let mut path = self.path(account.clone());
+    pub fn config_exists(data_dir: PathBuf, dir_name: &'static str, account: String) -> bool {
+        let mut path = Self::path(data_dir, dir_name, account.clone());
         path.push(CONFIG_FILENAME);
         path.exists()
     }
@@ -250,62 +250,48 @@ impl Config {
     /// # Returns
     ///
     /// A `PathBuf` representing the path to the configuration directory.
-    pub fn path(&self, account: String) -> PathBuf {
-        // let mut dir = datadir(self.dir_name);
-        let mut dir = self.data_dir.clone();
-        dir.push(self.dir_name);
+    pub fn path(data_dir: PathBuf, dir_name: &'static str, account: String) -> PathBuf {
+        let mut dir = data_dir;
+        dir.push(dir_name);
         dir.push(account);
         dir
     }
 
     /// Creates a `Config` instance from a configuration file.
-    ///
-    /// # Arguments
-    ///
-    /// * `account` - A string representing the account name.
-    pub fn from_file(&self, account: String) -> Self {
-        let mut path = self.path(account.clone());
+    pub fn from_file(mut path: PathBuf) -> Self {
         path.push(CONFIG_FILENAME);
 
         let mut file = File::open(path).unwrap();
         let mut content = String::new();
         let _ = file.read_to_string(&mut content);
-        let mut conf: Config = serde_json::from_str(&content).unwrap();
-        if let Some(mnemo) = conf.mnemonic.clone() {
-            let mnemo = Mnemonic::from_str(&mnemo);
-            if mnemo.is_ok() {
-                conf.account = account;
-            }
-        } else {
-            conf.account = account;
-        }
+        let conf: Config = serde_json::from_str(&content).unwrap();
         conf
     }
 
     /// Returns the path to the transactions file for the current account.
     pub fn transactions_path(&self) -> PathBuf {
-        let mut path = self.path(self.account.clone());
+        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         path.push("transactions.json");
         path
     }
 
     /// Returns the path to the statuses file for the current account.
     pub fn statuses_path(&self) -> PathBuf {
-        let mut path = self.path(self.account.clone());
+        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         path.push("statuses.json");
         path
     }
 
     /// Returns the path to the tip file for the current account.
     pub fn tip_path(&self) -> PathBuf {
-        let mut path = self.path(self.account.clone());
+        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         path.push("tip.json");
         path
     }
 
     /// Returns the path to the labels file for the current account.
     pub fn labels_path(&self) -> PathBuf {
-        let mut path = self.path(self.account.clone());
+        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         path.push("labels.json");
         path
     }
