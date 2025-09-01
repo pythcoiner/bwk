@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    path::PathBuf,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -254,7 +255,7 @@ impl Account {
         )));
         coin_store.lock().expect("poisoned").generate();
         let mut signing_manager =
-            SigningManager::new(config.dir_name()).enable_persist(config.persist);
+            SigningManager::new(PathBuf::new(), config.dir_name()).enable_persist(config.persist);
         signing_manager.new_hot_signer_from_mnemonic(config.network(), config.mnemonic.to_string());
         let mut account = Account {
             coin_store,

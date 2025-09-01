@@ -22,6 +22,7 @@ const CONFIG_FILENAME: &str = "config.json";
 /// On Linux, it returns the path to the `.qoinstr` directory in the user's home directory.
 /// On other operating systems, it returns the path to the `Qoinstr` directory in the user's config directory.
 /// The directory is created if it does not exist.
+/// NOTE: do NOT use on mobile
 pub fn datadir(dir_name: &str) -> PathBuf {
     #[cfg(target_os = "linux")]
     let dir = {
@@ -63,6 +64,8 @@ fn maybe_create_dir(dir: &PathBuf) {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(skip)]
+    data_dir: PathBuf,
+    #[serde(skip)]
     dir_name: &'static str,
     #[serde(skip)]
     pub account: String,
@@ -94,12 +97,14 @@ impl Config {
         account: String,
         network: bitcoin::Network,
         script: ScriptType,
+        data_dir: PathBuf,
         dir_name: &'static str,
         persist: bool,
     ) -> Config {
         let signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
         let descriptor = script.to_descriptor(network, |d| signer.xpub(&d)).unwrap();
         Config {
+            data_dir,
             dir_name,
             account,
             electrum_url: None,
@@ -177,6 +182,11 @@ impl Config {
     pub fn dir_name(&self) -> &'static str {
         self.dir_name
     }
+
+    pub fn data_dir(&self) -> PathBuf {
+        self.data_dir.clone()
+    }
+
     /// Lists all configuration directories in the data directory.
     ///
     /// # Returns
@@ -185,7 +195,8 @@ impl Config {
     /// found in the data directory.
     /// Lists all configuration directories in the data directory.
     pub fn list_configs(&self) -> Vec<String> {
-        let path = datadir(self.dir_name);
+        let mut path = self.data_dir.clone();
+        path.push(self.dir_name);
         let mut out = vec![];
         if let Ok(folders) = fs::read_dir(path) {
             folders.for_each(|account| {
@@ -231,7 +242,9 @@ impl Config {
     ///
     /// A `PathBuf` representing the path to the configuration directory.
     pub fn path(&self, account: String) -> PathBuf {
-        let mut dir = datadir(self.dir_name);
+        // let mut dir = datadir(self.dir_name);
+        let mut dir = self.data_dir.clone();
+        dir.push(self.dir_name);
         dir.push(account);
         dir
     }

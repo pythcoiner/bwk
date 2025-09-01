@@ -1,5 +1,5 @@
 pub mod utils;
-use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
 use bwk::{config::Config, descriptor::ScriptType, Account};
@@ -69,6 +69,7 @@ fn simple_wallet() {
         "account".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+        PathBuf::new(),
         ".bwk",
         false,
     );
@@ -185,6 +186,7 @@ fn simple_reorg() {
         "account".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+        PathBuf::new(),
         ".bwk",
         false,
     );

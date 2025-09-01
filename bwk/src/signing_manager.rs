@@ -18,7 +18,6 @@ use std::{
 use miniscript::bitcoin::{self, bip32};
 
 use crate::{
-    config,
     descriptor::wpkh,
     signer::{HotSigner, JsonSigner, Signer, SignerNotif},
 };
@@ -31,6 +30,7 @@ pub enum Error {
 /// A manager for handling hot signers and their notifications.
 #[derive(Debug)]
 pub struct SigningManager {
+    data_dir: PathBuf,
     dir_name: &'static str,
     receiver: mpsc::Receiver<SignerNotif>,
     sender: mpsc::Sender<SignerNotif>,
@@ -41,9 +41,10 @@ pub struct SigningManager {
 }
 
 impl SigningManager {
-    pub fn new(dir_name: &'static str) -> Self {
+    pub fn new(data_dir: PathBuf, dir_name: &'static str) -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
+            data_dir,
             dir_name,
             receiver,
             sender,
@@ -53,14 +54,15 @@ impl SigningManager {
         }
     }
     /// Returns the path to the signers' data directory.
-    pub fn path(dir_name: &'static str) -> PathBuf {
-        let mut path = config::datadir(dir_name);
+    pub fn path(data_dir: PathBuf, dir_name: &'static str) -> PathBuf {
+        let mut path = data_dir;
+        path.push(dir_name);
         path.push(".signers");
         path
     }
     /// Creates a `SigningManager` instance from a file.
-    pub fn from_file(dir_name: &'static str) -> Self {
-        if let Ok(mut file) = File::open(Self::path(dir_name)) {
+    pub fn from_file(data_dir: PathBuf, dir_name: &'static str) -> Self {
+        if let Ok(mut file) = File::open(Self::path(data_dir.clone(), dir_name)) {
             let mut content = String::new();
             let _ = file.read_to_string(&mut content);
             let json_signers: Result<Vec<JsonSigner>, _> = serde_json::from_str(&content);
@@ -72,7 +74,7 @@ impl SigningManager {
                         (signer.fingerprint(), signer)
                     })
                     .collect();
-                let mut manager = SigningManager::new(dir_name);
+                let mut manager = SigningManager::new(data_dir, dir_name);
                 manager.hot_signers = hot_signers;
                 let sender = manager.sender.clone();
                 for signer in manager.hot_signers.values_mut() {
@@ -80,10 +82,10 @@ impl SigningManager {
                 }
                 manager
             } else {
-                SigningManager::new(dir_name)
+                SigningManager::new(data_dir, dir_name)
             }
         } else {
-            SigningManager::new(dir_name)
+            SigningManager::new(data_dir, dir_name)
         }
     }
 
@@ -98,7 +100,7 @@ impl SigningManager {
         if !self.persist {
             return;
         }
-        match File::create(Self::path(self.dir_name)) {
+        match File::create(Self::path(self.data_dir.clone(), self.dir_name)) {
             Ok(mut file) => {
                 let content: Vec<_> = self
                     .hot_signers
@@ -187,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_manager_hot_signer() {
-        let mut manager = SigningManager::new(".bwk");
+        let mut manager = SigningManager::new(PathBuf::new(), ".bwk");
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
         manager.new_hot_signer_from_mnemonic(bitcoin::Network::Regtest, mnemonic);
         if let SignerNotif::Info(fg, _info) = manager.poll().unwrap() {
