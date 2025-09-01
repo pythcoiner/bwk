@@ -65,14 +65,15 @@ fn simple_wallet() {
 
     let mnemonic = Mnemonic::generate(12).unwrap();
     let mut config = Config::new(
-        mnemonic.to_string(),
+        Some(mnemonic.to_string()),
         "account".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
         PathBuf::new(),
         ".bwk",
         false,
-    );
+    )
+    .unwrap();
     config.network = Network::Regtest;
     config.look_ahead = look_ahead;
     config.set_electrum_url(url);
@@ -182,14 +183,15 @@ fn simple_reorg() {
 
     let mnemonic = Mnemonic::generate(12).unwrap();
     let mut config = Config::new(
-        mnemonic.to_string(),
+        Some(mnemonic.to_string()),
         "account".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
         PathBuf::new(),
         ".bwk",
         false,
-    );
+    )
+    .unwrap();
     config.look_ahead = look_ahead;
     config.set_electrum_url(url);
     config.set_electrum_port(port.to_string());

@@ -75,7 +75,7 @@ pub struct Config {
     pub electrum_port: Option<u16>,
     pub network: bitcoin::Network,
     pub look_ahead: u32,
-    pub mnemonic: String,
+    pub mnemonic: Option<String>,
     pub descriptor: Descriptor<DescriptorPublicKey>,
     pub persist: bool,
 }
@@ -93,17 +93,26 @@ impl Config {
     ///
     /// A `Config` instance initialized with the provided descriptor.
     pub fn new(
-        mnemonic: String,
+        mnemonic: Option<String>,
         account: String,
         network: bitcoin::Network,
         script: ScriptType,
         data_dir: PathBuf,
         dir_name: &'static str,
         persist: bool,
-    ) -> Config {
-        let signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
-        let descriptor = script.to_descriptor(network, |d| signer.xpub(&d)).unwrap();
-        Config {
+    ) -> Option<Config> {
+        let descriptor = match script {
+            ScriptType::Segwit(_) | ScriptType::Taproot(_) => {
+                if let Some(mnemo) = &mnemonic {
+                    let signer = HotSigner::new_from_mnemonics(network, mnemo).unwrap();
+                    script.to_descriptor(network, |d| signer.xpub(&d)).unwrap()
+                } else {
+                    return None;
+                }
+            }
+            ScriptType::Descriptor(descriptor) => descriptor,
+        };
+        Some(Config {
             data_dir,
             dir_name,
             account,
@@ -114,7 +123,7 @@ impl Config {
             mnemonic,
             descriptor,
             persist,
-        }
+        })
     }
     /// Allow to disable persistance of data, useful for tests
     pub fn enable_persist(mut self, persist: bool) -> Self {
@@ -160,7 +169,7 @@ impl Config {
     }
     /// Sets the mnemonic.
     pub fn set_mnemonic(&mut self, mnemonic: String) {
-        self.mnemonic = mnemonic;
+        self.mnemonic = Some(mnemonic);
     }
     /// Sets the account name.
     pub fn set_account(&mut self, name: String) {
@@ -262,8 +271,12 @@ impl Config {
         let mut content = String::new();
         let _ = file.read_to_string(&mut content);
         let mut conf: Config = serde_json::from_str(&content).unwrap();
-        let mnemo = Mnemonic::from_str(&conf.mnemonic);
-        if mnemo.is_ok() {
+        if let Some(mnemo) = conf.mnemonic.clone() {
+            let mnemo = Mnemonic::from_str(&mnemo);
+            if mnemo.is_ok() {
+                conf.account = account;
+            }
+        } else {
             conf.account = account;
         }
         conf

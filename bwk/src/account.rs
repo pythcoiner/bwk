@@ -256,7 +256,9 @@ impl Account {
         coin_store.lock().expect("poisoned").generate();
         let mut signing_manager =
             SigningManager::new(PathBuf::new(), config.dir_name()).enable_persist(config.persist);
-        signing_manager.new_hot_signer_from_mnemonic(config.network(), config.mnemonic.to_string());
+        if let Some(mnemo) = config.mnemonic.clone() {
+            signing_manager.new_hot_signer_from_mnemonic(config.network(), mnemo);
+        }
         let mut account = Account {
             coin_store,
             label_store,
