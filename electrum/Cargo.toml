@@ -1,6 +1,6 @@
 [package]
 name = "bwk-electrum"
-version = "0.0.3"
+version = "0.0.4"
 readme.workspace = true
 description = "Electrum client used by bwk"
 documentation = "https://docs.rs/bwk-electrum"
