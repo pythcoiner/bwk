@@ -8,15 +8,14 @@ use miniscript::bitcoin::{
 use miniscript::serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 
-use miniscript::bitcoin::io;
 macro_rules! impl_consensus_encoding {
     ($thing:ident, $($field:ident),+) => (
         impl Encodable for $thing {
             #[inline]
-            fn consensus_encode<S: io::Write + ?Sized>(
+            fn consensus_encode<S: miniscript::bitcoin::io::Write + ?Sized>(
                 &self,
                 s: &mut S,
-            ) -> Result<usize, io::Error> {
+            ) -> Result<usize, miniscript::bitcoin::io::Error> {
                 let mut len = 0;
                 $(len += self.$field.consensus_encode(s)?;)+
                 Ok(len)
@@ -25,7 +24,7 @@ macro_rules! impl_consensus_encoding {
 
         impl Decodable for $thing {
             #[inline]
-            fn consensus_decode<D: io::BufRead + ?Sized>(
+            fn consensus_decode<D: miniscript::bitcoin::io::Read + ?Sized>(
                 d: &mut D,
             ) -> Result<$thing, miniscript::bitcoin::consensus::encode::Error> {
                 Ok($thing {
