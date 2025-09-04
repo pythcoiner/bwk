@@ -66,7 +66,6 @@ pub struct Config {
     data_dir: PathBuf,
     #[serde(skip)]
     dir_name: &'static str,
-    #[serde(skip)]
     pub account: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrum_url: Option<String>,
@@ -385,4 +384,36 @@ pub struct Tip {
 /// * `descriptor` - A string representing the descriptor to validate.
 pub fn is_descriptor_valid(descriptor: String) -> bool {
     Descriptor::<DescriptorPublicKey>::from_str(&descriptor).is_ok()
+}
+
+#[cfg(test)]
+pub mod tests {
+    use miniscript::bitcoin::bip32::ChildNumber;
+
+    use super::*;
+
+    #[test]
+    fn test_persist() {
+        let temp = temp_dir::TempDir::new().unwrap();
+        let path = temp.child("storage");
+        let mnemonic = bip39::Mnemonic::generate(12).unwrap();
+        let dir_name = "wallet";
+        let cfg = Config::new(
+            Some(mnemonic.to_string()),
+            "my_account".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path.clone(),
+            dir_name,
+            true,
+        )
+        .unwrap();
+        cfg.to_file();
+        let mut path = path.to_path_buf();
+        path.push(dir_name);
+        path.push("my_account");
+        let cfg2 = Config::from_file(path);
+        assert_eq!(cfg.account, cfg2.account);
+        assert_eq!(cfg2.account, "my_account")
+    }
 }
