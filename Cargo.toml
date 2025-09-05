@@ -34,6 +34,7 @@ rand = "0.9.1"
 serde = "1.0.218"
 serde_json = "1.0.128"
 env_logger = "0.11.6"
+temp-dir = "0.1.16"
 
 bwk-electrum = { path = "electrum", version = "0.0" }
 bwk-backoff = { path = "backoff" , version = "0.0"}

@@ -1,5 +1,5 @@
 pub mod utils;
-use std::{collections::BTreeMap, path::PathBuf, sync::Once, thread::sleep, time::Duration};
+use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
 use bwk::{

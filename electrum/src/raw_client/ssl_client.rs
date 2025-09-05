@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "android")]
+use {openssl::x509::X509, std::fs};
+
 type SslStream = Arc<Mutex<ssl::SslStream<net::TcpStream>>>;
 
 #[derive(Debug)]
@@ -77,6 +80,28 @@ impl SslClient {
     pub fn try_connect(&mut self) -> Result<(), Error> {
         let url = format!("{}:{}", self.url, self.port);
         let mut ssl = SslConnector::builder(SslMethod::tls()).unwrap();
+
+        #[cfg(target_os = "android")]
+        {
+            // NOTE: as we use a vendored openssl, on android it will look for cert
+            // at path of the build host, so we need to manually load certificates
+
+            // /system/etc/security/cacerts contains one file per CA (hash.0)
+            let ca_dir = std::path::Path::new("/system/etc/security/cacerts");
+            if ca_dir.is_dir() {
+                for entry in fs::read_dir(ca_dir).map_err(Error::SslConnector)? {
+                    let path = entry.map_err(Error::SslConnector)?.path();
+                    let cert = fs::read(&path).map_err(Error::SslConnector)?;
+                    let x509 = X509::from_pem(&cert)
+                        .or_else(|_| X509::from_der(&cert)) // some are DER
+                        .map_err(|_| Error::SslErrorStack)?;
+                    ssl.cert_store_mut()
+                        .add_cert(x509)
+                        .map_err(|_| Error::SslErrorStack)?;
+                }
+            }
+        }
+
         // do not verify for self-signed certs
         if !self.verif_certificate {
             ssl.set_verify(SslVerifyMode::NONE);

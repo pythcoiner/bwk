@@ -22,6 +22,7 @@ pub enum Error {
     SslPeek,
     Mutex,
     SslConnector(std::io::Error),
+    SslErrorStack,
     AlreadyConnected,
     NotConnected,
     NotConfigured,
