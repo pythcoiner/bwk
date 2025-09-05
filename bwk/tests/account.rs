@@ -2,9 +2,14 @@ pub mod utils;
 use std::{collections::BTreeMap, path::PathBuf, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
-use bwk::{config::Config, descriptor::ScriptType, Account};
+use bwk::{
+    config::{maybe_create_dir, Config},
+    descriptor::ScriptType,
+    Account,
+};
 use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
 use miniscript::bitcoin::bip32::ChildNumber;
+use temp_dir::TempDir;
 use utils::{dump_logs, generate, get_block_hash, get_block_height, reorg_chain, send_to_address};
 use {
     bip39::Mnemonic,
@@ -63,15 +68,21 @@ fn simple_wallet() {
 
     let look_ahead = 20;
 
+    let dir = TempDir::new().unwrap();
+    let mut path = dir.path().to_path_buf();
+    path.push(".bwk");
+    maybe_create_dir(&path);
+    let path = path.parent().unwrap().to_path_buf();
+
     let mnemonic = Mnemonic::generate(12).unwrap();
     let mut config = Config::new(
         Some(mnemonic.to_string()),
-        "account".to_string(),
+        "account_dir".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
-        PathBuf::new(),
+        path,
         ".bwk",
-        false,
+        true,
     )
     .unwrap();
     config.network = Network::Regtest;
@@ -181,15 +192,21 @@ fn simple_reorg() {
 
     let look_ahead = 20;
 
+    let dir = TempDir::new().unwrap();
+    let mut path = dir.path().to_path_buf();
+    path.push(".bwk");
+    maybe_create_dir(&path);
+    let path = path.parent().unwrap().to_path_buf();
+
     let mnemonic = Mnemonic::generate(12).unwrap();
     let mut config = Config::new(
         Some(mnemonic.to_string()),
         "account".to_string(),
         bitcoin::Network::Regtest,
         ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
-        PathBuf::new(),
+        path,
         ".bwk",
-        false,
+        true,
     )
     .unwrap();
     config.look_ahead = look_ahead;

@@ -43,7 +43,7 @@ pub fn datadir(dir_name: &str) -> PathBuf {
 }
 
 /// Creates a directory if it does not exist.
-fn maybe_create_dir(dir: &PathBuf) {
+pub fn maybe_create_dir(dir: &PathBuf) {
     if !dir.exists() {
         #[cfg(unix)]
         {

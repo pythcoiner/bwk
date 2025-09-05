@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{account, coin_store::Update};
+use crate::{account, coin_store::Update, config::maybe_create_dir};
 
 #[derive(Debug)]
 /// A structure to store Bitcoin transactions indexed by their transaction IDs.
@@ -151,6 +151,8 @@ impl TxStore {
             return;
         }
         if let Some(path) = &self.path {
+            let parent = path.parent().expect("has a parent").to_path_buf();
+            maybe_create_dir(&parent);
             let mut file = File::create(path.clone()).unwrap();
             let content = serde_json::to_string_pretty(&self.store).unwrap();
             let _ = file.write(content.as_bytes());
