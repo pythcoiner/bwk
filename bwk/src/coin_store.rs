@@ -517,7 +517,7 @@ impl CoinStore {
     }
 
     pub fn populate_tx_metadata(&mut self) {
-        let unpopulated = self.tx_store.unpopulated_metadata();
+        let unpopulated = self.tx_store.take_unpopulated_metadata();
         for txid in unpopulated {
             if let Some(tx) = self.tx_store.get_mut(&txid) {
                 // populate inputs
@@ -534,8 +534,14 @@ impl CoinStore {
                         owned: Some(false),
                     };
                     if let Some(coin) = self.store.get(&op) {
-                        input.value = Some(coin.amount_sat());
-                        input.owned = Some(true);
+                        let spk = coin.address.clone().assume_checked().script_pubkey();
+                        let owned = self.address_store.contains_spk(&spk);
+                        input.owned = Some(owned);
+                        input.value = if owned {
+                            Some(coin.amount_sat())
+                        } else {
+                            Some(0)
+                        };
                     }
                     tx.inputs.insert(i, input);
                     // FIXME: we do not populate values of non owned inputs as we do not have their

@@ -343,6 +343,10 @@ impl AddressStore {
         self.store = serde_json::from_value(value)?;
         Ok(())
     }
+
+    pub fn contains_spk(&self, spk: &ScriptBuf) -> bool {
+        self.store.contains_key(spk)
+    }
 }
 
 /// Represents an entry in the address store.

@@ -123,6 +123,7 @@ impl From<u32> for AddrAccount {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Transaction {
     pub height: Option<u64>,
     pub txid: String,
@@ -132,6 +133,7 @@ pub struct Transaction {
     pub weight: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct TxInput {
     pub vin: usize,
     pub outpoint: String,
@@ -139,6 +141,7 @@ pub struct TxInput {
     pub owned: bool,
 }
 
+#[derive(Debug, Clone)]
 pub struct TxOutput {
     pub vout: usize,
     pub spk: ScriptBuf,

@@ -37,9 +37,9 @@ impl TxStore {
         self.store.values().map(|tx| tx.into()).collect()
     }
 
-    pub fn unpopulated_metadata(&mut self) -> BTreeSet<Txid> {
+    pub fn take_unpopulated_metadata(&mut self) -> BTreeSet<Txid> {
         let unpopulated = self.unpopulated_metadata.clone();
-        self.unpopulated_metadata = BTreeSet::new();
+        self.unpopulated_metadata.clear();
         unpopulated
     }
 
