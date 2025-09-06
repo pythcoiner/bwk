@@ -188,6 +188,7 @@ pub enum Error {
 #[derive(Debug, Clone)]
 pub enum TxListenerNotif {
     Started,
+    Connected(String),
     Error(String),
     Stopped,
 }
@@ -306,6 +307,9 @@ impl Account {
                     return;
                 }
             };
+
+            let addr = format!("{}:{}", addr, port);
+            let _ = notification.send(TxListenerNotif::Connected(addr).into());
 
             let (request, response) = client.listen::<CoinRequest, CoinResponse>();
 
