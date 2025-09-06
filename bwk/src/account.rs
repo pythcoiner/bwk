@@ -277,6 +277,18 @@ impl Account {
         account
     }
 
+    pub fn network(&self) -> bitcoin::Network {
+        self.config.network()
+    }
+
+    pub fn name(&self) -> String {
+        self.config.account.clone()
+    }
+
+    pub fn descriptor(&self) -> String {
+        self.config.descriptor.to_string()
+    }
+
     /// Starts listening for transactions on the specified address and port.
     ///
     /// # Arguments
