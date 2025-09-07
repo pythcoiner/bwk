@@ -2,7 +2,8 @@ use super::{Error, PEEK_BUFFER_SIZE};
 use openssl::ssl::{self, SslConnector, SslMethod, SslVerifyMode};
 use std::{
     io::{BufRead, BufReader, Write},
-    net,
+    net::{self, SocketAddr},
+    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -77,7 +78,7 @@ impl SslClient {
         self.stream.is_some()
     }
 
-    pub fn try_connect(&mut self) -> Result<(), Error> {
+    pub fn try_connect(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         let url = format!("{}:{}", self.url, self.port);
         let mut ssl = SslConnector::builder(SslMethod::tls()).unwrap();
 
@@ -107,7 +108,12 @@ impl SslClient {
             ssl.set_verify(SslVerifyMode::NONE);
         }
         let ssl = ssl.build();
-        let stream = net::TcpStream::connect(url).map_err(Error::TcpStream)?;
+        let stream = if let Some(timeout) = timeout {
+            let addr = SocketAddr::from_str(&url).map_err(|_| Error::SocketAddr)?;
+            net::TcpStream::connect_timeout(&addr, timeout).map_err(Error::TcpStream)?
+        } else {
+            net::TcpStream::connect(url).map_err(Error::TcpStream)?
+        };
         stream
             .set_read_timeout(self.read_timeout)
             .map_err(Error::TcpStream)?;

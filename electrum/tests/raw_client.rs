@@ -115,7 +115,7 @@ fn ssl_client_wo_certificate() {
     if let Some(address) = ssl_local_address() {
         let (url, port) = split_url(address);
         let mut client = Client::new().ssl(&url, port);
-        assert!(client.try_connect().is_err());
+        assert!(client.try_connect(None).is_err());
         let mut client = client.verif_certificate(false);
         client.connect();
 

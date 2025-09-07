@@ -173,7 +173,7 @@ impl Client {
         let ssl = address.starts_with("ssl://");
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl);
-        inner.try_connect()?;
+        inner.try_connect(None)?;
         Ok(Client {
             inner,
             index: HashMap::new(),
@@ -193,7 +193,7 @@ impl Client {
         let ssl = address.starts_with("ssl://");
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl).verif_certificate(false);
-        inner.try_connect()?;
+        inner.try_connect(None)?;
         Ok(Client {
             inner,
             index: HashMap::new(),

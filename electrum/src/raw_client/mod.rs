@@ -17,6 +17,7 @@ pub const PEEK_BUFFER_SIZE: usize = 10;
 #[derive(Debug)]
 pub enum Error {
     TcpStream(std::io::Error),
+    SocketAddr,
     SslStream(openssl::ssl::HandshakeError<net::TcpStream>),
     Electrum(electrum::Error),
     SslPeek,
@@ -136,7 +137,7 @@ impl Client {
     }
 
     pub fn connect(&mut self) {
-        self.try_connect().unwrap()
+        self.try_connect(None).unwrap()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -147,16 +148,21 @@ impl Client {
         }
     }
 
-    pub fn try_connect(&mut self) -> Result<(), Error> {
+    pub fn try_connect(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         match self {
             Client::None => Err(Error::NotConfigured),
-            Client::Tcp(c) => c.try_connect(),
-            Client::Ssl(c) => c.try_connect(),
+            Client::Tcp(c) => c.try_connect(timeout),
+            Client::Ssl(c) => c.try_connect(timeout),
         }
     }
 
-    pub fn try_connect_retry(&mut self, retry: usize, delay: Duration) -> Result<(), Error> {
-        let mut result = self.try_connect();
+    pub fn try_connect_retry(
+        &mut self,
+        retry: usize,
+        delay: Duration,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        let mut result = self.try_connect(Some(timeout));
         let mut count = 0;
         loop {
             match result {
@@ -167,7 +173,7 @@ impl Client {
                     if count > retry {
                         return e;
                     }
-                    result = self.try_connect();
+                    result = self.try_connect(Some(timeout));
                 }
                 ok => return ok,
             }
