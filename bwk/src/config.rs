@@ -63,9 +63,9 @@ pub fn maybe_create_dir(dir: &PathBuf) {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(skip)]
-    data_dir: PathBuf,
+    pub data_dir: PathBuf,
     #[serde(skip)]
-    dir_name: &'static str,
+    pub dir_name: &'static str,
     pub account: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrum_url: Option<String>,
