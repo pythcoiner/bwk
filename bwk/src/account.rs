@@ -289,6 +289,18 @@ impl Account {
         self.config.descriptor.to_string()
     }
 
+    pub fn electrum_url(&self) -> String {
+        self.config.electrum_url()
+    }
+
+    pub fn electrum_port(&self) -> String {
+        self.config.electrum_port()
+    }
+
+    pub fn look_ahead(&self) -> String {
+        self.config.look_ahead()
+    }
+
     /// Starts listening for transactions on the specified address and port.
     ///
     /// # Arguments
