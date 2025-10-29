@@ -1,3 +1,5 @@
+pub mod test;
+
 pub fn short_string(s: String, len: usize) -> String {
     assert!(len > 6);
     let separator = if len % 2 != 0 { "." } else { ".." };

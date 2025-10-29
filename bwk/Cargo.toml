@@ -15,16 +15,20 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 doctest = false
 
 [dependencies]
+bwk-electrum.workspace = true
+bwk-backoff.workspace = true
+bwk-keys.workspace = true
+bwk-descriptor.workspace = true
+bwk-sign.workspace = true
+bwk-utils.workspace = true
+
 miniscript.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
 env_logger.workspace = true
 dirs.workspace = true
-bwk-electrum.workspace = true
 bip39 = { workspace = true, features = ["serde", "rand"] }
-bwk-backoff.workspace = true
-bwk-keys.workspace = true
 
 [dev-dependencies]
 electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffered_logs"}

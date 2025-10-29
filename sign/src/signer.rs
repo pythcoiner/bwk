@@ -1,13 +1,14 @@
 use std::str::FromStr;
-pub mod error;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::mpsc,
 };
 
+use crate::error::Error;
+use crate::signing_manager;
+use bwk_descriptor::derivator::Derivator;
 use bwk_keys::{OXpriv, OXpub};
-use error::Error;
 use serde::{Deserialize, Serialize};
 use {
     bip39,
@@ -24,9 +25,6 @@ use {
         Descriptor, DescriptorPublicKey, ForEachKey,
     },
 };
-
-use crate::account::AddrAccount;
-use crate::{derivator::Derivator, signing_manager};
 
 #[derive(Debug)]
 pub enum SignerNotif {
@@ -65,7 +63,7 @@ pub trait Signer {
     fn sign(&self, psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>);
     /// Request the signer to display the address for verification.
     /// No notification is expected in return.
-    fn display_address(&self, _deriv: (AddrAccount, u32)) {}
+    fn display_address(&self, _deriv: (bool /* is_change */, u32)) {}
 }
 
 macro_rules! send {
@@ -425,8 +423,8 @@ impl HotSigner {
             if let Some(wit) = &input.witness_utxo {
                 let ap = account_path(d)?;
                 let expected_spk = match ap.0 {
-                    AddrAccount::Receive => derivator.receive_at(ap.1),
-                    AddrAccount::Change => derivator.change_at(ap.1),
+                    false => derivator.receive_at(ap.1),
+                    true => derivator.change_at(ap.1),
                 }
                 .script_pubkey();
                 if wit.script_pubkey != expected_spk {
@@ -480,7 +478,7 @@ impl HotSigner {
 ///
 /// # Returns
 /// A result containing the derived [`DerivationPath`] or an error if the conversion fails.
-pub fn deriv_path(path: &(AddrAccount, u32)) -> Result<DerivationPath, Error> {
+pub fn deriv_path(path: &(bool /* is_change */, u32)) -> Result<DerivationPath, Error> {
     let account_u32: u32 = path.0.into();
     DerivationPath::from_str(&format!("m/{}/{}", account_u32, path.1))
         .map_err(|_| Error::DerivationPath)
@@ -494,22 +492,28 @@ pub fn deriv_path(path: &(AddrAccount, u32)) -> Result<DerivationPath, Error> {
 /// # Returns
 /// A result containing a tuple of the account type as [`AddrAccount`] and the index as `u32`.
 /// Returns an error if the derivation path does not have the expected length.
-pub fn account_path(path: &DerivationPath) -> Result<(AddrAccount, u32), Error> {
+pub fn account_path(path: &DerivationPath) -> Result<(bool /* is_change */, u32), Error> {
     if path.len() != 2 {
         Err(Error::DerivationPath)?
     }
     let path = path.to_u32_vec();
-    Ok((path[0].into(), path[1]))
+    if path.is_empty() {
+        return Err(Error::DerivationPath);
+    }
+    let is_change = match path[0] {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::DerivationPath),
+    };
+    Ok((is_change, path[1]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        descriptor::wpkh,
-        test_utils::{random_output, setup_logger, txid},
-    };
     use bitcoin::Network;
+    use bwk_descriptor::{derivator::Derivator, descriptor::wpkh};
+    use bwk_utils::test::{random_output, setup_logger, txid};
     use miniscript::bitcoin::{absolute::Height, Amount, ScriptBuf, TxIn, Witness};
     use std::sync::mpsc;
 
@@ -563,7 +567,7 @@ mod tests {
 
         let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
 
-        let deriv = &(AddrAccount::Receive, 0);
+        let deriv = &(false, 0);
         let deriv_p = deriv_path(deriv).unwrap();
         let pubkey = signer.public_key_at(&deriv_p);
 
@@ -577,7 +581,7 @@ mod tests {
         assert!(psbt.inputs[0].partial_sigs.is_empty());
 
         // add a wrong derivation path
-        let w_deriv = &(AddrAccount::Change, 0);
+        let w_deriv = &(true, 0);
         let w_deriv_path = deriv_path(w_deriv).unwrap();
         psbt.inputs
             .get_mut(0)
@@ -813,7 +817,7 @@ mod tests {
 
         let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
 
-        let deriv = &(AddrAccount::Receive, 0);
+        let deriv = &(false, 0);
         let deriv_p = deriv_path(deriv).unwrap();
         let pubkey = signer.public_key_at(&deriv_p);
 

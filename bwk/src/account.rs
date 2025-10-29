@@ -10,7 +10,9 @@ use std::{
 };
 
 use bwk_backoff::Backoff;
+use bwk_descriptor::derivator::Derivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
+use bwk_sign::signing_manager::SigningManager;
 use miniscript::{
     bitcoin::{self, absolute, EcdsaSighashType, OutPoint, ScriptBuf, TxOut},
     psbt::PsbtExt,
@@ -22,9 +24,7 @@ use crate::{
     coin::Coin,
     coin_store::{CoinEntry, CoinStore},
     config::{Config, Tip},
-    derivator::Derivator,
     label_store::{LabelKey, LabelStore},
-    signing_manager::SigningManager,
     tx_store::TxStore,
 };
 
@@ -1482,14 +1482,13 @@ fn listen_txs<T: From<TxListenerNotif>>(
 mod tests {
     use std::{str::FromStr, sync::mpsc::TryRecvError, time::Duration};
 
+    use bwk_descriptor::descriptor::wpkh;
+    use bwk_sign::signer::HotSigner;
+    use bwk_utils::test::{funding_tx, setup_logger, spending_tx};
+
     use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
-    use crate::{
-        descriptor::wpkh,
-        signer::HotSigner,
-        test_utils::{funding_tx, setup_logger, spending_tx},
-        tx_store::TxStore,
-    };
+    use crate::tx_store::TxStore;
 
     use super::*;
 

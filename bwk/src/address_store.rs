@@ -1,3 +1,4 @@
+use bwk_descriptor::derivator::Derivator;
 use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::mpsc};
@@ -5,7 +6,6 @@ use std::{collections::BTreeMap, sync::mpsc};
 use crate::{
     account::{AddrAccount, AddressStatus, Notification, RustAddress},
     config::Config,
-    derivator::Derivator,
 };
 
 #[derive(Debug, Clone, Copy)]

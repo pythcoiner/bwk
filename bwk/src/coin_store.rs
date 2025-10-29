@@ -1,3 +1,4 @@
+use bwk_descriptor::derivator::Derivator;
 use miniscript::{
     bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Txid},
     Descriptor, DescriptorPublicKey,
@@ -16,7 +17,6 @@ use crate::{
     address_store::{AddressEntry, AddressStore, AddressTip},
     coin,
     config::Config,
-    derivator::Derivator,
     label_store::{LabelKey, LabelStore},
     tx_store::{InputMetadata, OutputMetadata, TxStore},
 };

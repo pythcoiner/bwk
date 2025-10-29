@@ -4,9 +4,9 @@ use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
 use crate::utils::bootstrap_electrs;
 use bwk::{
     config::{maybe_create_dir, Config},
-    descriptor::ScriptType,
     Account,
 };
+use bwk_descriptor::descriptor::ScriptType;
 use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
 use miniscript::bitcoin::bip32::ChildNumber;
 use temp_dir::TempDir;

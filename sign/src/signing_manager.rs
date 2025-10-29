@@ -7,20 +7,10 @@ use std::{
     sync::mpsc::{self},
 };
 
-// use joinstr::{
-//     bip39::{self},
-//     miniscript::bitcoin::{
-//         bip32::{self, DerivationPath},
-//         Psbt,
-//     },
-// };
-
+use bwk_descriptor::descriptor::wpkh;
 use miniscript::bitcoin::{self, bip32};
 
-use crate::{
-    descriptor::wpkh,
-    signer::{HotSigner, JsonSigner, Signer, SignerNotif},
-};
+use crate::signer::{HotSigner, JsonSigner, Signer, SignerNotif};
 
 #[derive(Debug, Clone)]
 pub enum Error {

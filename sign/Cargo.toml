@@ -1,5 +1,5 @@
 [package]
-name = "bwk-utils"
+name = "bwk-sign"
 version = "0.0.1"
 edition.workspace = true
 authors.workspace = true
@@ -13,7 +13,11 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 doctest = false
 
 [dependencies]
+bwk-keys.workspace = true
+bwk-descriptor.workspace = true
+bwk-utils.workspace = true
+bip39.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 miniscript.workspace = true
-rand.workspace = true
-env_logger.workspace = true
 log.workspace = true

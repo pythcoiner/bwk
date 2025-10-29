@@ -6,13 +6,13 @@ use std::{
     str::FromStr,
 };
 
+use bwk_descriptor::descriptor::ScriptType;
+use bwk_sign::signer::HotSigner;
 use miniscript::{
     bitcoin::{self, ScriptBuf},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
-
-use crate::{descriptor::ScriptType, signer::HotSigner};
 
 const CONFIG_FILENAME: &str = "config.json";
 
