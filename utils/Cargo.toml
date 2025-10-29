@@ -1,0 +1,15 @@
+[package]
+name = "bwk-utils"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+doctest = false
+
+[dependencies]

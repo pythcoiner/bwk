@@ -10,6 +10,7 @@ use crate::{
     raw_client::{self, Client as RawClient},
 };
 use bwk_backoff::Backoff;
+use bwk_utils::short_string;
 use hex_conservative::FromHex;
 use miniscript::bitcoin::{
     consensus::{self, encode::serialize_hex, Decodable},
@@ -59,17 +60,7 @@ pub enum CoinStatus {
 
 pub fn short_hash(s: &ScriptBuf) -> String {
     let s = ScriptHash::new(s).to_string();
-    short_string(s)
-}
-
-pub fn short_string(s: String) -> String {
-    let head = 4;
-    let tail = 4;
-    if s.len() <= head + tail + 2 {
-        // No need to truncate if string is short
-        return s.to_string();
-    }
-    format!("{}..{}", &s[..head], &s[s.len() - tail..])
+    short_string(s, 10)
 }
 
 #[derive(Clone)]
@@ -120,7 +111,7 @@ impl Debug for CoinResponse {
                         format!(
                             "{} => {:?}",
                             short_hash(spk),
-                            status.as_ref().map(|st| short_string(st.to_string()))
+                            status.as_ref().map(|st| short_string(st.to_string(), 10))
                         )
                     })
                     .collect();

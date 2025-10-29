@@ -23,6 +23,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 hex-conservative.workspace = true
 bwk-backoff.workspace = true
+bwk-utils.workspace = true
 
 [dev-dependencies]
 hex_lit.workspace = true
