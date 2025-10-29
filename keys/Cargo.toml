@@ -16,3 +16,4 @@ doctest = false
 bip39.workspace = true
 bitcoin.workspace = true
 thiserror = "2.0.17"
+bwk-utils.workspace = true
