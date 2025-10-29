@@ -1,5 +1,5 @@
 [package]
-name = "bwk-derivator"
+name = "bwk-keys"
 version = "0.0.1"
 edition.workspace = true
 authors.workspace = true
@@ -14,5 +14,5 @@ doctest = false
 
 [dependencies]
 bip39.workspace = true
-miniscript.workspace = true
+bitcoin.workspace = true
 thiserror = "2.0.17"

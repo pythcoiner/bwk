@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use bwk_keys::OXpub;
 use miniscript::{
     bitcoin::{
         self,
@@ -7,8 +8,6 @@ use miniscript::{
     },
     Descriptor, DescriptorPublicKey,
 };
-
-use crate::signer::OXpub;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Error {

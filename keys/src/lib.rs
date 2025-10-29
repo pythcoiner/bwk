@@ -1,6 +1,6 @@
 use bip39::Mnemonic;
-use miniscript::bitcoin::{
-    bip32::{Fingerprint, Xpriv},
+use bitcoin::{
+    bip32::{DerivationPath, Fingerprint, Xpriv, Xpub},
     key::Secp256k1,
     secp256k1::All,
     Network,
@@ -12,6 +12,34 @@ pub enum Error {
     InvalidMnemonicWords,
 }
 
+/// A struct that represents an extended private key.
+///
+/// This struct contains the origin fingerprint and derivation path
+/// associated with the extended private key, as well as the key itself.
+///
+/// # Fields
+/// * `origin` - A tuple containing the fingerprint and derivation path.
+/// * `xkey` - The extended private key.
+pub struct OXpriv {
+    pub origin: (Fingerprint, DerivationPath),
+    pub xkey: Xpriv,
+}
+
+/// A struct that represents an extended public key.
+///
+/// This struct contains the origin fingerprint and derivation path
+/// associated with the extended public key, as well as the key itself.
+///
+/// # Fields
+/// * `origin` - A tuple containing the fingerprint and derivation path.
+/// * `xkey` - The extended public key.
+#[derive(Debug)]
+pub struct OXpub {
+    pub origin: (Fingerprint, DerivationPath),
+    pub xkey: Xpub,
+}
+
+#[derive(Debug)]
 pub struct KeyDerivator {
     network: Network,
     secp: Secp256k1<All>,

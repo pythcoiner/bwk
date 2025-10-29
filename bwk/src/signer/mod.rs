@@ -6,6 +6,7 @@ use std::{
     sync::mpsc,
 };
 
+use bwk_keys::{OXpriv, OXpub};
 use error::Error;
 use serde::{Deserialize, Serialize};
 use {
@@ -178,33 +179,6 @@ pub struct JsonSigner {
     mnemonic: bip39::Mnemonic,
     descriptors: BTreeSet<String>,
     network: bitcoin::Network,
-}
-
-/// A struct that represents an extended private key.
-///
-/// This struct contains the origin fingerprint and derivation path
-/// associated with the extended private key, as well as the key itself.
-///
-/// # Fields
-/// * `origin` - A tuple containing the fingerprint and derivation path.
-/// * `xkey` - The extended private key.
-pub struct OXpriv {
-    pub origin: (bip32::Fingerprint, bip32::DerivationPath),
-    pub xkey: bip32::Xpriv,
-}
-
-/// A struct that represents an extended public key.
-///
-/// This struct contains the origin fingerprint and derivation path
-/// associated with the extended public key, as well as the key itself.
-///
-/// # Fields
-/// * `origin` - A tuple containing the fingerprint and derivation path.
-/// * `xkey` - The extended public key.
-#[derive(Debug)]
-pub struct OXpub {
-    pub origin: (bip32::Fingerprint, bip32::DerivationPath),
-    pub xkey: bip32::Xpub,
 }
 
 impl HotSigner {
