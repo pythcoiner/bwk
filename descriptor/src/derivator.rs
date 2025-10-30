@@ -1,8 +1,11 @@
+use bwk_keys::OXpub;
 use miniscript::{
-    bitcoin::{self, ScriptBuf},
+    bitcoin::{self, Network, ScriptBuf},
     descriptor::Wildcard,
     Descriptor, DescriptorPublicKey, ForEachKey,
 };
+
+use crate::{tr, wpkh};
 
 #[derive(Debug)]
 pub enum Error {
@@ -111,6 +114,34 @@ impl SpkDerivator {
             change,
             network,
         })
+    }
+
+    /// Creates a new `SpkDerivator` instance for a Witness-PubKey-Hash (WPKH) descriptor.
+    ///
+    /// # Parameters
+    /// - `xpub`: An `OXpub` extended public key.
+    /// - `network`: The Bitcoin network type.
+    ///
+    /// # Returns
+    /// - `Result<Self, Error>`: Returns an instance of `SpkDerivator` if successful,
+    ///   or an `Error` if the descriptor construction fails.
+    pub fn new_wpkh(xpub: OXpub, network: Network) -> Result<Self, Error> {
+        let descriptor = wpkh(xpub);
+        Self::new(descriptor, network)
+    }
+
+    /// Creates a new `SpkDerivator` instance for a Taproot (key spend) descriptor.
+    ///
+    /// # Parameters
+    /// - `xpub`: An `OXpub` extended public key.
+    /// - `network`: The Bitcoin network type.
+    ///
+    /// # Returns
+    /// - `Result<Self, Error>`: Returns an instance of `SpkDerivator` if successful,
+    ///   or an `Error` if the descriptor construction fails.
+    pub fn new_tr(xpub: OXpub, network: Network) -> Result<Self, Error> {
+        let descriptor = tr(xpub);
+        Self::new(descriptor, network)
     }
 
     /// Returns the main descriptor of the `Derivator`.
