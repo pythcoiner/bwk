@@ -1480,17 +1480,13 @@ fn listen_txs<T: From<TxListenerNotif>>(
 
 #[cfg(test)]
 mod tests {
-    use std::{str::FromStr, sync::mpsc::TryRecvError, time::Duration};
-
-    use bwk_descriptor::descriptor::wpkh;
-    use bwk_sign::signer::HotSigner;
-    use bwk_utils::test::{funding_tx, setup_logger, spending_tx};
-
-    use {bip39, miniscript::bitcoin::bip32::DerivationPath};
-
-    use crate::tx_store::TxStore;
-
     use super::*;
+    use crate::tx_store::TxStore;
+    use bwk_descriptor::descriptor::wpkh;
+    use bwk_sign::hot_signer::HotSigner;
+    use bwk_utils::test::{funding_tx, setup_logger, spending_tx};
+    use std::{str::FromStr, sync::mpsc::TryRecvError, time::Duration};
+    use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
     struct CoinStoreMock {
         pub store: Arc<Mutex<CoinStore>>,

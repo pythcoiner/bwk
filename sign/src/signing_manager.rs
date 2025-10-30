@@ -10,7 +10,10 @@ use std::{
 use bwk_descriptor::descriptor::wpkh;
 use miniscript::bitcoin::{self, bip32};
 
-use crate::signer::{HotSigner, JsonSigner, Signer, SignerNotif};
+use crate::{
+    hot_signer::{HotSigner, JsonSigner},
+    signer::{Signer, SignerNotif},
+};
 
 #[derive(Debug, Clone)]
 pub enum Error {

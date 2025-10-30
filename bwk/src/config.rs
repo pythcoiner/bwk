@@ -7,7 +7,7 @@ use std::{
 };
 
 use bwk_descriptor::descriptor::ScriptType;
-use bwk_sign::signer::HotSigner;
+use bwk_sign::hot_signer::HotSigner;
 use miniscript::{
     bitcoin::{self, ScriptBuf},
     Descriptor, DescriptorPublicKey,
