@@ -18,14 +18,14 @@ pub enum Error {
 /// It holds the main descriptor, the receiving descriptor, the change descriptor,
 /// and the network type. It ensures that the descriptors are valid at creation.
 #[derive(Debug, Clone)]
-pub struct Derivator {
+pub struct SpkDerivator {
     descriptor: Descriptor<DescriptorPublicKey>, // DesciptorPublicKey::MultiXpub
     recv: Descriptor<DescriptorPublicKey>,       // DescriptorPublicKey::Xpub
     change: Descriptor<DescriptorPublicKey>,     // DescriptorPublicKey::Xpub
     network: bitcoin::Network,
 }
 
-impl Derivator {
+impl SpkDerivator {
     /// Creates a new `Derivator` instance.
     ///
     /// # Parameters

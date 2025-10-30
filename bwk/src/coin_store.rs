@@ -1,4 +1,4 @@
-use bwk_descriptor::derivator::Derivator;
+use bwk_descriptor::derivator::SpkDerivator;
 use miniscript::{
     bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Txid},
     Descriptor, DescriptorPublicKey,
@@ -36,7 +36,7 @@ pub struct CoinStore {
     tx_store: TxStore,
     spk_history: BTreeMap<ScriptBuf, SpkHistory>,
     updates: Vec<Update>,
-    derivator: Derivator,
+    derivator: SpkDerivator,
     notification: mpsc::Sender<Notification>,
     #[allow(unused)]
     config: Option<Config>,
@@ -146,7 +146,7 @@ impl CoinStore {
         label_store: Arc<Mutex<LabelStore>>,
         config: Option<Config>,
     ) -> Self {
-        let derivator = Derivator::new(descriptor, network).unwrap();
+        let derivator = SpkDerivator::new(descriptor, network).unwrap();
         let address_store = AddressStore::new(
             derivator.clone(),
             notification.clone(),
@@ -180,14 +180,14 @@ impl CoinStore {
     ///
     /// # Returns
     /// A `Derivator` instance.
-    pub fn derivator(&self) -> Derivator {
+    pub fn derivator(&self) -> SpkDerivator {
         self.derivator.clone()
     }
     /// Returns a reference to the derivator used for generating addresses.
     ///
     /// # Returns
     /// A reference to a `WpkhHotSigner`.
-    pub fn derivator_ref(&self) -> &Derivator {
+    pub fn derivator_ref(&self) -> &SpkDerivator {
         &self.derivator
     }
     /// Returns the current receiving watch tip index.

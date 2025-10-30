@@ -7,7 +7,7 @@ use std::{
 
 use crate::error::Error;
 use crate::signing_manager;
-use bwk_descriptor::derivator::Derivator;
+use bwk_descriptor::derivator::SpkDerivator;
 use bwk_keys::{OXpriv, OXpub};
 use serde::{Deserialize, Serialize};
 use {
@@ -355,7 +355,7 @@ impl HotSigner {
         descriptor: &Descriptor<DescriptorPublicKey>,
     ) -> Result<(), Error> {
         let mut cache = sighash::SighashCache::new(psbt.unsigned_tx.clone());
-        let derivator = Derivator::new(descriptor.clone(), self.network).unwrap();
+        let derivator = SpkDerivator::new(descriptor.clone(), self.network).unwrap();
 
         let mut inputs_to_sign = BTreeMap::new();
         for (index, input) in psbt.inputs.iter().enumerate() {
@@ -409,7 +409,7 @@ impl HotSigner {
         hash: Message,
         input: &mut Input,
         deriv: Vec<DerivationPath>,
-        derivator: &Derivator,
+        derivator: &SpkDerivator,
     ) -> Result<(), Error> {
         for d in &deriv {
             let signing_key = self.private_key_at(d);
@@ -512,7 +512,7 @@ pub fn account_path(path: &DerivationPath) -> Result<(bool /* is_change */, u32)
 mod tests {
     use super::*;
     use bitcoin::Network;
-    use bwk_descriptor::{derivator::Derivator, descriptor::wpkh};
+    use bwk_descriptor::{derivator::SpkDerivator, descriptor::wpkh};
     use bwk_utils::test::{random_output, setup_logger, txid};
     use miniscript::bitcoin::{absolute::Height, Amount, ScriptBuf, TxIn, Witness};
     use std::sync::mpsc;
@@ -598,7 +598,7 @@ mod tests {
         // there is no signature
         assert!(psbt.inputs[0].partial_sigs.is_empty());
 
-        let derivator = Derivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
+        let derivator = SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
 
         // add spent TxOut
         psbt.inputs.get_mut(0).unwrap().witness_utxo = Some(bitcoin::TxOut {
@@ -821,7 +821,7 @@ mod tests {
         let deriv_p = deriv_path(deriv).unwrap();
         let pubkey = signer.public_key_at(&deriv_p);
 
-        let derivator = Derivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
+        let derivator = SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
 
         // add spent TxOut
         psbt.inputs.get_mut(0).unwrap().witness_utxo = Some(bitcoin::TxOut {

@@ -1,4 +1,4 @@
-use bwk_descriptor::derivator::Derivator;
+use bwk_descriptor::derivator::SpkDerivator;
 use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::mpsc};
@@ -38,7 +38,7 @@ pub struct AddressStore {
     store: BTreeMap<ScriptBuf, AddressEntry>,
     recv_generated_tip: u32,
     change_generated_tip: u32,
-    derivator: Derivator,
+    derivator: SpkDerivator,
     notification: mpsc::Sender<Notification>,
     tx_listener: Option<mpsc::Sender<AddressTip>>,
     look_ahead: u32,
@@ -60,7 +60,7 @@ impl AddressStore {
     /// # Returns
     /// A new instance of `AddressStore`.
     pub fn new(
-        derivator: Derivator,
+        derivator: SpkDerivator,
         notification: mpsc::Sender<Notification>,
         recv_tip: u32,
         change_tip: u32,

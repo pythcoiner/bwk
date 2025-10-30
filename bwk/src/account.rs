@@ -10,7 +10,7 @@ use std::{
 };
 
 use bwk_backoff::Backoff;
-use bwk_descriptor::derivator::Derivator;
+use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
 use bwk_sign::signing_manager::SigningManager;
 use miniscript::{
@@ -364,7 +364,7 @@ impl Account {
     /// # Returns
     ///
     /// A `Derivator` instance.
-    pub fn derivator(&self) -> Derivator {
+    pub fn derivator(&self) -> SpkDerivator {
         self.coin_store.lock().expect("poisoned").derivator()
     }
 
@@ -1288,7 +1288,7 @@ macro_rules! send_electrum {
 #[allow(clippy::too_many_arguments)]
 fn listen_txs<T: From<TxListenerNotif>>(
     coin_store: Arc<Mutex<CoinStore>>,
-    derivator: Derivator,
+    derivator: SpkDerivator,
     notification: mpsc::Sender<T>,
     address_tip: mpsc::Receiver<AddressTip>,
     stop_request: Arc<AtomicBool>,
@@ -1499,7 +1499,7 @@ mod tests {
         pub response: mpsc::Sender<CoinResponse>,
         pub listener: JoinHandle<()>,
         pub stop: Arc<AtomicBool>,
-        pub derivator: Derivator,
+        pub derivator: SpkDerivator,
     }
 
     impl Drop for CoinStoreMock {
@@ -1522,7 +1522,8 @@ mod tests {
                     .unwrap();
             let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1").unwrap());
             let descriptor = wpkh(xpub);
-            let derivator = Derivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
+            let derivator =
+                SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
 
             let tx_store = TxStore::new(Default::default(), None);
             let label_store = Arc::new(Mutex::new(LabelStore::new()));
