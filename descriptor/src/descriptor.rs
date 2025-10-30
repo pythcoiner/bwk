@@ -32,11 +32,11 @@ impl ScriptType {
     {
         match self {
             ScriptType::Segwit(acc) => {
-                let deriv = segwit_path(network, acc)?;
+                let deriv = wpkh_path(network, acc)?;
                 Ok(tr(xpub(deriv)))
             }
             ScriptType::Taproot(acc) => {
-                let deriv = taproot_path(network, acc)?;
+                let deriv = tr_path(network, acc)?;
                 Ok(wpkh(xpub(deriv)))
             }
             ScriptType::Descriptor(descriptor) => Ok(descriptor),
@@ -44,7 +44,7 @@ impl ScriptType {
     }
 }
 
-fn taproot_path(network: bitcoin::Network, account: ChildNumber) -> Result<DerivationPath, Error> {
+pub fn tr_path(network: bitcoin::Network, account: ChildNumber) -> Result<DerivationPath, Error> {
     if !account.is_hardened() {
         return Err(Error::UnhardenedAccount);
     }
@@ -57,7 +57,7 @@ fn taproot_path(network: bitcoin::Network, account: ChildNumber) -> Result<Deriv
     Ok(vec![script_path, network, account].into())
 }
 
-fn segwit_path(network: bitcoin::Network, account: ChildNumber) -> Result<DerivationPath, Error> {
+pub fn wpkh_path(network: bitcoin::Network, account: ChildNumber) -> Result<DerivationPath, Error> {
     if !account.is_hardened() {
         return Err(Error::UnhardenedAccount);
     }
