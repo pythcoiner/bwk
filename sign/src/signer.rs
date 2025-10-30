@@ -95,20 +95,12 @@ impl Signer for HotSigner {
 
     fn get_xpub(&self, deriv: DerivationPath, _display: bool) {
         let xpub = self.xpub(&deriv);
-        if let Some(sender) = &self.sender {
-            let _ = sender.send(SignerNotif::Xpub(self.fingerprint(), xpub));
-        }
+        send!(self, Xpub(xpub));
     }
 
     fn is_descriptor_registered(&self, descriptor: Descriptor<DescriptorPublicKey>) {
         let registered = self.descriptors.contains(&descriptor);
-        if let Some(sender) = &self.sender {
-            let _ = sender.send(SignerNotif::DescriptorRegistered(
-                self.fingerprint(),
-                descriptor,
-                registered,
-            ));
-        }
+        send!(self, DescriptorRegistered(descriptor, registered));
     }
 
     fn register_descriptor(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
@@ -130,29 +122,23 @@ impl Signer for HotSigner {
         if !wrong_network {
             self.descriptors.insert(descriptor.clone());
         }
-        if let Some(sender) = &self.sender {
-            let response = if wrong_network {
-                SignerNotif::Error(self.fingerprint(), Error::DescriptorNetwork)
-            } else {
-                SignerNotif::DescriptorRegistered(self.fingerprint(), descriptor, true)
-            };
-            let _ = sender.send(response);
-        }
+        if wrong_network {
+            send!(self, Error(Error::DescriptorNetwork));
+        } else {
+            send!(self, DescriptorRegistered(descriptor, true));
+        };
     }
 
     fn sign(&self, mut psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>) {
-        let response = if self.descriptors.contains(&descriptor) {
+        if self.descriptors.contains(&descriptor) {
             if let Err(e) = self.inner_sign(&mut psbt, &descriptor) {
-                SignerNotif::Error(self.fingerprint(), e)
+                send!(self, Error(e));
             } else {
-                SignerNotif::Signed(self.fingerprint(), psbt)
+                send!(self, Signed(psbt));
             }
         } else {
-            SignerNotif::Error(self.fingerprint(), Error::UnregisteredDescriptor)
+            send!(self, Error(Error::UnregisteredDescriptor));
         };
-        if let Some(sender) = &self.sender {
-            let _ = sender.send(response);
-        }
     }
 }
 
