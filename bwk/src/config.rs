@@ -17,10 +17,6 @@ use serde::{Deserialize, Serialize};
 const CONFIG_FILENAME: &str = "config.json";
 
 /// Returns the data directory path based on the operating system.
-///
-/// On Linux, it returns the path to the `.qoinstr` directory in the user's home directory.
-/// On other operating systems, it returns the path to the `Qoinstr` directory in the user's config directory.
-/// The directory is created if it does not exist.
 /// NOTE: do NOT use on mobile
 pub fn datadir(dir_name: &str) -> PathBuf {
     #[cfg(target_os = "linux")]
@@ -33,7 +29,7 @@ pub fn datadir(dir_name: &str) -> PathBuf {
     #[cfg(not(target_os = "linux"))]
     let dir = {
         let mut dir = dirs::config_dir().unwrap();
-        dir.push("Qoinstr");
+        dir.push(dir_name);
         dir
     };
 
