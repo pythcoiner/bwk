@@ -1,5 +1,6 @@
 use std::sync::Once;
 
+use corepc_node::Client;
 use miniscript::bitcoin::{
     self, hashes::serde_macros::serde_details::SerdeHash, Amount, OutPoint, ScriptBuf, TxIn, TxOut,
 };
@@ -115,6 +116,11 @@ pub fn spending_tx(outpoint: bitcoin::OutPoint) -> bitcoin::Transaction {
         input,
         output,
     }
+}
+
+pub fn generate_blocks(client: &mut Client, blocks: usize) {
+    let addr = client.new_address().unwrap();
+    client.generate_to_address(blocks, &addr).unwrap();
 }
 
 #[test]

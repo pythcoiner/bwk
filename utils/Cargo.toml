@@ -17,3 +17,4 @@ miniscript.workspace = true
 rand.workspace = true
 env_logger.workspace = true
 log.workspace = true
+corepc-node.workspace = true
