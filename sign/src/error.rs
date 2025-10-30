@@ -13,6 +13,7 @@ pub enum Error {
     Bip39(bip39::Error),
     UnregisteredDescriptor,
     DescriptorNetwork,
+    Derivator,
 }
 
 impl Display for Error {
@@ -28,6 +29,7 @@ impl Display for Error {
             Error::DerivationPath => write!(f, "Invalid derivation path"),
             Error::UnregisteredDescriptor => write!(f, "Unknown descriptor"),
             Error::DescriptorNetwork => write!(f, "Wrong descriptor network"),
+            Error::Derivator => write!(f, "Fail to create derivator"),
         }
     }
 }

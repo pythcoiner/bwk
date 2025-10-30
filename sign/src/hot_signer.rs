@@ -10,7 +10,7 @@ use crate::{
     signer::{Signer, SignerNotif},
 };
 use bwk_descriptor::derivator::SpkDerivator;
-use bwk_keys::{OXpriv, OXpub};
+use bwk_keys::{KeyDerivator, OXpriv, OXpub};
 use serde::{Deserialize, Serialize};
 use {
     bip39,
@@ -93,10 +93,7 @@ impl Signer for HotSigner {
 /// using the provided private keys.
 #[derive(Debug, Clone)]
 pub struct HotSigner {
-    master_xpriv: bip32::Xpriv,
-    fingerprint: bip32::Fingerprint,
-    secp: secp256k1::Secp256k1<All>,
-    mnemonic: Option<bip39::Mnemonic>,
+    derivator: KeyDerivator,
     descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
     network: bitcoin::Network,
     sender: Option<mpsc::Sender<SignerNotif>>,
@@ -112,7 +109,7 @@ pub struct JsonSigner {
 impl HotSigner {
     pub fn to_json(&self) -> Option<JsonSigner> {
         let descriptors = self.descriptors.iter().map(|d| d.to_string()).collect();
-        self.mnemonic.as_ref().map(|mnemonic| JsonSigner {
+        self.mnemonic().as_ref().map(|mnemonic| JsonSigner {
             mnemonic: mnemonic.clone(),
             descriptors,
             network: self.network,
@@ -139,15 +136,10 @@ impl HotSigner {
     /// # Returns
     /// A new instance of [`HotSigner`].
     pub fn new_from_xpriv(network: bitcoin::Network, xpriv: bip32::Xpriv) -> Self {
-        let secp = secp256k1::Secp256k1::new();
-        let fingerprint = xpriv.fingerprint(&secp);
-        let master_xpriv = xpriv;
+        let derivator = KeyDerivator::new_from_xpriv(xpriv);
 
         HotSigner {
-            master_xpriv,
-            fingerprint,
-            secp,
-            mnemonic: None,
+            derivator,
             descriptors: BTreeSet::new(),
             network,
             sender: None,
@@ -156,8 +148,6 @@ impl HotSigner {
 
     /// Create a new [`HotSigner`] instance from a mnemonic phrase.
     ///
-    /// The mnemonic is stored in the [`HotSigner::mnemonic`] field.
-    ///
     /// # Arguments
     /// * `network` - The Bitcoin network (e.g., Bitcoin, Testnet, Signet, Regtest).
     /// * `mnemonic` - A string representing the mnemonic phrase used to generate the keys.
@@ -165,17 +155,17 @@ impl HotSigner {
     /// # Returns
     /// A result containing a new instance of [`HotSigner`] or an error if the mnemonic is invalid.
     pub fn new_from_mnemonics(network: bitcoin::Network, mnemonic: &str) -> Result<Self, Error> {
-        let mnemonic = bip39::Mnemonic::from_str(mnemonic)?;
-        let seed = mnemonic.to_seed("");
-        let key = bip32::Xpriv::new_master(network, &seed).map_err(|_| Error::XPrivFromSeed)?;
-        let mut signer = Self::new_from_xpriv(network, key);
-        signer.mnemonic = Some(mnemonic);
-        Ok(signer)
+        let derivator =
+            KeyDerivator::new_from_mnemonic_str(network, mnemonic).map_err(|_| Error::Derivator)?;
+        Ok(HotSigner {
+            derivator,
+            descriptors: BTreeSet::new(),
+            network,
+            sender: None,
+        })
     }
 
     /// Generate a new signer and it's private key.
-    /// The mnemonic is stored in [`HotSigner::mnemonic`] field.
-    ///
     /// Note: generating a private key by this way is not safe enough
     ///   to use on mainnet, so we decide to forbid usage of this method on mainnet.
     ///   This method will panic if `network` have [`Network::Bitcoin`] value.
@@ -183,9 +173,15 @@ impl HotSigner {
         // Should not be used on mainnet
         assert_ne!(network, bitcoin::Network::Bitcoin);
         let mnemonic = bip39::Mnemonic::generate(12).expect("12 words must not fail");
-        let mut signer = Self::new_from_mnemonics(network, &mnemonic.to_string())?;
-        signer.mnemonic = Some(mnemonic);
-        Ok(signer)
+
+        let derivator =
+            KeyDerivator::new_from_mnemonic(network, mnemonic).map_err(|_| Error::Derivator)?;
+        Ok(HotSigner {
+            derivator,
+            descriptors: BTreeSet::new(),
+            network,
+            sender: None,
+        })
     }
 
     /// Registers a descriptor for the signer.
@@ -210,15 +206,7 @@ impl HotSigner {
     /// An instance of `OXpriv` containing the origin fingerprint and the derived
     /// extended private key.
     pub fn xpriv(&self, path: &DerivationPath) -> OXpriv {
-        let xkey = self
-            .master_xpriv
-            .derive_priv(&self.secp, path)
-            .expect("cannot fail");
-
-        OXpriv {
-            origin: (self.fingerprint, path.clone()),
-            xkey,
-        }
+        self.derivator.xpriv_at(path)
     }
 
     /// Retrieves the extended public key at the specified derivation path.
@@ -230,13 +218,7 @@ impl HotSigner {
     /// An instance of `OXpub` containing the origin fingerprint and the derived
     /// extended public key.
     pub fn xpub(&self, path: &DerivationPath) -> OXpub {
-        let xpriv = self.xpriv(path);
-        let xkey = bip32::Xpub::from_priv(&self.secp, &xpriv.xkey);
-
-        OXpub {
-            origin: xpriv.origin,
-            xkey,
-        }
+        self.derivator.xpub_at(path)
     }
 
     /// Retrieves the private key at the specified derivation path from the master_xpriv.
@@ -247,10 +229,7 @@ impl HotSigner {
     /// # Returns
     /// The private key as a [`secp256k1::SecretKey`].
     fn private_key_at(&self, path: &DerivationPath) -> secp256k1::SecretKey {
-        self.master_xpriv
-            .derive_priv(self.secp(), path)
-            .expect("deriveable")
-            .private_key
+        self.derivator.secret_key_at(path)
     }
 
     /// Retrieves the public key at the specified derivation path from the master_xpriv.
@@ -261,7 +240,7 @@ impl HotSigner {
     /// # Returns
     /// The public key as a [`secp256k1::PublicKey`].
     pub fn public_key_at(&self, path: &DerivationPath) -> secp256k1::PublicKey {
-        self.private_key_at(path).public_key(self.secp())
+        self.derivator.public_key_at(path)
     }
 
     /// Sign the provided PSBT
@@ -366,7 +345,7 @@ impl HotSigner {
                 Err(Error::MissingWitnessUtxo)
             }?;
 
-            let signature = self.secp.sign_ecdsa_low_r(&hash, &signing_key);
+            let signature = self.secp().sign_ecdsa_low_r(&hash, &signing_key);
 
             self.secp()
                 .verify_ecdsa(&hash, &signature, &pubkey)
@@ -385,18 +364,18 @@ impl HotSigner {
 
     /// Returns the [`Fingerprint`] of this [`HotSigner`].
     pub fn fingerprint(&self) -> bip32::Fingerprint {
-        self.fingerprint
+        self.derivator.fingerprint()
     }
 
     /// Return the secp context of this signer
     fn secp(&self) -> &secp256k1::Secp256k1<All> {
-        &self.secp
+        self.derivator.secp()
     }
 
     /// Returns a copy of the mnemonic if not None
     #[allow(unused)]
     fn mnemonic(&self) -> Option<bip39::Mnemonic> {
-        self.mnemonic.clone()
+        self.derivator.mnemonic()
     }
 }
 

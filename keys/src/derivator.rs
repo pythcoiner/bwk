@@ -13,7 +13,7 @@ use std::{fmt::Debug, str::FromStr};
 
 /// A utility struct for deriving extended private keys, extended public keys,
 /// and ephemeral keys from a master seed or extended private key.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KeyDerivator {
     secp: Secp256k1<All>,
     fingerprint: Fingerprint,
@@ -177,5 +177,17 @@ impl KeyDerivator {
             origin: xpriv.origin,
             xkey,
         }
+    }
+
+    /// Retrieves the bip39 mnemonic if available.
+    ///
+    /// # returns an `Option` containing the `mnemonic` if the `keyderivator`
+    /// was created from one, or `None` otherwise.
+    pub fn mnemonic(&self) -> Option<Mnemonic> {
+        self.mnemonic.clone()
+    }
+
+    pub fn secp(&self) -> &Secp256k1<All> {
+        &self.secp
     }
 }
