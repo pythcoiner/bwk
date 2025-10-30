@@ -18,6 +18,7 @@ pub struct KeyDerivator {
     secp: Secp256k1<All>,
     fingerprint: Fingerprint,
     master_xpriv: Xpriv,
+    mnemonic: Option<Mnemonic>,
 }
 
 impl KeyDerivator {
@@ -80,7 +81,9 @@ impl KeyDerivator {
     ) -> Result<Self, Error> {
         let seed = mnemonic.to_seed(passphrase);
         let xpriv = Xpriv::new_master(network, &seed).map_err(|_| Error::XPrivFromSeed)?;
-        Ok(Self::new_from_xpriv(xpriv))
+        let mut s = Self::new_from_xpriv(xpriv);
+        s.mnemonic = Some(mnemonic);
+        Ok(s)
     }
 
     /// Creates a new `KeyDerivator` from an extended private key.
@@ -97,6 +100,7 @@ impl KeyDerivator {
             secp,
             fingerprint,
             master_xpriv: xpriv,
+            mnemonic: None,
         }
     }
 
