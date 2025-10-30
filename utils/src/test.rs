@@ -1,6 +1,8 @@
 use std::sync::Once;
 
-use corepc_node::Client;
+pub use corepc_node::{self, Client, Node};
+pub use miniscript;
+
 use miniscript::bitcoin::{
     self, hashes::serde_macros::serde_details::SerdeHash, Amount, OutPoint, ScriptBuf, TxIn, TxOut,
 };
