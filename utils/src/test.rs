@@ -1,10 +1,11 @@
-use std::sync::Once;
+use std::{str::FromStr, sync::Once};
 
 pub use corepc_node::{self, Client, Node};
 pub use miniscript;
 
 use miniscript::bitcoin::{
-    self, hashes::serde_macros::serde_details::SerdeHash, Amount, OutPoint, ScriptBuf, TxIn, TxOut,
+    self, hashes::serde_macros::serde_details::SerdeHash, Address, Amount, BlockHash, OutPoint,
+    ScriptBuf, Transaction, TxIn, TxOut, Txid,
 };
 use rand::Rng;
 
@@ -123,6 +124,31 @@ pub fn spending_tx(outpoint: bitcoin::OutPoint) -> bitcoin::Transaction {
 pub fn generate_blocks(client: &mut Client, blocks: usize) {
     let addr = client.new_address().unwrap();
     client.generate_to_address(blocks, &addr).unwrap();
+}
+
+pub fn send(client: &mut Client, addr: Address, btc: f64) -> Option<Txid> {
+    client
+        .send_to_address(&addr, Amount::from_btc(btc).unwrap())
+        .unwrap()
+        .txid()
+        .ok()
+}
+
+pub fn get_tx(client: &mut Client, txid: Txid) -> Option<Transaction> {
+    client.get_raw_transaction(txid).unwrap().transaction().ok()
+}
+
+pub fn get_height(client: &mut Client) -> u64 {
+    client.get_block_count().unwrap().0
+}
+
+pub fn get_tx_height(client: &mut Client, txid: Txid) -> Option<u64> {
+    let hash = client
+        .get_raw_transaction_verbose(txid)
+        .unwrap()
+        .block_hash?;
+    let hash = BlockHash::from_str(&hash).unwrap();
+    client.get_block(hash).unwrap().bip34_block_height().ok()
 }
 
 #[test]
