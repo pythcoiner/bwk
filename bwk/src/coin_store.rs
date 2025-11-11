@@ -1,7 +1,8 @@
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_tx::{
     coin::{self, KeyChain},
-    Coin, CoinStatus, DescrFingerprint,
+    transaction::max_input_satisfaction_size,
+    Coin, CoinStatus,
 };
 use miniscript::{
     bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Sequence, Txid},
@@ -419,7 +420,11 @@ impl CoinStore {
         let tx_store = &self.tx_store;
 
         let mut coins = BTreeMap::<OutPoint, CoinEntry>::new();
-        let descriptor_fingerprint = DescrFingerprint::new(&self.config.descriptor);
+        let descriptor = self.config.descriptor.clone();
+
+        // NOTE: here we take the max satisfaction size at default, for descriptor with several
+        // spending conditions, the correct satisfaction must be filled at tx crafting time.
+        let satisfaction = max_input_satisfaction_size(&descriptor);
 
         // list all received coins
         for entry in tx_store.inner().values() {
@@ -444,7 +449,7 @@ impl CoinStore {
                         coin::KeyChain::Custom(_) => unimplemented!(),
                     }
                     .script_pubkey();
-                    assert!(spk != txout.script_pubkey);
+                    assert!(spk == txout.script_pubkey);
 
                     let label = self
                         .label_store
@@ -460,7 +465,8 @@ impl CoinStore {
                         sequence: Sequence::ZERO,
                         status,
                         label,
-                        descriptor_fingerprint,
+                        descriptor: descriptor.clone(),
+                        satisfaction_size: satisfaction as u64,
                     };
                     let coin = CoinEntry {
                         coin,

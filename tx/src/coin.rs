@@ -3,7 +3,7 @@ use miniscript::{
         self, absolute,
         key::rand,
         psbt::{self},
-        Psbt, ScriptBuf, TxIn, Txid, Witness,
+        Psbt, ScriptBuf, TxIn, Witness,
     },
     psbt::PsbtExt,
     Descriptor, DescriptorPublicKey,
@@ -58,7 +58,8 @@ pub struct Coin {
     pub sequence: bitcoin::Sequence,
     pub status: CoinStatus,
     pub label: Option<Label>,
-    pub descriptor_fingerprint: crate::DescrFingerprint,
+    pub descriptor: Descriptor<DescriptorPublicKey>,
+    pub satisfaction_size: u64,
 }
 
 impl From<Coin> for bitcoin::TxIn {
@@ -72,43 +73,30 @@ impl From<Coin> for bitcoin::TxIn {
     }
 }
 
+impl TryFrom<Coin> for bitcoin::psbt::Input {
+    type Error = Error;
+
+    fn try_from(coin: Coin) -> Result<Self, Self::Error> {
+        coin.to_psbt_input()
+    }
+}
+
 impl Coin {
     pub fn spk(&self) -> ScriptBuf {
         self.txout.script_pubkey.clone()
     }
 
-    pub fn to_psbt_input<D, T>(&self, descriptor: &D, tx: &T) -> Result<psbt::Input, Error>
-    where
-        D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-        T: Fn(Txid) -> Option<bitcoin::Transaction>,
-    {
-        let spk = self.spk();
-        let is_segwit = spk.is_p2wsh() || spk.is_p2tr() || spk.is_p2wpkh();
-        let txid = self.outpoint.txid;
-        let funding_tx = tx(txid).ok_or(Error::NoFundingTx)?;
-        let non_witness_utxo = funding_tx
-            .output
-            .get(self.outpoint.vout as usize)
-            .cloned()
-            .ok_or(Error::WrongVout)?;
-
-        let inp = if is_segwit {
-            psbt::Input {
-                witness_utxo: Some(non_witness_utxo),
-                ..Default::default()
-            }
-        } else {
-            psbt::Input {
-                non_witness_utxo: Some(funding_tx),
-                ..Default::default()
-            }
+    pub fn to_psbt_input(&self) -> Result<psbt::Input, Error> {
+        let inp = psbt::Input {
+            witness_utxo: Some(self.txout.clone()),
+            ..Default::default()
         };
 
-        let fg = self.descriptor_fingerprint;
-        let descr = descriptor(fg).ok_or(Error::NoDescriptor)?;
         let (kc, index) = self.coin_path;
 
-        let descriptors = descr
+        let descriptors = self
+            .descriptor
+            .clone()
             .into_single_descriptors()
             .map_err(|_| Error::MultiDescriptor)?;
         let recv = descriptors.first().ok_or(Error::MultiDescriptor)?;

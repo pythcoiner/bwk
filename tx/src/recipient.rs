@@ -5,7 +5,7 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{coin::KeyChain, transaction::Amount, DescrFingerprint, Error};
+use crate::{coin::KeyChain, transaction::Amount, Error};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipient {
@@ -13,7 +13,7 @@ pub struct Recipient {
     pub amount: Amount,
     pub label: Option<String>,
     pub origin: Option<(KeyChain, u32 /* index */)>,
-    pub descriptor_fingerprint: Option<DescrFingerprint>,
+    pub descriptor: Option<Descriptor<DescriptorPublicKey>>,
 }
 
 impl From<Recipient> for TxOut {
@@ -39,15 +39,19 @@ impl From<Recipient> for TxOut {
     }
 }
 
-impl Recipient {
-    pub fn to_psbt_output<F>(&self, descriptor: &F) -> Result<bitcoin::psbt::Output, Error>
-    where
-        F: Fn(DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-    {
-        if let (Some(fg), Some((kc, index))) = (&self.descriptor_fingerprint, &self.origin) {
-            let descr = descriptor(*fg).ok_or(Error::NoDescriptor)?;
+impl TryFrom<Recipient> for bitcoin::psbt::Output {
+    type Error = Error;
 
+    fn try_from(recip: Recipient) -> Result<Self, Self::Error> {
+        recip.to_psbt_output()
+    }
+}
+
+impl Recipient {
+    pub fn to_psbt_output(&self) -> Result<bitcoin::psbt::Output, Error> {
+        if let (Some(descr), Some((kc, index))) = (&self.descriptor, &self.origin) {
             let descriptors = descr
+                .clone()
                 .into_single_descriptors()
                 .map_err(|_| Error::MultiDescriptor)?;
             let recv = descriptors.first().ok_or(Error::MultiDescriptor)?;

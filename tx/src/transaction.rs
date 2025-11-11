@@ -1,13 +1,13 @@
 use miniscript::{
-    bitcoin::{self, absolute, transaction::Version, Address, Network, Psbt, TxOut, Txid, Weight},
-    Descriptor, DescriptorPublicKey,
+    bitcoin::{self, absolute, transaction::Version, Network, Psbt, TxOut, Weight},
+    Descriptor, DescriptorPublicKey, ForEachKey,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     coin::{shuffle_coins, Coin, KeyChain},
     recipient::{shuffle_recipients, Recipient},
-    DescrFingerprint, DUST_AMOUNT, WITNESS_SCALE_FACTOR,
+    DUST_AMOUNT, WITNESS_SCALE_FACTOR,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +55,7 @@ pub struct TxTemplate {
     pub fees: Fees,
     /// Descriptor of the potential change address, used to process
     /// the weight of the change output
-    pub change_descriptor: crate::DescrFingerprint,
+    pub change_descriptor: Descriptor<DescriptorPublicKey>,
 }
 
 impl TxTemplate {
@@ -70,15 +70,11 @@ impl TxTemplate {
             output,
         }
     }
-    pub fn into_psbt<D, T>(&self, descriptor: &D, tx: &T) -> Result<Psbt, Error>
-    where
-        D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-        T: Fn(Txid) -> Option<bitcoin::Transaction>,
-    {
+    pub fn into_psbt(&self) -> Result<Psbt, Error> {
         // re-process the template as a sanity check
         let TransactionResult {
             tx_template, error, ..
-        } = process_transaction(self.clone(), descriptor, self.change_descriptor);
+        } = process_transaction(self.clone(), &self.change_descriptor);
         if let Some(error) = error {
             return Err(error);
         }
@@ -97,12 +93,12 @@ impl TxTemplate {
 
         for i in &self.inputs {
             psbt.inputs
-                .push(i.to_psbt_input(descriptor, tx).map_err(|_| Error::Input)?);
+                .push(i.to_psbt_input().map_err(|_| Error::Input)?);
         }
 
         for o in &self.outputs {
             psbt.outputs
-                .push(o.to_psbt_output(descriptor).map_err(|_| Error::Output)?);
+                .push(o.to_psbt_output().map_err(|_| Error::Output)?);
         }
 
         Ok(psbt)
@@ -119,9 +115,7 @@ pub enum Amount {
 /// Estimate the satisfaction size for an input, returning the result
 /// in weight units (WU).
 /// Note: The output of this function represent the worst case scenario.
-pub fn input_satisfaction_size(
-    descriptor: &Descriptor<DescriptorPublicKey>,
-) -> Result<usize, Error> {
+pub fn max_input_satisfaction_size(descriptor: &Descriptor<DescriptorPublicKey>) -> usize {
     descriptor
         .clone()
         .into_single_descriptors()
@@ -130,23 +124,15 @@ pub fn input_satisfaction_size(
         .expect("multikey")
         .clone()
         .max_weight_to_satisfy()
-        .map_err(|_| Error::Satisfaction)
-        .map(|w| w.to_wu() as usize)
+        .expect("invalid descriptor")
+        .to_wu() as usize
 }
 
 /// Estimates the maximum possible weight of an unsigned transaction
-pub fn tx_estimated_weight<F>(descriptor: F, tx_template: &TxTemplate) -> Result<Weight, Error>
-where
-    F: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-{
+pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Result<Weight, Error> {
     let mut inputs_weight = 0u64;
     for inp in &tx_template.inputs {
-        let inp_fg = inp.descriptor_fingerprint;
-        let inp_descriptor = descriptor(inp_fg).ok_or(Error::Descriptor)?;
-        let inp_satisfaction_weight: u64 = input_satisfaction_size(&inp_descriptor)?
-            .try_into()
-            .expect("valid weight");
-        inputs_weight += inp_satisfaction_weight;
+        inputs_weight += inp.satisfaction_size;
     }
     // Add weights together before converting to vbytes to avoid rounding up multiple times.
     let size = tx_template
@@ -318,33 +304,56 @@ fn process_fees(
     result
 }
 
-pub fn finalize_transaction<D, T, C>(
+pub fn finalize_transaction<C>(
     res: TransactionResult,
-    descriptor: &D,
-    tx: &T,
-    change: &C,
-    change_fingerprint: DescrFingerprint,
+    change_index: &C,
+    descriptor: Descriptor<DescriptorPublicKey>,
     shuffle: bool,
 ) -> Result<Psbt, Error>
 where
-    C: Fn() -> (Address, usize),
-    D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-    T: Fn(Txid) -> Option<bitcoin::Transaction>,
+    C: Fn() -> u32,
 {
     if let Some(error) = res.error {
         return Err(error);
     }
 
     let mut template = res.tx_template;
+    let change_descriptor = descriptor
+        .clone()
+        .into_single_descriptors()
+        .expect("multipath")
+        .get(1)
+        .expect("multipath")
+        .clone();
+    let is_mainnet = change_descriptor.for_any_key(|k| match k {
+        DescriptorPublicKey::XPub(k) => k.xkey.network.is_mainnet(),
+        _ => unreachable!(),
+    });
+
+    let network = if is_mainnet {
+        Network::Bitcoin
+    } else {
+        Network::Signet
+    };
 
     if let Some(change_value) = res.change {
-        let (address, index) = change();
+        let index = change_index();
+        let address = descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("multipath")
+            .at_derivation_index(index)
+            .expect("derivation")
+            .address(network)
+            .expect("invalid descriptor");
         let change_recip = Recipient {
             address: address.as_unchecked().clone(),
             amount: Amount::Value(change_value.to_sat()),
             label: None, // FIXME: auto label change
-            origin: Some((KeyChain::Change, index as u32)),
-            descriptor_fingerprint: Some(change_fingerprint),
+            origin: Some((KeyChain::Change, index)),
+            descriptor: Some(descriptor),
         };
         template.outputs.push(change_recip);
     }
@@ -354,19 +363,15 @@ where
         template.outputs = shuffle_recipients(template.outputs);
     }
 
-    template.into_psbt(descriptor, tx)
+    template.into_psbt()
 }
 
 /// Preprocesses a transaction based on the provided `TransactionTemplate`.
 #[allow(clippy::type_complexity)]
-pub fn process_transaction<F>(
+pub fn process_transaction(
     mut tx_template: TxTemplate,
-    descriptor: &F,
-    change_descriptor: crate::DescrFingerprint,
-) -> TransactionResult
-where
-    F: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-{
+    descriptor: &Descriptor<DescriptorPublicKey>,
+) -> TransactionResult {
     // TODO: implement coin selection if no or not enough input provided
 
     let mut result = TransactionResult::from_template(&tx_template);
@@ -410,21 +415,14 @@ where
         .fold(0u64, |sum, coin| sum + coin.txout.value.to_sat());
 
     // let tx = tx_template.tx();
-    let tx_weight_wo_change = match tx_estimated_weight(descriptor, &tx_template) {
+    let tx_weight_wo_change = match tx_estimated_weight(&tx_template) {
         Ok(w) => w,
         Err(e) => {
             result.error = Some(e);
             return result;
         }
     };
-    let change_descriptor = match descriptor(change_descriptor) {
-        Some(d) => d,
-        None => {
-            result.error = Some(Error::Descriptor);
-            return result;
-        }
-    };
-    let tx_weight_with_change = tx_weight_wo_change + change_weight(&change_descriptor);
+    let tx_weight_with_change = tx_weight_wo_change + change_weight(descriptor);
 
     let drain = match maxed_output {
         Some(_) => Drain::Max,
@@ -485,12 +483,9 @@ mod test {
         Amount, Network, OutPoint, Psbt, ScriptBuf, Sequence, TxOut,
     };
 
-    use crate::{
-        coin::KeyChain, descr_fingerprint, transaction::finalize_transaction, Coin, CoinStatus,
-        DescrFingerprint, Recipient,
-    };
+    use crate::{coin::KeyChain, transaction::finalize_transaction, Coin, CoinStatus, Recipient};
 
-    use super::{process_transaction, Fees, TxTemplate};
+    use super::{max_input_satisfaction_size, process_transaction, Fees, TxTemplate};
 
     fn tr_signer() -> (HotSigner, SpkDerivator) {
         let nw = Network::Regtest;
@@ -512,8 +507,8 @@ mod test {
             txid: txid(),
             vout: vout as u32,
         };
-        let descriptor_fingerprint =
-            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
+        let descriptor = derivator.descriptor();
+        let satisfaction = max_input_satisfaction_size(&descriptor);
         Coin {
             txout,
             outpoint,
@@ -522,20 +517,19 @@ mod test {
             sequence: Sequence::ZERO,
             status: CoinStatus::Unconfirmed,
             label: None,
-            descriptor_fingerprint,
+            descriptor,
+            satisfaction_size: satisfaction as u64,
         }
     }
 
     fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Recipient {
         let address = derivator.receive_at(index).as_unchecked().clone();
-        let descriptor_fingerprint =
-            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
         Recipient {
             address,
             amount: super::Amount::Value(amount),
             label: None,
             origin: Some((KeyChain::Receive, index)),
-            descriptor_fingerprint: Some(descriptor_fingerprint),
+            descriptor: Some(derivator.descriptor()),
         }
     }
 
@@ -548,7 +542,7 @@ mod test {
             amount: super::Amount::Value(amount),
             label: None,
             origin: None,
-            descriptor_fingerprint: None,
+            descriptor: None,
         }
     }
 
@@ -558,8 +552,7 @@ mod test {
         index: u32,
     ) -> (bitcoin::Transaction, Coin) {
         let spk = derivator.receive_at(index).script_pubkey();
-        let descriptor_fingerprint =
-            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
+        let descriptor = derivator.descriptor();
         let (tx, pos) = funding_tx(spk, (amount as f64) / 100_000_000.0);
         let txid = tx.compute_txid();
 
@@ -569,6 +562,8 @@ mod test {
             vout: (pos as u32),
         };
 
+        let satisfaction = max_input_satisfaction_size(&descriptor);
+
         let coin = Coin {
             txout,
             outpoint,
@@ -577,7 +572,8 @@ mod test {
             sequence: Sequence::ZERO,
             status: CoinStatus::Unconfirmed,
             label: None,
-            descriptor_fingerprint,
+            descriptor,
+            satisfaction_size: satisfaction as u64,
         };
 
         (tx, coin)
@@ -644,7 +640,6 @@ mod test {
     fn test_tr_tx() {
         let (_signer, derivator) = tr_signer();
         let descriptor = derivator.descriptor();
-        let fg = DescrFingerprint::new(&descriptor);
 
         let mut tx_map = BTreeMap::new();
 
@@ -660,53 +655,26 @@ mod test {
             inputs: vec![c1, c2],
             outputs: vec![r1],
             fees: Fees::MilliSatsVb(1000),
-            change_descriptor: fg,
+            change_descriptor: descriptor.clone(),
         };
 
-        let res = process_transaction(
-            template.clone(),
-            &(|f| (f == fg).then_some(descriptor.clone())),
-            fg,
-        );
+        let res = process_transaction(template.clone(), &descriptor);
 
         assert!(res.error.is_none());
         assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_914)));
         assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(86)));
 
-        let psbt = res
-            .tx_template
-            .into_psbt(
-                &(|f| (f == fg).then_some(descriptor.clone())),
-                &(|txid| tx_map.get(&txid).cloned()),
-            )
-            .unwrap();
+        let psbt = res.tx_template.into_psbt().unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
         assert_eq!(sum_outputs(&psbt), 35_000); // change is not added
 
-        let change = derivator.change_at(1);
-        let psbt = finalize_transaction(
-            res.clone(),
-            &(|f| (f == fg).then_some(descriptor.clone())),
-            &(|txid| tx_map.get(&txid).cloned()),
-            &(|| (change.clone(), 1)),
-            fg,
-            false,
-        )
-        .unwrap();
+        let psbt = finalize_transaction(res.clone(), &(|| 1), descriptor.clone(), false).unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
         assert_eq!(sum_outputs(&psbt), 80_000 - 86); // change is now added
 
         // shuffling must not change amounts
-        let psbt = finalize_transaction(
-            res,
-            &(|f| (f == fg).then_some(descriptor.clone())),
-            &(|txid| tx_map.get(&txid).cloned()),
-            &(|| (change.clone(), 1)),
-            fg,
-            true,
-        )
-        .unwrap();
+        let psbt = finalize_transaction(res.clone(), &(|| 1), descriptor.clone(), true).unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
-        assert_eq!(sum_outputs(&psbt), 80_000 - 86); // change is now added
+        assert_eq!(sum_outputs(&psbt), 80_000 - 86);
     }
 }
