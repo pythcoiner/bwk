@@ -51,12 +51,6 @@ impl From<raw_client::Error> for Error {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum CoinStatus {
-    Unconfirmed,
-    Confirmed,
-    Spend,
-}
 
 pub fn short_hash(s: &ScriptBuf) -> String {
     let s = ScriptHash::new(s).to_string();

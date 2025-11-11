@@ -5,7 +5,7 @@ members = [
     "bwk",
     "electrum",
     "backoff",
-    "keys", "utils", "sign", "descriptor",
+    "keys", "utils", "sign", "descriptor", "tx",
 ]
 
 [workspace.package]
@@ -42,6 +42,7 @@ corepc-node = { version = "0.10.0", features = ["download", "29_0"]}
 bwk-electrum = { path = "electrum"}
 bwk-backoff = { path = "backoff" }
 bwk-keys = { path = "keys" }
+bwk-tx = { path = "tx" }
 bwk-sign = { path = "sign" }
 bwk-descriptor = { path = "descriptor" }
 bwk-utils = { path = "utils" }

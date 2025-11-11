@@ -1,6 +1,10 @@
 use bwk_descriptor::derivator::SpkDerivator;
+use bwk_tx::{
+    coin::{self, KeyChain},
+    Coin, CoinStatus, DescrFingerprint,
+};
 use miniscript::{
-    bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Txid},
+    bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Sequence, Txid},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
@@ -10,15 +14,11 @@ use std::{
 };
 
 use crate::{
-    account::{
-        AddrAccount, AddressStatus, CoinState, CoinStatus, Notification, RustAddress, RustCoin,
-        Transaction,
-    },
-    address_store::{AddressEntry, AddressStore, AddressTip},
-    coin,
+    account::{CoinState, Notification},
+    address_store::{AddressEntry, AddressStatus, AddressStore, AddressTip},
     config::Config,
     label_store::{LabelKey, LabelStore},
-    tx_store::{InputMetadata, OutputMetadata, TxStore},
+    tx_store::{InputMetadata, OutputMetadata, TxEntry, TxStore},
 };
 
 #[derive(Debug)]
@@ -38,8 +38,7 @@ pub struct CoinStore {
     updates: Vec<Update>,
     derivator: SpkDerivator,
     notification: mpsc::Sender<Notification>,
-    #[allow(unused)]
-    config: Option<Config>,
+    config: Config,
 }
 
 #[derive(Debug, Default)]
@@ -144,7 +143,7 @@ impl CoinStore {
         look_ahead: u32,
         tx_store: TxStore,
         label_store: Arc<Mutex<LabelStore>>,
-        config: Option<Config>,
+        config: Config,
     ) -> Self {
         let derivator = SpkDerivator::new(descriptor, network).unwrap();
         let address_store = AddressStore::new(
@@ -420,6 +419,7 @@ impl CoinStore {
         let tx_store = &self.tx_store;
 
         let mut coins = BTreeMap::<OutPoint, CoinEntry>::new();
+        let descriptor_fingerprint = DescrFingerprint::new(&self.config.descriptor);
 
         // list all received coins
         for entry in tx_store.inner().values() {
@@ -438,25 +438,33 @@ impl CoinStore {
                     } else {
                         CoinStatus::Unconfirmed
                     };
-                    let coin = coin::Coin {
-                        txout,
-                        outpoint,
-                        // sequence is registered at spend time
-                        // so fill with dummy value
-                        sequence: bitcoin::Sequence::MAX,
-                        coin_path: (addr.account(), addr.index()),
-                    };
+                    let spk = match addr.account() {
+                        coin::KeyChain::Receive => self.derivator.receive_at(addr.index()),
+                        coin::KeyChain::Change => self.derivator.change_at(addr.index()),
+                        coin::KeyChain::Custom(_) => unimplemented!(),
+                    }
+                    .script_pubkey();
+                    assert!(spk != txout.script_pubkey);
+
                     let label = self
                         .label_store
                         .lock()
                         .expect("poisoned")
-                        .outpoint(coin.outpoint);
-                    let coin = CoinEntry {
-                        height: entry.height(),
+                        .outpoint(outpoint);
+                    let coin = Coin {
+                        txout,
+                        outpoint,
+                        coin_path: (addr.account(), addr.index()),
+                        height,
+                        // Sequence is overwritten at spend time anyway
+                        sequence: Sequence::ZERO,
                         status,
+                        label,
+                        descriptor_fingerprint,
+                    };
+                    let coin = CoinEntry {
                         coin,
                         address: addr.address(),
-                        label,
                     };
                     coins.insert(outpoint, coin);
                 }
@@ -466,7 +474,7 @@ impl CoinStore {
         for tx_entry in tx_store.inner().values() {
             for inp in &tx_entry.tx().input {
                 coins.entry(inp.previous_output).and_modify(|e| {
-                    e.status = CoinStatus::Spent;
+                    e.coin.status = CoinStatus::Spent;
                 });
             }
         }
@@ -488,7 +496,7 @@ impl CoinStore {
         {
             let store = self.label_store.lock().expect("poisoned");
             for (op, coin) in &mut coins {
-                coin.label = store.get(&LabelKey::OutPoint(*op)).clone();
+                coin.coin.label = store.get(&LabelKey::OutPoint(*op)).clone();
             }
         } // => release label_store lock
 
@@ -586,17 +594,13 @@ impl CoinStore {
     ///
     /// # Parameters
     /// - `status`: The status of the coins to retrieve.
-    pub fn get_by_status(&self, status: CoinStatus) -> Vec<RustCoin> {
+    pub fn get_by_status(&self, status: CoinStatus) -> Vec<CoinEntry> {
         self.store
             .clone()
             .into_iter()
             .filter_map(|(_, coin)| {
-                if coin.status == status {
-                    let address = self
-                        .address_store
-                        .get_entry(&coin.spk())
-                        .expect("coins have an address");
-                    Some(rust_coin(coin, address))
+                if coin.coin.status == status {
+                    Some(coin)
                 } else {
                     None
                 }
@@ -624,44 +628,40 @@ impl CoinStore {
             .store
             .clone()
             .into_iter()
-            .filter_map(|(_, coin)| match coin.status {
+            .filter_map(|(_, coin)| match coin.coin.status {
                 CoinStatus::Unconfirmed | CoinStatus::Confirmed | CoinStatus::BeingSpend => {
-                    let address = self
-                        .address_store
-                        .get_entry(&coin.spk())
-                        .expect("coin have a valid address");
-                    Some(rust_coin(coin, address))
+                    Some(coin)
                 }
                 CoinStatus::Spent => None,
             })
             .collect();
         coins.sort();
         let mut state = CoinState {
-            coins: vec![],
+            coins: Default::default(),
             confirmed_coins: 0,
             confirmed_balance: 0,
             unconfirmed_coins: 0,
             unconfirmed_balance: 0,
         };
-        for coin in &state.coins {
+        for coin in state.coins.values() {
             match coin.status {
                 CoinStatus::Unconfirmed => {
                     state.unconfirmed_coins += 1;
-                    state.unconfirmed_balance += coin.value;
+                    state.unconfirmed_balance += coin.txout.value.to_sat();
                 }
                 CoinStatus::Confirmed => {
                     state.confirmed_coins += 1;
-                    state.confirmed_balance += coin.value;
+                    state.confirmed_balance += coin.txout.value.to_sat();
                 }
                 _ => {}
             }
         }
-        state.coins = coins;
+        state.coins = coins.into_iter().map(|c| (*c.outpoint(), c.coin)).collect();
         state
     }
 
     /// Returns a list of all historical transactions
-    pub fn tx_history(&self) -> Vec<Transaction> {
+    pub fn tx_history(&self) -> Vec<TxEntry> {
         self.tx_store.transactions()
     }
 
@@ -749,17 +749,20 @@ impl Update {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 /// Represents a coin entry in the coin store.
 ///
 /// The `CoinEntry` struct contains information about the coin's height,
 /// status, associated coin data, and the address it belongs to.
 pub struct CoinEntry {
-    height: Option<u64>,
-    status: CoinStatus,
     pub coin: coin::Coin,
-    address: bitcoin::Address<NetworkUnchecked>,
-    label: Option<String>,
+    pub address: bitcoin::Address<NetworkUnchecked>,
+}
+
+impl From<CoinEntry> for Coin {
+    fn from(value: CoinEntry) -> Self {
+        value.coin
+    }
 }
 
 impl CoinEntry {
@@ -769,28 +772,28 @@ impl CoinEntry {
     /// An `Option<u64>` representing the height of the coin,
     /// or `None` if the coin is not confirmed.
     pub fn height(&self) -> Option<u64> {
-        self.height
+        self.coin.height
     }
     /// Returns the status of the coin.
     ///
     /// # Returns
     /// The `CoinStatus` of the coin.
     pub fn status(&self) -> CoinStatus {
-        self.status
+        self.coin.status
     }
     /// Returns a string representation of the coin's status.
     ///
     /// # Returns
     /// A string describing the coin's status.
     pub fn status_str(&self) -> String {
-        format!("{:?}", self.status)
+        format!("{:?}", self.coin.status)
     }
     /// Returns the label associated with the coin.
     ///
     /// # Returns
     /// A string representation of the coin's label, or an empty string if no label is set.
     pub fn label(&self) -> String {
-        self.label.clone().unwrap_or_default()
+        self.coin.label.clone().unwrap_or_default()
     }
     /// Returns the amount of the coin in satoshis.
     ///
@@ -843,7 +846,7 @@ impl CoinEntry {
     ///
     /// # Returns
     /// A tuple containing the `AddrAccount` and the index of the coin's derivation path.
-    pub fn deriv(&self) -> (AddrAccount, u32) {
+    pub fn deriv(&self) -> (KeyChain, u32) {
         self.coin.coin_path
     }
     /// Returns a boxed version of the coin entry.
@@ -864,14 +867,13 @@ impl CoinEntry {
     ///
     /// # Returns
     /// A boxed AddressEntry representation of the coin's address.
-    pub fn rust_address(&self) -> RustAddress {
+    pub fn rust_address(&self) -> AddressEntry {
         AddressEntry {
             status: AddressStatus::Unknown,
             address: self.address.clone(),
             account: self.coin.coin_path.0,
             index: self.coin.coin_path.1,
         }
-        .into()
     }
     /// Returns the script public key (SPK) associated with the coin.
     ///
@@ -879,17 +881,5 @@ impl CoinEntry {
     /// The `ScriptBuf` representing the coin's SPK.
     pub fn spk(&self) -> ScriptBuf {
         self.address.clone().assume_checked().script_pubkey()
-    }
-}
-
-pub fn rust_coin(coin: CoinEntry, address: AddressEntry) -> RustCoin {
-    RustCoin {
-        value: coin.coin.txout.value.to_sat(),
-        height: coin.height.unwrap_or(0),
-        confirmed: coin.height.is_some(),
-        status: coin.status,
-        outpoint: coin.coin.outpoint.to_string(),
-        address: address.into(),
-        label: coin.label(),
     }
 }

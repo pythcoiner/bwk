@@ -1,0 +1,21 @@
+[package]
+name = "bwk-tx"
+version = "0.0.1"
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+keywords.workspace = true
+readme.workspace = true
+
+[dependencies]
+serde.workspace = true
+miniscript.workspace = true
+bitcoin.workspace = true
+bitcoin.features = ["rand-std"]
+rand.workspace = true
+
+[dev-dependencies]
+bwk-descriptor.workspace = true
+bwk-sign.workspace = true
+bwk-utils.workspace = true

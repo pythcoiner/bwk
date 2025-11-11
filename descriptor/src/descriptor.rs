@@ -18,7 +18,7 @@ pub enum Error {
 pub enum ScriptType {
     Segwit(ChildNumber /* account */),
     Taproot(ChildNumber /* account */),
-    Descriptor(Descriptor<DescriptorPublicKey>),
+    Descriptor(Box<Descriptor<DescriptorPublicKey>>),
 }
 
 impl ScriptType {
@@ -39,7 +39,7 @@ impl ScriptType {
                 let deriv = tr_path(network, acc)?;
                 Ok(wpkh(xpub(deriv)))
             }
-            ScriptType::Descriptor(descriptor) => Ok(descriptor),
+            ScriptType::Descriptor(descriptor) => Ok(*descriptor),
         }
     }
 }

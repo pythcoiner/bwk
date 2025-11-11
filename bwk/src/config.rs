@@ -104,7 +104,7 @@ impl Config {
                     return None;
                 }
             }
-            ScriptType::Descriptor(descriptor) => descriptor,
+            ScriptType::Descriptor(descriptor) => *descriptor,
         };
         Some(Config {
             data_dir,

@@ -1,12 +1,18 @@
 use bwk_descriptor::derivator::SpkDerivator;
+use bwk_tx::coin::KeyChain;
 use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::mpsc};
 
-use crate::{
-    account::{AddrAccount, AddressStatus, Notification, RustAddress},
-    config::Config,
-};
+use crate::{account::Notification, config::Config};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+pub enum AddressStatus {
+    NotUsed,
+    Used,
+    Reused,
+    Unknown,
+}
 
 #[derive(Debug, Clone, Copy)]
 /// Represents the current tip of address generation for receiving and change.
@@ -42,7 +48,7 @@ pub struct AddressStore {
     notification: mpsc::Sender<Notification>,
     tx_listener: Option<mpsc::Sender<AddressTip>>,
     look_ahead: u32,
-    config: Option<Config>,
+    config: Config,
 }
 
 impl AddressStore {
@@ -65,7 +71,7 @@ impl AddressStore {
         recv_tip: u32,
         change_tip: u32,
         look_ahead: u32,
-        config: Option<Config>,
+        config: Config,
     ) -> Self {
         let store = Self {
             derivator,
@@ -103,9 +109,8 @@ impl AddressStore {
             // fail to connect to electrum
             let _ = tx_listener.send(AddressTip { recv, change });
         }
-        if let Some(config) = &self.config {
-            config.persist_tip(self.recv_generated_tip, self.change_generated_tip);
-        }
+        self.config
+            .persist_tip(self.recv_generated_tip, self.change_generated_tip);
     }
 
     /// Processes a received coin at the specified script public key.
@@ -117,9 +122,12 @@ impl AddressStore {
     /// This function panics if the script public key is not found in the store.
     pub fn recv_coin_at(&mut self, spk: &ScriptBuf) {
         let AddressEntry { account, index, .. } = self.store.get(spk).expect("must be there");
+        // AddrAccount::Receive => self.update_recv(*index),
+        // AddrAccount::Change => self.update_change(*index),
         match *account {
-            AddrAccount::Receive => self.update_recv(*index),
-            AddrAccount::Change => self.update_change(*index),
+            KeyChain::Receive => self.update_recv(*index),
+            KeyChain::Change => self.update_change(*index),
+            KeyChain::Custom(_) => unimplemented!(),
         }
     }
 
@@ -135,7 +143,7 @@ impl AddressStore {
                 AddressEntry {
                     status: AddressStatus::NotUsed,
                     address,
-                    account: AddrAccount::Receive,
+                    account: KeyChain::Receive,
                     index: i,
                 }
             });
@@ -148,7 +156,7 @@ impl AddressStore {
                 AddressEntry {
                     status: AddressStatus::NotUsed,
                     address,
-                    account: AddrAccount::Change,
+                    account: KeyChain::Change,
                     index: i,
                 }
             });
@@ -273,13 +281,13 @@ impl AddressStore {
     ///
     /// # Returns
     /// An `Addresses` object containing all unused receiving addresses.
-    pub fn get_unused(&self) -> Vec<RustAddress> {
+    pub fn get_unused(&self) -> Vec<AddressEntry> {
         let mut addrs = self
             .store
             .clone()
             .into_iter()
             .filter_map(|(_, entry)| {
-                if entry.status == AddressStatus::NotUsed && entry.account == AddrAccount::Receive {
+                if entry.status == AddressStatus::NotUsed && entry.account == KeyChain::Receive {
                     Some(entry.clone())
                 } else {
                     None
@@ -291,7 +299,7 @@ impl AddressStore {
                 .cmp(&b.account)
                 .then_with(|| a.index.cmp(&b.index))
         });
-        addrs.into_iter().map(Into::into).collect()
+        addrs.into_iter().collect()
     }
 
     /// Retrieves all addresses for a specific account type.
@@ -302,7 +310,7 @@ impl AddressStore {
     /// # Returns
     /// An `Addresses` object containing all addresses for the specified
     /// account type.
-    pub fn get(&self, account: AddrAccount) -> Vec<RustAddress> {
+    pub fn get(&self, account: KeyChain) -> Vec<AddressEntry> {
         let mut addrs = self
             .store
             .clone()
@@ -320,7 +328,7 @@ impl AddressStore {
                 .cmp(&b.account)
                 .then_with(|| a.index.cmp(&b.index))
         });
-        addrs.into_iter().map(Into::into).collect()
+        addrs.into_iter().collect()
     }
 
     /// Dumps the address store as a JSON value.
@@ -363,7 +371,7 @@ impl AddressStore {
 pub struct AddressEntry {
     pub status: AddressStatus,
     pub address: bitcoin::Address<NetworkUnchecked>,
-    pub account: AddrAccount,
+    pub account: KeyChain,
     pub index: u32,
 }
 
@@ -404,7 +412,7 @@ impl AddressEntry {
     ///
     /// # Returns
     /// The account type (receiving or change) of this entry.
-    pub fn account(&self) -> AddrAccount {
+    pub fn account(&self) -> KeyChain {
         self.account
     }
     /// Returns the account type as a u32 value.
@@ -413,8 +421,9 @@ impl AddressEntry {
     /// `0` for receiving and `1` for change accounts.
     pub fn account_u32(&self) -> u32 {
         match self.account {
-            AddrAccount::Receive => 0,
-            AddrAccount::Change => 1,
+            KeyChain::Receive => 0,
+            KeyChain::Change => 1,
+            KeyChain::Custom(c) => c,
         }
     }
     /// Returns the index of the address entry.
@@ -438,16 +447,5 @@ impl AddressEntry {
     /// A `Box<Self>` containing the cloned address entry.
     pub fn clone_boxed(&self) -> Box<Self> {
         Box::new(self.clone())
-    }
-}
-
-impl From<AddressEntry> for RustAddress {
-    fn from(value: AddressEntry) -> Self {
-        RustAddress {
-            address: value.address().assume_checked().to_string(),
-            status: value.status(),
-            account: value.account(),
-            index: value.index(),
-        }
     }
 }

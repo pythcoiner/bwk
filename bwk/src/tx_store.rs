@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
 };
 
-use crate::{account, coin_store::Update, config::maybe_create_dir};
+use crate::{coin_store::Update, config::maybe_create_dir};
 
 #[derive(Debug)]
 /// A structure to store Bitcoin transactions indexed by their transaction IDs.
@@ -33,8 +33,8 @@ impl TxStore {
         }
     }
 
-    pub fn transactions(&self) -> Vec<account::Transaction> {
-        self.store.values().map(|tx| tx.into()).collect()
+    pub fn transactions(&self) -> Vec<TxEntry> {
+        self.store.values().cloned().collect()
     }
 
     pub fn take_unpopulated_metadata(&mut self) -> BTreeSet<Txid> {
@@ -188,70 +188,6 @@ pub struct TxEntry {
     fees: u64,
     /// Tx weight in wu
     weight: u64,
-}
-
-impl From<&TxEntry> for account::Transaction {
-    fn from(value: &TxEntry) -> Self {
-        let height = value.height();
-        let txid = value.txid().to_string();
-        let fees = value.fees;
-        let weight = value.weight;
-        let mut inputs: BTreeMap<usize, _> = value
-            .tx()
-            .input
-            .iter()
-            .enumerate()
-            .map(|(i, txin)| {
-                (
-                    i,
-                    account::TxInput {
-                        vin: i,
-                        outpoint: txin.previous_output.to_string(),
-                        value: 0,
-                        owned: false,
-                    },
-                )
-            })
-            .collect();
-        for (i, md) in &value.inputs {
-            if let Some(input) = inputs.get_mut(i) {
-                input.value = md.value.unwrap_or(0);
-                input.owned = md.owned.unwrap_or(false);
-            }
-        }
-
-        let mut outputs: BTreeMap<usize, _> = value
-            .tx()
-            .output
-            .iter()
-            .enumerate()
-            .map(|(i, txout)| {
-                (
-                    i,
-                    account::TxOutput {
-                        vout: i,
-                        spk: txout.script_pubkey.clone(),
-                        value: txout.value.to_sat(),
-                        owned: false,
-                    },
-                )
-            })
-            .collect();
-        for (i, md) in &value.outputs {
-            if let Some(output) = outputs.get_mut(i) {
-                output.owned = md.owned.unwrap_or(false);
-            }
-        }
-
-        account::Transaction {
-            height,
-            txid,
-            inputs: inputs.into_values().collect(),
-            outputs: outputs.into_values().collect(),
-            fees,
-            weight,
-        }
-    }
 }
 
 impl TxEntry {

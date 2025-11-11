@@ -21,6 +21,7 @@ bwk-keys.workspace = true
 bwk-descriptor.workspace = true
 bwk-sign.workspace = true
 bwk-utils.workspace = true
+bwk-tx.workspace = true
 
 miniscript.workspace = true
 serde.workspace = true
