@@ -1,10 +1,14 @@
 use miniscript::{
-    bitcoin::{self, absolute, transaction::Version, Network, Psbt, TxOut, Txid, Weight},
+    bitcoin::{self, absolute, transaction::Version, Address, Network, Psbt, TxOut, Txid, Weight},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{coin::Coin, recipient::Recipient, DUST_AMOUNT, WITNESS_SCALE_FACTOR};
+use crate::{
+    coin::{shuffle_coins, Coin, KeyChain},
+    recipient::{shuffle_recipients, Recipient},
+    DescrFingerprint, DUST_AMOUNT, WITNESS_SCALE_FACTOR,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Error {
@@ -45,7 +49,7 @@ impl Fees {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TransactionTemplate {
+pub struct TxTemplate {
     pub inputs: Vec<Coin>,
     pub outputs: Vec<Recipient>,
     pub fees: Fees,
@@ -54,7 +58,7 @@ pub struct TransactionTemplate {
     pub change_descriptor: crate::DescrFingerprint,
 }
 
-impl TransactionTemplate {
+impl TxTemplate {
     pub fn tx(&self) -> bitcoin::Transaction {
         let template = self.clone();
         let input = template.inputs.into_iter().map(Into::into).collect();
@@ -66,16 +70,15 @@ impl TransactionTemplate {
             output,
         }
     }
-    pub fn into_psbt(
-        &self,
-        descriptor: &'static fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-        tx: &'static fn(Txid) -> Option<bitcoin::Transaction>,
-        network: Network,
-    ) -> Result<Psbt, Error> {
+    pub fn into_psbt<D, T>(&self, descriptor: &D, tx: &T) -> Result<Psbt, Error>
+    where
+        D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+        T: Fn(Txid) -> Option<bitcoin::Transaction>,
+    {
         // re-process the template as a sanity check
         let TransactionResult {
             tx_template, error, ..
-        } = process_transaction(self.clone(), descriptor, self.change_descriptor, network);
+        } = process_transaction(self.clone(), descriptor, self.change_descriptor);
         if let Some(error) = error {
             return Err(error);
         }
@@ -132,12 +135,10 @@ pub fn input_satisfaction_size(
 }
 
 /// Estimates the maximum possible weight of an unsigned transaction
-pub fn tx_estimated_weight(
-    // descriptor: &Descriptor<DescriptorPublicKey>,
-    // tx: &bitcoin::Transaction,
-    descriptor: &'static fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-    tx_template: &TransactionTemplate,
-) -> Result<Weight, Error> {
+pub fn tx_estimated_weight<F>(descriptor: F, tx_template: &TxTemplate) -> Result<Weight, Error>
+where
+    F: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+{
     let mut inputs_weight = 0u64;
     for inp in &tx_template.inputs {
         let inp_fg = inp.descriptor_fingerprint;
@@ -201,7 +202,7 @@ pub fn change_weight(descriptor: &Descriptor<DescriptorPublicKey>) -> Weight {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionResult {
-    tx_template: TransactionTemplate,
+    tx_template: TxTemplate,
     change: Option<bitcoin::Amount>,
     fees: Option<bitcoin::Amount>,
     warnings: Vec<Warning>,
@@ -209,7 +210,7 @@ pub struct TransactionResult {
 }
 
 impl TransactionResult {
-    pub fn from_template(tx_template: &TransactionTemplate) -> Self {
+    pub fn from_template(tx_template: &TxTemplate) -> Self {
         TransactionResult {
             tx_template: tx_template.clone(),
             change: None,
@@ -317,14 +318,55 @@ fn process_fees(
     result
 }
 
+pub fn finalize_transaction<D, T, C>(
+    res: TransactionResult,
+    descriptor: &D,
+    tx: &T,
+    change: &C,
+    change_fingerprint: DescrFingerprint,
+    shuffle: bool,
+) -> Result<Psbt, Error>
+where
+    C: Fn() -> (Address, usize),
+    D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+    T: Fn(Txid) -> Option<bitcoin::Transaction>,
+{
+    if let Some(error) = res.error {
+        return Err(error);
+    }
+
+    let mut template = res.tx_template;
+
+    if let Some(change_value) = res.change {
+        let (address, index) = change();
+        let change_recip = Recipient {
+            address: address.as_unchecked().clone(),
+            amount: Amount::Value(change_value.to_sat()),
+            label: None, // FIXME: auto label change
+            origin: Some((KeyChain::Change, index as u32)),
+            descriptor_fingerprint: Some(change_fingerprint),
+        };
+        template.outputs.push(change_recip);
+    }
+
+    if shuffle {
+        template.inputs = shuffle_coins(template.inputs);
+        template.outputs = shuffle_recipients(template.outputs);
+    }
+
+    template.into_psbt(descriptor, tx)
+}
+
 /// Preprocesses a transaction based on the provided `TransactionTemplate`.
 #[allow(clippy::type_complexity)]
-pub fn process_transaction(
-    mut tx_template: TransactionTemplate,
-    descriptor: &'static fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+pub fn process_transaction<F>(
+    mut tx_template: TxTemplate,
+    descriptor: &F,
     change_descriptor: crate::DescrFingerprint,
-    network: Network,
-) -> TransactionResult {
+) -> TransactionResult
+where
+    F: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+{
     // TODO: implement coin selection if no or not enough input provided
 
     let mut result = TransactionResult::from_template(&tx_template);
@@ -359,10 +401,6 @@ pub fn process_transaction(
                 // to be re-processed
             }
             Amount::Anchor => { /* anchor has 0 sats outputs */ }
-        }
-        if !o.address.is_valid_for_network(network) {
-            result.error = Some(Error::AddressNetwork);
-            return result;
         }
     }
 
@@ -431,4 +469,244 @@ pub fn process_transaction(
     }
 
     result
+}
+
+#[cfg(test)]
+mod test {
+    use std::collections::BTreeMap;
+
+    use bwk_descriptor::{tr_path, SpkDerivator};
+    use bwk_sign::HotSigner;
+    use bwk_utils::test::{random_input, random_output, txid};
+    use miniscript::bitcoin::{
+        self,
+        bip32::ChildNumber,
+        key::rand::{self, random, Rng},
+        Amount, Network, OutPoint, Psbt, ScriptBuf, Sequence, TxOut,
+    };
+
+    use crate::{
+        coin::KeyChain, descr_fingerprint, transaction::finalize_transaction, Coin, CoinStatus,
+        DescrFingerprint, Recipient,
+    };
+
+    use super::{process_transaction, Fees, TxTemplate};
+
+    fn tr_signer() -> (HotSigner, SpkDerivator) {
+        let nw = Network::Regtest;
+        let signer = HotSigner::new(nw).unwrap();
+        let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let derivator = SpkDerivator::new_tr(xpub, nw).unwrap();
+        (signer, derivator)
+    }
+
+    fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
+        let spk = derivator.receive_at(index).script_pubkey();
+        let txout = TxOut {
+            value: Amount::from_sat(amount),
+            script_pubkey: spk.clone(),
+        };
+        let vout: u8 = random();
+        let outpoint = OutPoint {
+            txid: txid(),
+            vout: vout as u32,
+        };
+        let descriptor_fingerprint =
+            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
+        Coin {
+            txout,
+            outpoint,
+            coin_path: (KeyChain::Receive, index),
+            height: None,
+            sequence: Sequence::ZERO,
+            status: CoinStatus::Unconfirmed,
+            label: None,
+            descriptor_fingerprint,
+        }
+    }
+
+    fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Recipient {
+        let address = derivator.receive_at(index).as_unchecked().clone();
+        let descriptor_fingerprint =
+            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
+        Recipient {
+            address,
+            amount: super::Amount::Value(amount),
+            label: None,
+            origin: Some((KeyChain::Receive, index)),
+            descriptor_fingerprint: Some(descriptor_fingerprint),
+        }
+    }
+
+    fn external_recipient(amount: u64) -> Recipient {
+        let (_signer, derivator) = tr_signer();
+        let index: u16 = random();
+        let address = derivator.receive_at(index as u32).as_unchecked().clone();
+        Recipient {
+            address,
+            amount: super::Amount::Value(amount),
+            label: None,
+            origin: None,
+            descriptor_fingerprint: None,
+        }
+    }
+
+    fn funding_coin(
+        amount: u64,
+        derivator: &SpkDerivator,
+        index: u32,
+    ) -> (bitcoin::Transaction, Coin) {
+        let spk = derivator.receive_at(index).script_pubkey();
+        let descriptor_fingerprint =
+            descr_fingerprint::DescrFingerprint::new(&derivator.descriptor());
+        let (tx, pos) = funding_tx(spk, (amount as f64) / 100_000_000.0);
+        let txid = tx.compute_txid();
+
+        let txout = tx.output[pos].clone();
+        let outpoint = OutPoint {
+            txid,
+            vout: (pos as u32),
+        };
+
+        let coin = Coin {
+            txout,
+            outpoint,
+            coin_path: (KeyChain::Receive, index),
+            height: None,
+            sequence: Sequence::ZERO,
+            status: CoinStatus::Unconfirmed,
+            label: None,
+            descriptor_fingerprint,
+        };
+
+        (tx, coin)
+    }
+
+    pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /* position */) {
+        let num_inputs = rand::thread_rng().gen_range(1..10);
+        let num_outputs: usize = rand::thread_rng().gen_range(1..5);
+
+        let mut inserted = false;
+        let mut pos = 0;
+        let mut input = vec![];
+        let mut output = vec![];
+
+        for _ in 0..num_inputs {
+            input.push(random_input());
+        }
+
+        for p in 0..num_outputs {
+            let r = rand::thread_rng().gen_range(1..5);
+            if (r == 0 || p == (num_outputs.saturating_sub(1))) && !inserted {
+                output.push(TxOut {
+                    value: Amount::from_btc(amount).unwrap(),
+                    script_pubkey: spk.clone(),
+                });
+                pos = p;
+                inserted = true;
+            } else {
+                output.push(random_output());
+            }
+        }
+
+        (
+            bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::Blocks(bitcoin::absolute::Height::ZERO),
+                input,
+                output,
+            },
+            pos,
+        )
+    }
+
+    fn sum_inputs(psbt: &Psbt) -> u64 {
+        psbt.inputs.iter().enumerate().fold(0, |sum, (pos, i)| {
+            if let Some(txout) = &i.witness_utxo {
+                sum + txout.value.to_sat()
+            } else if let Some(tx) = &i.non_witness_utxo {
+                sum + tx.output[pos].value.to_sat()
+            } else {
+                panic!("missing amount")
+            }
+        })
+    }
+
+    fn sum_outputs(psbt: &Psbt) -> u64 {
+        psbt.unsigned_tx
+            .output
+            .iter()
+            .fold(0, |sum, o| sum + o.value.to_sat())
+    }
+
+    #[test]
+    fn test_tr_tx() {
+        let (_signer, derivator) = tr_signer();
+        let descriptor = derivator.descriptor();
+        let fg = DescrFingerprint::new(&descriptor);
+
+        let mut tx_map = BTreeMap::new();
+
+        let (tx1, c1) = funding_coin(30_000, &derivator, 1);
+        let (tx2, c2) = funding_coin(50_000, &derivator, 2);
+
+        tx_map.insert(tx1.compute_txid(), tx1);
+        tx_map.insert(tx2.compute_txid(), tx2);
+
+        let r1 = external_recipient(35_000);
+
+        let template = TxTemplate {
+            inputs: vec![c1, c2],
+            outputs: vec![r1],
+            fees: Fees::MilliSatsVb(1000),
+            change_descriptor: fg,
+        };
+
+        let res = process_transaction(
+            template.clone(),
+            &(|f| (f == fg).then_some(descriptor.clone())),
+            fg,
+        );
+
+        assert!(res.error.is_none());
+        assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_914)));
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(86)));
+
+        let psbt = res
+            .tx_template
+            .into_psbt(
+                &(|f| (f == fg).then_some(descriptor.clone())),
+                &(|txid| tx_map.get(&txid).cloned()),
+            )
+            .unwrap();
+        assert_eq!(sum_inputs(&psbt), 80_000);
+        assert_eq!(sum_outputs(&psbt), 35_000); // change is not added
+
+        let change = derivator.change_at(1);
+        let psbt = finalize_transaction(
+            res.clone(),
+            &(|f| (f == fg).then_some(descriptor.clone())),
+            &(|txid| tx_map.get(&txid).cloned()),
+            &(|| (change.clone(), 1)),
+            fg,
+            false,
+        )
+        .unwrap();
+        assert_eq!(sum_inputs(&psbt), 80_000);
+        assert_eq!(sum_outputs(&psbt), 80_000 - 86); // change is now added
+
+        // shuffling must not change amounts
+        let psbt = finalize_transaction(
+            res,
+            &(|f| (f == fg).then_some(descriptor.clone())),
+            &(|txid| tx_map.get(&txid).cloned()),
+            &(|| (change.clone(), 1)),
+            fg,
+            true,
+        )
+        .unwrap();
+        assert_eq!(sum_inputs(&psbt), 80_000);
+        assert_eq!(sum_outputs(&psbt), 80_000 - 86); // change is now added
+    }
 }

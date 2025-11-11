@@ -4,8 +4,8 @@ pub use corepc_node::{self, Client, Node};
 pub use miniscript;
 
 use miniscript::bitcoin::{
-    self, hashes::serde_macros::serde_details::SerdeHash, Address, Amount, BlockHash, OutPoint,
-    ScriptBuf, Transaction, TxIn, TxOut, Txid,
+    self, hashes::serde_macros::serde_details::SerdeHash, key::rand::random, Address, Amount,
+    BlockHash, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid,
 };
 use rand::Rng;
 
@@ -22,22 +22,16 @@ pub fn setup_logger() {
 }
 
 // generate a dummy txid
-pub fn txid(value: u8) -> bitcoin::Txid {
-    bitcoin::Txid::from_slice_delegated(
-        &[0; 32][..31]
-            .iter()
-            .chain(std::iter::once(&value))
-            .cloned()
-            .collect::<Vec<u8>>()[..],
-    )
-    .expect("Invalid Txid")
+pub fn txid() -> bitcoin::Txid {
+    let raw: [u8; 32] = random();
+    bitcoin::Txid::from_slice_delegated(&raw).expect("Invalid Txid")
 }
 
 /// Generates a random Bitcoin transaction input.
 #[allow(deprecated)]
 pub fn random_input() -> TxIn {
     let mut rng = rand::thread_rng();
-    let txid = txid(rng.gen::<u8>());
+    let txid = txid();
     let vout = rng.gen_range(0..10);
     TxIn {
         previous_output: OutPoint::new(txid, vout),
@@ -154,8 +148,8 @@ pub fn get_tx_height(client: &mut Client, txid: Txid) -> Option<u64> {
 #[test]
 fn gen_txid() {
     setup_logger();
-    let tx = txid(0);
+    let tx = txid();
     log::debug!("{tx:?}");
-    let tx = txid(1);
+    let tx = txid();
     log::debug!("{tx:?}");
 }

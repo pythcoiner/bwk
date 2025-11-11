@@ -1,6 +1,7 @@
 use miniscript::{
     bitcoin::{
         self, absolute,
+        key::rand,
         psbt::{self},
         Psbt, ScriptBuf, TxIn, Txid, Witness,
     },
@@ -76,11 +77,11 @@ impl Coin {
         self.txout.script_pubkey.clone()
     }
 
-    pub fn to_psbt_input(
-        &self,
-        descriptor: &'static fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-        tx: &'static fn(Txid) -> Option<bitcoin::Transaction>,
-    ) -> Result<psbt::Input, Error> {
+    pub fn to_psbt_input<D, T>(&self, descriptor: &D, tx: &T) -> Result<psbt::Input, Error>
+    where
+        D: Fn(crate::DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+        T: Fn(Txid) -> Option<bitcoin::Transaction>,
+    {
         let spk = self.spk();
         let is_segwit = spk.is_p2wsh() || spk.is_p2tr() || spk.is_p2wpkh();
         let txid = self.outpoint.txid;
@@ -145,4 +146,10 @@ impl Coin {
 
         Ok(dummy_psbt.inputs[0].clone())
     }
+}
+
+pub fn shuffle_coins(mut vec: Vec<Coin>) -> Vec<Coin> {
+    use rand::seq::SliceRandom;
+    vec.shuffle(&mut rand::thread_rng());
+    vec
 }

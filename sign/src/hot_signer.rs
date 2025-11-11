@@ -457,7 +457,7 @@ mod tests {
 
         let txin = TxIn {
             previous_output: bitcoin::OutPoint {
-                txid: txid(0),
+                txid: txid(),
                 vout: 1,
             },
             script_sig: ScriptBuf::new(),
@@ -707,7 +707,7 @@ mod tests {
 
         let txin = TxIn {
             previous_output: bitcoin::OutPoint {
-                txid: txid(0),
+                txid: txid(),
                 vout: 1,
             },
             script_sig: ScriptBuf::new(),

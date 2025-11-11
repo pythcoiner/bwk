@@ -1,5 +1,5 @@
 use miniscript::{
-    bitcoin::{self, absolute, address::NetworkUnchecked, Address, TxOut},
+    bitcoin::{self, absolute, address::NetworkUnchecked, key::rand, Address, TxOut},
     psbt::PsbtExt,
     Descriptor, DescriptorPublicKey,
 };
@@ -40,10 +40,10 @@ impl From<Recipient> for TxOut {
 }
 
 impl Recipient {
-    pub fn to_psbt_output(
-        &self,
-        descriptor: &'static fn(DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
-    ) -> Result<bitcoin::psbt::Output, Error> {
+    pub fn to_psbt_output<F>(&self, descriptor: &F) -> Result<bitcoin::psbt::Output, Error>
+    where
+        F: Fn(DescrFingerprint) -> Option<Descriptor<DescriptorPublicKey>>,
+    {
         if let (Some(fg), Some((kc, index))) = (&self.descriptor_fingerprint, &self.origin) {
             let descr = descriptor(*fg).ok_or(Error::NoDescriptor)?;
 
@@ -89,4 +89,10 @@ impl Recipient {
             Ok(bitcoin::psbt::Output::default())
         }
     }
+}
+
+pub fn shuffle_recipients(mut vec: Vec<Recipient>) -> Vec<Recipient> {
+    use rand::seq::SliceRandom;
+    vec.shuffle(&mut rand::thread_rng());
+    vec
 }
