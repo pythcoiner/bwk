@@ -14,8 +14,8 @@ miniscript.workspace = true
 bitcoin.workspace = true
 bitcoin.features = ["rand-std"]
 rand.workspace = true
+bwk-descriptor.workspace = true
 
 [dev-dependencies]
-bwk-descriptor.workspace = true
 bwk-sign.workspace = true
 bwk-utils.workspace = true

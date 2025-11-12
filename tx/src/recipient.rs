@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{coin::KeyChain, transaction::Amount, Error};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Recipient {
     pub address: Address<NetworkUnchecked>,
     pub amount: Amount,
@@ -16,8 +16,8 @@ pub struct Recipient {
     pub descriptor: Option<Descriptor<DescriptorPublicKey>>,
 }
 
-impl From<Recipient> for TxOut {
-    fn from(recip: Recipient) -> Self {
+impl From<&Recipient> for TxOut {
+    fn from(recip: &Recipient) -> Self {
         let value = match recip.amount {
             Amount::Value(v) => bitcoin::Amount::from_sat(v),
             Amount::Max(value) => {
@@ -34,8 +34,14 @@ impl From<Recipient> for TxOut {
         };
         TxOut {
             value,
-            script_pubkey: recip.address.assume_checked().script_pubkey(),
+            script_pubkey: recip.address.clone().assume_checked().script_pubkey(),
         }
+    }
+}
+
+impl From<Recipient> for TxOut {
+    fn from(value: Recipient) -> Self {
+        (&value).into()
     }
 }
 

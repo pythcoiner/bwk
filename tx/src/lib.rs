@@ -3,6 +3,7 @@ pub mod descr_fingerprint;
 pub mod error;
 pub mod recipient;
 pub mod transaction;
+pub mod tx_builder;
 
 pub use coin::{Coin, CoinStatus};
 pub use descr_fingerprint::DescrFingerprint;
