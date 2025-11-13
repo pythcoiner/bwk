@@ -169,7 +169,7 @@ impl SigningManager {
         let xpub = signer.xpub(&deriv_path);
         let descriptor = wpkh(xpub);
 
-        signer.sign(psbt, descriptor);
+        signer.sign_with_descriptor(psbt, descriptor);
     }
 }
 

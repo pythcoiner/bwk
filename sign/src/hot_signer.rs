@@ -11,6 +11,7 @@ use crate::{
 };
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_keys::{KeyDerivator, OXpriv, OXpub};
+use miniscript::psbt::PsbtExt;
 use serde::{Deserialize, Serialize};
 use {
     bip39,
@@ -73,7 +74,7 @@ impl Signer for HotSigner {
         };
     }
 
-    fn sign(&self, mut psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>) {
+    fn sign_with_descriptor(&self, mut psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>) {
         if self.descriptors.contains(&descriptor) {
             if let Err(e) = self.inner_sign(&mut psbt, &descriptor) {
                 send!(self, Error(e));
@@ -243,6 +244,22 @@ impl HotSigner {
         self.derivator.public_key_at(path)
     }
 
+    pub fn sign(&self, psbt: &mut Psbt) {
+        for descr in &self.descriptors {
+            if let Err(e) = self.inner_sign(psbt, descr) {
+                println!("fail to sign: {e:?}");
+            }
+        }
+    }
+
+    pub fn finalize(
+        &self,
+        psbt: &mut Psbt,
+    ) -> Result<bitcoin::Transaction, Vec<miniscript::psbt::Error>> {
+        PsbtExt::finalize_mut(psbt, self.secp())?;
+        Ok(Psbt::extract_tx_unchecked_fee_rate(psbt.clone()))
+    }
+
     /// Sign the provided PSBT
     ///
     /// This function processes each input of the PSBT, checks for the necessary
@@ -368,7 +385,7 @@ impl HotSigner {
     }
 
     /// Return the secp context of this signer
-    fn secp(&self) -> &secp256k1::Secp256k1<All> {
+    pub fn secp(&self) -> &secp256k1::Secp256k1<All> {
         self.derivator.secp()
     }
 
@@ -402,17 +419,22 @@ pub fn deriv_path(path: &(bool /* is_change */, u32)) -> Result<DerivationPath, 
 /// A result containing a tuple of the account type as [`AddrAccount`] and the index as `u32`.
 /// Returns an error if the derivation path does not have the expected length.
 pub fn account_path(path: &DerivationPath) -> Result<(bool /* is_change */, u32), Error> {
-    if path.len() != 2 {
-        Err(Error::DerivationPath)?
+    let mut path = path.to_u32_vec();
+    #[allow(clippy::comparison_chain)]
+    if path.len() < 2 {
+        return Err(Error::DerivationPath);
+    } else if path.len() > 2 {
+        path = path[path.len() - 2..path.len()].to_vec();
     }
-    let path = path.to_u32_vec();
     if path.is_empty() {
         return Err(Error::DerivationPath);
     }
     let is_change = match path[0] {
         0 => false,
         1 => true,
-        _ => return Err(Error::DerivationPath),
+        _ => {
+            return Err(Error::DerivationPath);
+        }
     };
     Ok((is_change, path[1]))
 }
@@ -745,7 +767,7 @@ mod tests {
             .bip32_derivation
             .insert(pubkey, (signer.fingerprint(), deriv_p));
 
-        signer.sign(psbt, descriptor);
+        signer.sign_with_descriptor(psbt, descriptor);
         let notif = mock.receiver.recv().unwrap();
         match notif {
             SignerNotif::Signed(fg, psbt) => {

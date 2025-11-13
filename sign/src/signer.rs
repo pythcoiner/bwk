@@ -46,7 +46,7 @@ pub trait Signer {
     /// Request the signer to sign the given psbt. A descriptor must be loaded
     /// prior to call this function.
     /// The signer must return a [`SignerNotif::DescriptorLoaded`] notification.
-    fn sign(&self, psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>);
+    fn sign_with_descriptor(&self, psbt: Psbt, descriptor: Descriptor<DescriptorPublicKey>);
     /// Request the signer to display the address for verification.
     /// No notification is expected in return.
     fn display_address(&self, _deriv: (bool /* is_change */, u32)) {}
