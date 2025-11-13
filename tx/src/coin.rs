@@ -94,13 +94,14 @@ impl Coin {
 
         let (kc, index) = self.coin_path;
 
-        let descriptors = self
+        let mut descriptors = self
             .descriptor
             .clone()
             .into_single_descriptors()
-            .map_err(|_| Error::MultiDescriptor)?;
-        let recv = descriptors.first().ok_or(Error::MultiDescriptor)?;
-        let change = descriptors.get(1).ok_or(Error::MultiDescriptor)?;
+            .map_err(|_| Error::MultiDescriptor)?
+            .into_iter();
+        let recv = descriptors.next().ok_or(Error::MultiDescriptor)?;
+        let change = descriptors.next().ok_or(Error::MultiDescriptor)?;
 
         let descr = match kc {
             KeyChain::Receive => recv

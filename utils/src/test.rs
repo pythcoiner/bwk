@@ -115,34 +115,46 @@ pub fn spending_tx(outpoint: bitcoin::OutPoint) -> bitcoin::Transaction {
     }
 }
 
-pub fn generate_blocks(client: &mut Client, blocks: usize) {
-    let addr = client.new_address().unwrap();
-    client.generate_to_address(blocks, &addr).unwrap();
+pub fn generate_blocks(bitcoind: &mut Client, blocks: usize) {
+    let addr = bitcoind.new_address().unwrap();
+    bitcoind.generate_to_address(blocks, &addr).unwrap();
 }
 
-pub fn send(client: &mut Client, addr: Address, btc: f64) -> Option<Txid> {
-    client
+pub fn send(bitcoind: &mut Client, addr: Address, btc: f64) -> Option<Txid> {
+    bitcoind
         .send_to_address(&addr, Amount::from_btc(btc).unwrap())
         .unwrap()
         .txid()
         .ok()
 }
 
-pub fn get_tx(client: &mut Client, txid: Txid) -> Option<Transaction> {
-    client.get_raw_transaction(txid).unwrap().transaction().ok()
+pub fn bitcoind_with_txindex() -> corepc_node::Node {
+    let mut conf = corepc_node::Conf::default();
+    conf.args.push("-txindex");
+    let mut node = corepc_node::Node::from_downloaded_with_conf(&conf).unwrap();
+    generate_blocks(&mut node.client, 110);
+    node
 }
 
-pub fn get_height(client: &mut Client) -> u64 {
-    client.get_block_count().unwrap().0
+pub fn get_tx(bitcoind: &mut Client, txid: Txid) -> Option<Transaction> {
+    bitcoind
+        .get_raw_transaction(txid)
+        .unwrap()
+        .transaction()
+        .ok()
 }
 
-pub fn get_tx_height(client: &mut Client, txid: Txid) -> Option<u64> {
-    let hash = client
+pub fn get_height(bitcoind: &mut Client) -> u64 {
+    bitcoind.get_block_count().unwrap().0
+}
+
+pub fn get_tx_height(bitcoind: &mut Client, txid: Txid) -> Option<u64> {
+    let hash = bitcoind
         .get_raw_transaction_verbose(txid)
         .unwrap()
         .block_hash?;
     let hash = BlockHash::from_str(&hash).unwrap();
-    client.get_block(hash).unwrap().bip34_block_height().ok()
+    bitcoind.get_block(hash).unwrap().bip34_block_height().ok()
 }
 
 #[test]

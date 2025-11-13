@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     coin::{shuffle_coins, Coin, KeyChain},
     recipient::{shuffle_recipients, Recipient},
-    DUST_AMOUNT, WITNESS_SCALE_FACTOR,
+    DUST_AMOUNT,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,7 +135,6 @@ pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Result<Weight, Error> {
     for inp in &tx_template.inputs {
         inputs_weight += inp.satisfaction_size;
     }
-    // Add weights together before converting to vbytes to avoid rounding up multiple times.
     let size = tx_template
         .tx()
         .weight()
@@ -158,11 +157,6 @@ pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Result<Weight, Error> {
                 },
             )
         })
-        .unwrap();
-    let size = size
-        .checked_add(WITNESS_SCALE_FACTOR.checked_sub(1).unwrap())
-        .unwrap()
-        .checked_div(WITNESS_SCALE_FACTOR)
         .unwrap();
     Ok(Weight::from_wu(size))
 }
@@ -189,11 +183,11 @@ pub fn change_weight(descriptor: &Descriptor<DescriptorPublicKey>) -> Weight {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionResult {
-    tx_template: TxTemplate,
-    change: Option<bitcoin::Amount>,
-    fees: Option<bitcoin::Amount>,
-    warnings: Vec<Warning>,
-    error: Option<Error>,
+    pub tx_template: TxTemplate,
+    pub change: Option<bitcoin::Amount>,
+    pub fees: Option<bitcoin::Amount>,
+    pub warnings: Vec<Warning>,
+    pub error: Option<Error>,
 }
 
 impl TransactionResult {
@@ -499,8 +493,8 @@ mod test {
         let res = process_transaction(template.clone(), &descriptor);
 
         assert!(res.error.is_none());
-        assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_914)));
-        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(86)));
+        assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_788)));
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(212)));
 
         let psbt = res.tx_template.into_psbt().unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
@@ -509,12 +503,12 @@ mod test {
         let psbt =
             finalize_transaction(res.clone(), &mut (|| 1), descriptor.clone(), false).unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
-        assert_eq!(sum_outputs(&psbt), 80_000 - 86); // change is now added
+        assert_eq!(sum_outputs(&psbt), 80_000 - 212); // change is now added
 
         // shuffling must not change amounts
         let psbt =
             finalize_transaction(res.clone(), &mut (|| 1), descriptor.clone(), true).unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
-        assert_eq!(sum_outputs(&psbt), 80_000 - 86);
+        assert_eq!(sum_outputs(&psbt), 80_000 - 212);
     }
 }

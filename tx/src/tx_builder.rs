@@ -9,9 +9,12 @@ use miniscript::{Descriptor, DescriptorPublicKey};
 #[cfg(test)]
 use {
     bitcoin::{bip32::ChildNumber, Network},
-    bwk_descriptor::tr_path,
+    bwk_descriptor::{tr_path, wpkh_path},
     bwk_sign::HotSigner,
-    bwk_utils::test::{random_input, random_output, txid},
+    bwk_sign::Signer,
+    bwk_utils::test::{
+        corepc_node, generate_blocks, get_tx, get_tx_height, random_input, random_output, txid,
+    },
     miniscript::bitcoin::{
         self,
         key::rand::{self, random, Rng},
@@ -129,11 +132,10 @@ impl TxBuilder {
         self
     }
     /// Add input to the set of inputs
-    pub fn input(mut self, coin: Coin) -> Self {
+    pub fn add_input(&mut self, coin: Coin) {
         if !self.tx_template.inputs.contains(&coin) {
             self.tx_template.inputs.push(coin);
         }
-        self
     }
     /// Replace current template outputs by new set of outputs
     pub fn outputs(mut self, recipients: Vec<Recipient>) -> Self {
@@ -141,11 +143,10 @@ impl TxBuilder {
         self
     }
     /// Add output to the set of outputs
-    pub fn output(mut self, recipient: Recipient) -> Self {
+    pub fn add_output(&mut self, recipient: Recipient) {
         if !self.tx_template.outputs.contains(&recipient) {
             self.tx_template.outputs.push(recipient);
         }
-        self
     }
     /// Initialise a new template
     pub fn new_template(&mut self) {
@@ -250,7 +251,8 @@ impl TxBuilder {
     }
     #[cfg(test)]
     pub fn funding_input(&mut self, amount: u64) {
-        let coin = receive_coin(amount, &self.derivator, random());
+        let index: u8 = random();
+        let coin = receive_coin(amount, &self.derivator, index as u32);
         self.tx_template.inputs.push(coin);
     }
     #[cfg(test)]
@@ -261,16 +263,61 @@ impl TxBuilder {
     #[cfg(test)]
     pub fn self_output(&mut self, amount: u64) {
         use crate::coin::KeyChain;
-        let index = random();
-        let addr = self.derivator.receive_at(index);
+        let index: u8 = random();
+        let addr = self.derivator.receive_at(index as u32);
         let recipient = Recipient {
             address: addr.as_unchecked().clone(),
             amount: crate::Amount::Value(amount),
             label: None,
-            origin: Some((KeyChain::Receive, index)),
+            origin: Some((KeyChain::Receive, index as u32)),
             descriptor: Some(self.derivator.descriptor()),
         };
         self.tx_template.outputs.push(recipient);
+    }
+    #[cfg(test)]
+    pub fn receive_address_at(&self, index: u32) -> bitcoin::Address {
+        self.derivator.receive_at(index)
+    }
+    #[cfg(test)]
+    pub fn fund_with_bitcoind(&mut self, bitcoind: &mut corepc_node::Client, amount: u64) -> Coin {
+        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size};
+
+        let index: u8 = random();
+        let addr = self.receive_address_at(index as u32);
+        let txid = bitcoind
+            .send_to_address(&addr, bitcoin::Amount::from_sat(amount))
+            .unwrap()
+            .txid()
+            .unwrap();
+        generate_blocks(bitcoind, 3);
+        let height = get_tx_height(bitcoind, txid).unwrap();
+        let tx = get_tx(bitcoind, txid).unwrap();
+        let mut vout = None;
+        for (pos, txout) in tx.output.iter().enumerate() {
+            if txout.script_pubkey == addr.script_pubkey() {
+                vout = Some((pos, txout.clone()));
+                break;
+            }
+        }
+        let (vout, txout) = vout.unwrap();
+        let descriptor = self.derivator.descriptor();
+        let satisfaction = max_input_satisfaction_size(&descriptor);
+        let coin = Coin {
+            txout,
+            outpoint: OutPoint {
+                txid,
+                vout: vout as u32,
+            },
+            coin_path: (KeyChain::Receive, index as u32),
+            height: Some(height),
+            sequence: Sequence::ZERO,
+            status: crate::CoinStatus::Confirmed,
+            label: None,
+            descriptor: self.derivator.descriptor(),
+            satisfaction_size: satisfaction as u64,
+        };
+        self.receive_coin(coin.clone());
+        coin
     }
 }
 
@@ -306,10 +353,22 @@ fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
 #[cfg(test)]
 pub fn tr_signer() -> (HotSigner, SpkDerivator) {
     let nw = Network::Regtest;
-    let signer = HotSigner::new(nw).unwrap();
+    let mut signer = HotSigner::new(nw).unwrap();
     let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
     let xpub = signer.xpub(&path);
     let derivator = SpkDerivator::new_tr(xpub, nw).unwrap();
+    signer.register_descriptor(derivator.descriptor());
+    (signer, derivator)
+}
+
+#[cfg(test)]
+pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
+    let nw = Network::Regtest;
+    let mut signer = HotSigner::new(nw).unwrap();
+    let path = wpkh_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+    let xpub = signer.xpub(&path);
+    let derivator = SpkDerivator::new_wpkh(xpub, nw).unwrap();
+    signer.register_descriptor(derivator.descriptor());
     (signer, derivator)
 }
 
@@ -429,4 +488,59 @@ pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /
         },
         pos,
     )
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use bwk_utils::test::bitcoind_with_txindex;
+
+    #[test]
+    fn test_segwit_offline() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder =
+            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+
+        builder.funding_input(30_000);
+        builder.funding_input(50_000);
+        builder.self_output(45_000);
+        builder.dummy_external_output(10_000);
+        let res = builder.simulate();
+
+        assert!(res.error.is_none());
+        assert!(res.warnings.is_empty());
+        assert_eq!(res.change, Some(bitcoin::Amount::from_sat(24_749)));
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(251)));
+        let tx = builder.simulate().tx_template;
+        assert_eq!(tx.inputs.len(), 2);
+        assert_eq!(tx.outputs.len(), 2);
+    }
+
+    #[test]
+    fn test_segwit_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = wpkh_signer();
+        let mut builder =
+            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+
+        let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 50_000);
+
+        builder.add_input(c1);
+        builder.add_input(c2);
+        builder.dummy_external_output(35_000);
+
+        let res = builder.simulate();
+        assert_eq!(res.fees, Some(Amount::from_sat(220)));
+        assert_eq!(res.change, Some(Amount::from_sat(44_780)));
+
+        let mut psbt = builder.generate().unwrap();
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let tx_size = tx.weight().to_vbytes_ceil();
+        assert_eq!(tx_size, 220);
+
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
 }
