@@ -279,7 +279,7 @@ impl HotSigner {
                     Err(Error::MissingWitnessUtxo)?
                 }
                 // FIXME: process sighash w/o psbt helper?
-                let (hash, sighash_type) = psbt.sighash_ecdsa(0, &mut cache).map_err(|e| {
+                let (hash, sighash_type) = psbt.sighash_ecdsa(index, &mut cache).map_err(|e| {
                     log::error!("Fail to generate sig hash: {e}");
                     Error::SighashFail
                 })?;
