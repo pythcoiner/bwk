@@ -8,6 +8,7 @@ use miniscript::{Descriptor, DescriptorPublicKey};
 
 #[cfg(test)]
 use {
+    crate::Warning,
     bitcoin::{bip32::ChildNumber, Network},
     bwk_descriptor::{tr_path, wpkh_path},
     bwk_sign::HotSigner,
@@ -18,7 +19,7 @@ use {
     miniscript::bitcoin::{
         self,
         key::rand::{self, random, Rng},
-        Amount, OutPoint, ScriptBuf, Sequence, TxOut,
+        OutPoint, ScriptBuf, Sequence, TxOut,
     },
     std::collections::BTreeMap,
 };
@@ -261,6 +262,11 @@ impl TxBuilder {
         self.tx_template.outputs.push(recipient);
     }
     #[cfg(test)]
+    pub fn dummy_external_output_max(&mut self) {
+        let recipient = external_recipient_max();
+        self.tx_template.outputs.push(recipient);
+    }
+    #[cfg(test)]
     pub fn self_output(&mut self, amount: u64) {
         use crate::coin::KeyChain;
         let index: u8 = random();
@@ -327,7 +333,7 @@ fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
 
     let spk = derivator.receive_at(index).script_pubkey();
     let txout = TxOut {
-        value: Amount::from_sat(amount),
+        value: bitcoin::Amount::from_sat(amount),
         script_pubkey: spk.clone(),
     };
     let vout: u8 = random();
@@ -422,6 +428,20 @@ pub fn external_recipient(amount: u64) -> Recipient {
 }
 
 #[cfg(test)]
+pub fn external_recipient_max() -> Recipient {
+    let (_signer, derivator) = tr_signer();
+    let index: u16 = random();
+    let address = derivator.receive_at(index as u32).as_unchecked().clone();
+    Recipient {
+        address,
+        amount: super::Amount::Max(None),
+        label: None,
+        origin: None,
+        descriptor: None,
+    }
+}
+
+#[cfg(test)]
 pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
     use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
 
@@ -469,7 +489,7 @@ pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /
         let r = rand::thread_rng().gen_range(1..5);
         if (r == 0 || p == (num_outputs.saturating_sub(1))) && !inserted {
             output.push(TxOut {
-                value: Amount::from_btc(amount).unwrap(),
+                value: bitcoin::Amount::from_btc(amount).unwrap(),
                 script_pubkey: spk.clone(),
             });
             pos = p;
@@ -491,7 +511,33 @@ pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /
 }
 
 #[cfg(test)]
+pub fn generate_sign_broadcast(
+    builder: &mut TxBuilder,
+    signer: &HotSigner,
+    bitcoind: &mut corepc_node::Client,
+    fee: u64,
+    change: u64,
+    warnings: &[Warning],
+    tx_size: u64,
+) {
+    let change = (change > 0).then_some(bitcoin::Amount::from_sat(change));
+    let res = builder.simulate();
+    assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(fee)));
+    assert_eq!(res.change, change);
+    assert_eq!(res.warnings, warnings.to_vec());
+    assert!(res.error.is_none());
+    let mut psbt = builder.generate().unwrap();
+    signer.sign(&mut psbt);
+    let tx = signer.finalize(&mut psbt).unwrap();
+    let size = tx.weight().to_vbytes_ceil();
+    assert_eq!(size, tx_size);
+    let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+}
+
+#[cfg(test)]
 mod test {
+    use crate::Amount;
+
     use super::*;
     use bwk_utils::test::bitcoind_with_txindex;
 
@@ -524,6 +570,7 @@ mod test {
         let mut builder =
             TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
 
+        // 2 owned input + external input + change
         let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
         let c2 = builder.fund_with_bitcoind(bitcoind, 50_000);
 
@@ -531,16 +578,34 @@ mod test {
         builder.add_input(c2);
         builder.dummy_external_output(35_000);
 
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 220, 44_780, &[], 220);
+
+        // 1 owned input + external input + change
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 200_000);
+
+        builder.add_input(c1);
+        builder.dummy_external_output(100_000);
+
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 153, 99_847, &[], 153);
+
+        // 3 owned input + 1 to self + external (MAX)
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 200_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 10_000);
+        let c3 = builder.fund_with_bitcoind(bitcoind, 83_000);
+
+        builder.add_input(c1);
+        builder.add_input(c2);
+        builder.add_input(c3);
+        builder.self_output(125_000);
+        builder.dummy_external_output_max();
+
         let res = builder.simulate();
-        assert_eq!(res.fees, Some(Amount::from_sat(220)));
-        assert_eq!(res.change, Some(Amount::from_sat(44_780)));
+        let amount = res.tx_template.outputs.last().unwrap().amount.clone();
+        println!("{amount:?}");
+        assert!(matches!(amount, Amount::Max(Some(_))));
 
-        let mut psbt = builder.generate().unwrap();
-        signer.sign(&mut psbt);
-        let tx = signer.finalize(&mut psbt).unwrap();
-        let tx_size = tx.weight().to_vbytes_ceil();
-        assert_eq!(tx_size, 220);
-
-        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 288, 0, &[], 288);
     }
 }

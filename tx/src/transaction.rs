@@ -26,7 +26,7 @@ pub enum Error {
     Output,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Warning {
     ChangeUnderDust(u64),
     MaxUnderDust(u64),
@@ -280,19 +280,20 @@ fn process_fees(
         fee_allowance
     } else {
         // Enough for drain
-        let drain_value = fee_allowance - fee_with_change;
         match drain {
             Drain::None => {
                 // TODO: warning
+                fee_wo_change
             }
             Drain::Change => {
-                result.change = Some(drain_value);
+                result.change = Some(fee_allowance - fee_with_change);
+                fee_with_change
             }
             Drain::Max => {
-                result.max = Some(drain_value);
+                result.max = Some(fee_allowance - fee_wo_change);
+                fee_wo_change
             }
-        };
-        fee_with_change
+        }
     };
     result.fees = Some(fee);
 
@@ -450,7 +451,8 @@ pub fn process_transaction(
 
     match (maxed_output, max, change) {
         (Some(pos), Some(value), None) => {
-            tx_template
+            result
+                .tx_template
                 .outputs
                 .get_mut(pos)
                 .expect("max output missing")
