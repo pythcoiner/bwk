@@ -536,8 +536,6 @@ pub fn generate_sign_broadcast(
 
 #[cfg(test)]
 mod test {
-    use crate::Amount;
-
     use super::*;
     use bwk_utils::test::bitcoind_with_txindex;
 
@@ -578,7 +576,15 @@ mod test {
         builder.add_input(c2);
         builder.dummy_external_output(35_000);
 
-        generate_sign_broadcast(&mut builder, &signer, bitcoind, 220, 44_780, &[], 220);
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            220,
+            80_000 - 35_000 - 220,
+            &[],
+            220,
+        );
 
         // 1 owned input + external input + change
         builder.new_template();
@@ -587,7 +593,15 @@ mod test {
         builder.add_input(c1);
         builder.dummy_external_output(100_000);
 
-        generate_sign_broadcast(&mut builder, &signer, bitcoind, 153, 99_847, &[], 153);
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            153,
+            200_000 - 100_000 - 153,
+            &[],
+            153,
+        );
 
         // 3 owned input + 1 to self + external (MAX)
         builder.new_template();
@@ -601,11 +615,31 @@ mod test {
         builder.self_output(125_000);
         builder.dummy_external_output_max();
 
-        let res = builder.simulate();
-        let amount = res.tx_template.outputs.last().unwrap().amount.clone();
-        println!("{amount:?}");
-        assert!(matches!(amount, Amount::Max(Some(_))));
-
         generate_sign_broadcast(&mut builder, &signer, bitcoind, 288, 0, &[], 288);
+
+        // 1 owned input + 1 change
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 1_000_000);
+
+        builder.add_input(c1);
+
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            110,
+            1_000_000 - 110,
+            &[],
+            110,
+        );
+
+        // 1 owned input + 1 external max
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 123_000);
+
+        builder.add_input(c1);
+        builder.dummy_external_output_max();
+
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 122, 0, &[], 122);
     }
 }

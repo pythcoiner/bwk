@@ -365,7 +365,7 @@ where
 /// Preprocesses a transaction based on the provided `TransactionTemplate`.
 #[allow(clippy::type_complexity)]
 pub fn process_transaction(
-    mut tx_template: TxTemplate,
+    tx_template: TxTemplate,
     descriptor: &Descriptor<DescriptorPublicKey>,
 ) -> TransactionResult {
     // TODO: implement coin selection if no or not enough input provided
@@ -377,11 +377,7 @@ pub fn process_transaction(
         return result;
     }
 
-    if tx_template.outputs.is_empty() {
-        // FIXME: we can send to change
-        result.error = Some(Error::NoOutputs);
-        return result;
-    } else if tx_template.inputs.is_empty() {
+    if tx_template.inputs.is_empty() {
         // FIXME: Coin selection
         result.error = Some(Error::NoInputs);
         return result;
