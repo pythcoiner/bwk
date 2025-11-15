@@ -22,6 +22,59 @@ use crate::{
     tx_store::{InputMetadata, OutputMetadata, TxEntry, TxStore},
 };
 
+#[derive(Debug, Clone)]
+pub enum PaymentType {
+    Receive,
+    Send,
+    ToSelf,
+}
+#[derive(Debug, Clone)]
+pub struct Payment {
+    pub txid: String,
+    pub payment_type: PaymentType,
+    pub amount: u64,
+    pub label: String,
+}
+
+impl From<TxEntry> for Payment {
+    fn from(value: TxEntry) -> Self {
+        // FIXME: handle ToSelf
+        let inputs = value.inputs.iter().fold(0, |a, (_, b)| {
+            let v = if b.owned.unwrap_or(false) {
+                b.value.unwrap_or(0)
+            } else {
+                0
+            };
+            a + v
+        });
+        let mut outputs = 0;
+        for index in 0..value.tx().output.len() {
+            let amount = value.tx().output[index].value.to_sat();
+            let owned = value
+                .outputs
+                .get(&index)
+                .expect("present")
+                .owned
+                .unwrap_or(false);
+            if owned {
+                outputs += amount;
+            }
+        }
+        let (payment_type, amount) = if inputs > outputs {
+            (PaymentType::Send, inputs - outputs)
+        } else {
+            (PaymentType::Receive, outputs - inputs)
+        };
+        let txid = bitcoin::consensus::encode::serialize_hex(&value.tx().compute_txid());
+        Self {
+            txid,
+            payment_type,
+            amount,
+            label: String::new(),
+        }
+    }
+}
+
 #[derive(Debug)]
 /// Represents a store for managing coins and their associated data.
 ///

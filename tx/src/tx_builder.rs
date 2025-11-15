@@ -6,7 +6,7 @@ use bitcoin::Psbt;
 use bwk_descriptor::SpkDerivator;
 use miniscript::{Descriptor, DescriptorPublicKey};
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 use {
     crate::Warning,
     bitcoin::{bip32::ChildNumber, Network},
@@ -30,13 +30,13 @@ pub trait ChangeTip {
 
 pub trait CoinSource {
     fn spendable_coins(&self) -> Vec<Coin>;
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     fn add_coin(&mut self, coin: Coin);
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     fn remove_coin(&mut self, coin: &Coin);
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 impl CoinSource for BTreeMap<OutPoint, Coin> {
     fn spendable_coins(&self) -> Vec<Coin> {
         self.values().cloned().collect()
@@ -60,7 +60,7 @@ pub enum ChangeTipHandle {
 pub struct TxBuilder {
     derivator: SpkDerivator,
     change_tip: ChangeTipHandle,
-    tx_template: TxTemplate,
+    pub tx_template: TxTemplate,
     coin_source: Option<Box<dyn CoinSource>>,
 }
 
@@ -205,7 +205,7 @@ impl TxBuilder {
         let res = process_transaction(self.tx_template.clone(), &descriptor);
         finalize_transaction(res, &mut (|| self.new_change_index()), descriptor, true)
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn mark_tx_mined(&mut self) {
         use crate::transaction::max_input_satisfaction_size;
 
@@ -241,7 +241,7 @@ impl TxBuilder {
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn receive_coin(&mut self, coin: Coin) {
         if coin.descriptor != self.derivator.descriptor() {
             return;
@@ -250,28 +250,28 @@ impl TxBuilder {
             source.add_coin(coin);
         }
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn funding_input(&mut self, amount: u64) {
         let index: u8 = random();
         let coin = receive_coin(amount, &self.derivator, index as u32);
         self.tx_template.inputs.push(coin);
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn self_recipient(&mut self, amount: u64) -> Recipient {
         let index: u8 = random();
         self_recipient(amount, &self.derivator, index as u32)
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn dummy_external_output(&mut self, amount: u64) {
         let recipient = external_recipient(amount);
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn dummy_external_output_max(&mut self) {
         let recipient = external_recipient_max();
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn self_output(&mut self, amount: u64) {
         use crate::coin::KeyChain;
         let index: u8 = random();
@@ -285,11 +285,11 @@ impl TxBuilder {
         };
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn receive_address_at(&self, index: u32) -> bitcoin::Address {
         self.derivator.receive_at(index)
     }
-    #[cfg(test)]
+    #[cfg(feature = "test")]
     pub fn fund_with_bitcoind(&mut self, bitcoind: &mut corepc_node::Client, amount: u64) -> Coin {
         use crate::{coin::KeyChain, transaction::max_input_satisfaction_size};
 
@@ -332,7 +332,7 @@ impl TxBuilder {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
     use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
 
@@ -361,7 +361,7 @@ fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn tr_signer() -> (HotSigner, SpkDerivator) {
     let nw = Network::Regtest;
     let mut signer = HotSigner::new(nw).unwrap();
@@ -372,7 +372,7 @@ pub fn tr_signer() -> (HotSigner, SpkDerivator) {
     (signer, derivator)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn taptree_signer() -> (HotSigner, SpkDerivator) {
     use std::str::FromStr;
 
@@ -399,7 +399,7 @@ pub fn taptree_signer() -> (HotSigner, SpkDerivator) {
     (signer, derivator)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
     let nw = Network::Regtest;
     let mut signer = HotSigner::new(nw).unwrap();
@@ -410,7 +410,7 @@ pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
     (signer, derivator)
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn sum_inputs(psbt: &Psbt) -> u64 {
     psbt.inputs.iter().enumerate().fold(0, |sum, (pos, i)| {
         if let Some(txout) = &i.witness_utxo {
@@ -423,7 +423,7 @@ pub fn sum_inputs(psbt: &Psbt) -> u64 {
     })
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn sum_outputs(psbt: &Psbt) -> u64 {
     psbt.unsigned_tx
         .output
@@ -431,7 +431,7 @@ pub fn sum_outputs(psbt: &Psbt) -> u64 {
         .fold(0, |sum, o| sum + o.value.to_sat())
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Recipient {
     use crate::coin::KeyChain;
 
@@ -445,10 +445,11 @@ pub fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Reci
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn external_recipient(amount: u64) -> Recipient {
     let (_signer, derivator) = tr_signer();
     let index: u16 = random();
+
     let address = derivator.receive_at(index as u32).as_unchecked().clone();
     Recipient {
         address,
@@ -459,7 +460,7 @@ pub fn external_recipient(amount: u64) -> Recipient {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn external_recipient_max() -> Recipient {
     let (_signer, derivator) = tr_signer();
     let index: u16 = random();
@@ -473,7 +474,7 @@ pub fn external_recipient_max() -> Recipient {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
     use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
 
@@ -503,7 +504,7 @@ pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
     }
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /* position */) {
     let num_inputs = rand::thread_rng().gen_range(1..10);
     let num_outputs: usize = rand::thread_rng().gen_range(1..5);
@@ -542,7 +543,7 @@ pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /
     )
 }
 
-#[cfg(test)]
+#[cfg(feature = "test")]
 pub fn generate_sign_broadcast(
     builder: &mut TxBuilder,
     signer: &HotSigner,

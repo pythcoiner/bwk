@@ -3,12 +3,15 @@ use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
 use bwk::{
+    coin_store::Payment,
     config::{maybe_create_dir, Config},
     Account,
 };
 use bwk_descriptor::descriptor::ScriptType;
-use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
+use bwk_tx::tx_builder::TxBuilder;
+use electrsd::bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD};
 use miniscript::bitcoin::bip32::ChildNumber;
+use rand::random_range;
 use temp_dir::TempDir;
 use utils::{dump_logs, generate, get_block_hash, get_block_height, reorg_chain, send_to_address};
 use {
@@ -297,6 +300,100 @@ fn simple_reorg() {
     assert_eq!(coins.len(), 2);
 }
 
-fn test_conf_unconf() {
-    // TODO: verify that coins status (confirmed/unconfirmed) are good
+fn spend(
+    account: &mut Account,
+    builder: &mut TxBuilder,
+    bitcoind: &BitcoinD,
+    amount: u64,
+) -> bitcoin::Txid {
+    let coins = account.spendable_coins().coins.into_values().collect();
+    builder.new_template();
+    builder.tx_template.inputs = coins;
+    builder.dummy_external_output(amount);
+    let mut psbt = builder.generate().unwrap();
+    let signer = account.hot_signer().unwrap();
+    signer.sign(&mut psbt);
+    let tx = signer.finalize(&mut psbt).unwrap();
+    let txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+    let blocks: u32 = random_range(2..15);
+    generate(bitcoind, blocks);
+    txid
+}
+
+fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) {
+    let recv_addr = account.new_recv_addr();
+    send_to_address(bitcoind, &recv_addr, Amount::from_sat(amount));
+    let blocks: u32 = random_range(2..15);
+    generate(bitcoind, blocks);
+}
+
+fn sort_payments(payments: &Vec<Payment>) -> (usize, usize) {
+    let mut recv = 0;
+    let mut sent = 0;
+    for p in payments {
+        match p.payment_type {
+            bwk::coin_store::PaymentType::Receive => recv += 1,
+            bwk::coin_store::PaymentType::Send => sent += 1,
+            bwk::coin_store::PaymentType::ToSelf => {}
+        }
+    }
+    (recv, sent)
+}
+
+#[test]
+fn test_list_payments() {
+    setup_logger();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    generate(&bitcoind, 100);
+
+    let look_ahead = 20;
+
+    let dir = TempDir::new().unwrap();
+    let mut path = dir.path().to_path_buf();
+    path.push(".bwk");
+    maybe_create_dir(&path);
+    let path = path.parent().unwrap().to_path_buf();
+
+    let mnemonic = Mnemonic::generate(12).unwrap();
+    let mut config = Config::new(
+        Some(mnemonic.to_string()),
+        "account_dir".to_string(),
+        bitcoin::Network::Regtest,
+        ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+        path,
+        ".bwk",
+        true,
+    )
+    .unwrap();
+    config.network = Network::Regtest;
+    config.look_ahead = look_ahead;
+    config.set_electrum_url(url);
+    config.set_electrum_port(port.to_string());
+    config.set_mnemonic(mnemonic.to_string());
+    let mut account = Account::new(config);
+    account.start_electrum();
+    sleep(Duration::from_millis(300));
+    let mut builder = TxBuilder::new_standalone(account.descriptor(), Network::Regtest).unwrap();
+
+    receive(&mut account, &bitcoind, 200_000);
+    wait_until_timeout(
+        || {
+            let coins = account.coins();
+            coins.len() == 1
+        },
+        5,
+    );
+    spend(&mut account, &mut builder, &bitcoind, 100_000);
+    wait_until_timeout(
+        || {
+            let payments = account.payment_history();
+            payments.len() == 2
+        },
+        5,
+    );
+
+    let payments = account.payment_history();
+    assert_eq!(2, payments.len());
+    let sorted = sort_payments(&payments);
+    assert_eq!(sorted, (1, 1));
 }

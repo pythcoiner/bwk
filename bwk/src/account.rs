@@ -12,14 +12,17 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
-use bwk_sign::signing_manager::SigningManager;
+use bwk_sign::{signing_manager::SigningManager, HotSigner, Signer};
 use bwk_tx::{coin::KeyChain, Coin};
-use miniscript::bitcoin::{self, OutPoint, ScriptBuf, TxOut};
+use miniscript::{
+    bitcoin::{self, OutPoint, ScriptBuf, TxOut},
+    Descriptor, DescriptorPublicKey,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     address_store::{AddressEntry, AddressStatus, AddressTip},
-    coin_store::{CoinEntry, CoinStore},
+    coin_store::{CoinEntry, CoinStore, Payment},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
     tx_store::{TxEntry, TxStore},
@@ -176,8 +179,12 @@ impl Account {
         self.config.account.clone()
     }
 
-    pub fn descriptor(&self) -> String {
+    pub fn descriptor_str(&self) -> String {
         self.config.descriptor.to_string()
+    }
+
+    pub fn descriptor(&self) -> Descriptor<DescriptorPublicKey> {
+        self.config.descriptor.clone()
     }
 
     pub fn electrum_url(&self) -> String {
@@ -351,6 +358,11 @@ impl Account {
         self.coin_store.lock().expect("poisoned").tx_history()
     }
 
+    /// Returns a list of all historical payments
+    pub fn payment_history(&self) -> Vec<Payment> {
+        self.tx_history().into_iter().map(Into::into).collect()
+    }
+
     /// Returns the coin matching the given outpoint if found, else None.
     pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
         self.coin_store
@@ -519,6 +531,13 @@ impl Account {
 
     pub fn sign(&self, psbt: String) {
         self.signing_manager.sign(self.config.network(), psbt);
+    }
+
+    pub fn hot_signer(&self) -> Option<HotSigner> {
+        let mnemonic_str = self.config.mnemonic.clone()?;
+        let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
+        signer.register_descriptor(self.descriptor());
+        Some(signer)
     }
 }
 
