@@ -477,7 +477,39 @@ impl HotSigner {
         derivator: &SpkDerivator,
         cache: &mut sighash::SighashCache<bitcoin::Transaction>,
     ) -> Result<(), Error> {
-        // TODO:
+        Self::has_witness_utxo(psbt, index)?;
+        let prevouts: Vec<_> = psbt
+            .inputs
+            .iter()
+            .filter_map(|psbt_in| psbt_in.witness_utxo.clone())
+            .collect();
+
+        // NOTE: only support for SIGHASH_ALL for now
+        let sighash_type = sighash::TapSighashType::Default;
+        let prevouts = sighash::Prevouts::All(&prevouts);
+
+        let input = psbt.inputs.get_mut(index).ok_or(Error::InputIndex)?;
+        for (pubkey, (leaf_hashes, (fg, der_path))) in &input.tap_key_origins {
+            if *fg != self.fingerprint() {
+                continue;
+            }
+
+            for leaf_hash in leaf_hashes {
+                let sk = self.private_key_at(der_path);
+                let keypair = secp256k1::Keypair::from_secret_key(self.secp(), &sk);
+                let sighash = cache
+                    .taproot_script_spend_signature_hash(index, &prevouts, *leaf_hash, sighash_type)
+                    .map_err(|_| Error::InsaneTaptreeInfo)?;
+                let sighash = secp256k1::Message::from_digest_slice(sighash.as_byte_array())
+                    .expect("Sighash is always 32 bytes.");
+                let signature = self.secp().sign_schnorr_no_aux_rand(&sighash, &keypair);
+                let sig = bitcoin::taproot::Signature {
+                    signature,
+                    sighash_type,
+                };
+                input.tap_script_sigs.insert((*pubkey, *leaf_hash), sig);
+            }
+        }
         Ok(())
     }
 

@@ -368,6 +368,33 @@ pub fn tr_signer() -> (HotSigner, SpkDerivator) {
 }
 
 #[cfg(test)]
+pub fn taptree_signer() -> (HotSigner, SpkDerivator) {
+    use std::str::FromStr;
+
+    let nw = Network::Regtest;
+    let not_signer = HotSigner::new(nw).unwrap();
+    let mut signer = HotSigner::new(nw).unwrap();
+    let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+    let xpub = signer.xpub(&path);
+    let not_xpub = not_signer.xpub(&path);
+
+    let descr_str = format!(
+        "tr([{}/{}]{}/<0;1>/*,pk([{}/{}]{}/<0;1>/*))",
+        not_xpub.origin.0,
+        not_xpub.origin.1,
+        not_xpub.xkey,
+        xpub.origin.0,
+        xpub.origin.1,
+        xpub.xkey
+    );
+    let desccriptor =
+        Descriptor::<DescriptorPublicKey>::from_str(&descr_str).expect("hardcoded descriptor");
+    let derivator = SpkDerivator::new(desccriptor, nw).unwrap();
+    signer.register_descriptor(derivator.descriptor());
+    (signer, derivator)
+}
+
+#[cfg(test)]
 pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
     let nw = Network::Regtest;
     let mut signer = HotSigner::new(nw).unwrap();
@@ -724,5 +751,88 @@ mod test {
         builder.dummy_external_output_max();
 
         generate_sign_broadcast(&mut builder, &signer, bitcoind, 111, 0, &[], 111);
+    }
+
+    #[test]
+    fn test_taptree_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = taptree_signer();
+        let mut builder =
+            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+
+        // 2 owned input + external input + change
+        let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 50_000);
+
+        builder.add_input(c1);
+        builder.add_input(c2);
+        builder.dummy_external_output(35_000);
+
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            246,
+            80_000 - 35_000 - 246,
+            &[],
+            246,
+        );
+
+        // 1 owned input + external input + change
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 200_000);
+
+        builder.add_input(c1);
+        builder.dummy_external_output(100_000);
+
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            172,
+            200_000 - 100_000 - 172,
+            &[],
+            172,
+        );
+
+        // 3 owned input + 1 to self + external (MAX)
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 200_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 10_000);
+        let c3 = builder.fund_with_bitcoind(bitcoind, 83_000);
+
+        builder.add_input(c1);
+        builder.add_input(c2);
+        builder.add_input(c3);
+        builder.self_output(125_000);
+        builder.dummy_external_output_max();
+
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 321, 0, &[], 321);
+
+        // 1 owned input + 1 change
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 1_000_000);
+
+        builder.add_input(c1);
+
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            129,
+            1_000_000 - 129,
+            &[],
+            129,
+        );
+
+        // 1 owned input + 1 external max
+        builder.new_template();
+        let c1 = builder.fund_with_bitcoind(bitcoind, 123_000);
+
+        builder.add_input(c1);
+        builder.dummy_external_output_max();
+
+        generate_sign_broadcast(&mut builder, &signer, bitcoind, 129, 0, &[], 129);
     }
 }

@@ -21,6 +21,7 @@ pub enum Error {
     InternalKeyNotMatch,
     InsanePrevouts,
     SigningInfo,
+    InsaneTaptreeInfo,
 }
 
 impl Display for Error {
@@ -44,6 +45,7 @@ impl Display for Error {
             Error::InternalKeyNotMatch => write!(f, "Provided & generated internal key not match"),
             Error::InsanePrevouts => write!(f, "Insane prevouts for taproot sighash"),
             Error::SigningInfo => write!(f, "Missing signing informations"),
+            Error::InsaneTaptreeInfo => write!(f, "Wrong signing informations for taptree"),
         }
     }
 }
