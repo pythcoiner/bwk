@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-    sync::mpsc,
-};
+use std::{collections::BTreeSet, str::FromStr, sync::mpsc};
 
 use crate::{
     error::Error,
@@ -260,21 +256,6 @@ impl HotSigner {
         Ok(Psbt::extract_tx_unchecked_fee_rate(psbt.clone()))
     }
 
-    /// Sign the provided PSBT
-    ///
-    /// This function processes each input of the PSBT, checks for the necessary
-    /// witness UTXO, and generates the required signatures using the private keys
-    /// derived from the signer's extended private key. It only supports the
-    /// SIGHASH_ALL signature type.
-    ///
-    /// # Arguments
-    /// * `psbt` - A mutable reference to the PSBT that will be signed.
-    ///
-    /// # Returns
-    /// A result indicating success or failure. Returns an error if:
-    /// * Any input's witness UTXO is missing.
-    /// * The expected script public key does not match.
-    /// * The signature generation fails.
     pub fn inner_sign(
         &self,
         psbt: &mut Psbt,
@@ -282,55 +263,85 @@ impl HotSigner {
     ) -> Result<(), Error> {
         let mut cache = sighash::SighashCache::new(psbt.unsigned_tx.clone());
         let derivator = SpkDerivator::new(descriptor.clone(), self.network).unwrap();
-
-        let mut inputs_to_sign = BTreeMap::new();
-        for (index, input) in psbt.inputs.iter().enumerate() {
-            let mut derivation_paths = vec![];
-            input.bip32_derivation.iter().for_each(|(_, (fg, deriv))| {
-                if *fg == self.fingerprint() {
-                    derivation_paths.push(deriv.clone());
+        for index in 0..psbt.inputs.len() {
+            match (
+                !psbt.inputs[index].bip32_derivation.is_empty(),
+                psbt.inputs[index].tap_internal_key.is_some(),
+                !psbt.inputs[index].tap_key_origins.is_empty(),
+            ) {
+                (true, false, false) => {
+                    self.sign_input_segwit(psbt, index, &derivator, &mut cache)?
                 }
-            });
-            if !derivation_paths.is_empty() {
-                if input.witness_utxo.is_none() {
-                    Err(Error::MissingWitnessUtxo)?
+                (false, true, false) => {
+                    self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?
                 }
-                // FIXME: process sighash w/o psbt helper?
-                let (hash, sighash_type) = psbt.sighash_ecdsa(index, &mut cache).map_err(|e| {
-                    log::error!("Fail to generate sig hash: {e}");
-                    Error::SighashFail
-                })?;
-                // NOTE: we only allow SigHash ALL for now
-                if sighash_type != EcdsaSighashType::All {
-                    return Err(Error::SighashFail);
+                (false, false, true) => {
+                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
                 }
-                inputs_to_sign.insert(index, (hash, psbt.inputs[index].clone(), derivation_paths));
+                (false, true, true) => {
+                    self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?;
+                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
+                }
+                _ => {}
             }
         }
-        for (index, (hash, mut input, deriv)) in inputs_to_sign {
-            self.sign_input(hash, &mut input, deriv, &derivator)?;
-            psbt.inputs[index] = input;
-        }
+
         Ok(())
     }
 
-    /// Sign the input for a transaction.
-    ///
-    /// # Arguments
-    /// * `hash` - The hash of the transaction to be signed.
-    /// * `input` - A mutable reference to the input that will be signed.
-    /// * `deriv` - A vector of derivation paths used to derive the signing keys.
-    ///
-    /// # Returns
-    /// A result indicating success or failure. Returns an error if:
-    /// * The input's witness UTXO is missing.
-    /// * The expected script public key does not match.
-    /// * The signature is invalid.
-    ///
-    /// This function iterates over the provided derivation paths, derives the signing key,
-    /// and signs the transaction input with the corresponding private key.
-    /// Note: only SIGHASH_ALL is supported for now
-    pub fn sign_input(
+    fn sign_input_segwit(
+        &self,
+        psbt: &mut Psbt,
+        index: usize,
+        derivator: &SpkDerivator,
+        cache: &mut sighash::SighashCache<bitcoin::Transaction>,
+    ) -> Result<(), Error> {
+        if psbt
+            .inputs
+            .get(index)
+            .ok_or(Error::InputIndex)?
+            .witness_utxo
+            .is_none()
+        {
+            Err(Error::MissingWitnessUtxo)?
+        }
+        let sighash = self.segwit_hash(psbt, index, cache)?;
+        let input = psbt.inputs.get_mut(index).ok_or(Error::InputIndex)?;
+        if input.bip32_derivation.is_empty() {
+            return Err(Error::NotSegwit);
+        }
+        let mut derivation_paths = vec![];
+        input.bip32_derivation.iter().for_each(|(_, (fg, deriv))| {
+            if *fg == self.fingerprint() {
+                derivation_paths.push(deriv.clone());
+            }
+        });
+        self.inner_sign_input_segwit(sighash, input, derivation_paths, derivator)?;
+        Ok(())
+    }
+
+    fn segwit_hash(
+        &self,
+        psbt: &Psbt,
+        index: usize,
+        cache: &mut sighash::SighashCache<bitcoin::Transaction>,
+    ) -> Result<Message, Error> {
+        let input = psbt.inputs.get(index).ok_or(Error::InputIndex)?;
+        if input.bip32_derivation.is_empty() {
+            return Err(Error::NotSegwit);
+        }
+        let (hash, sighash_type) = psbt.sighash_ecdsa(index, cache).map_err(|e| {
+            log::error!("Fail to generate sig hash: {e}");
+            Error::SighashFail
+        })?;
+        if sighash_type != EcdsaSighashType::All {
+            // FIXME: we support only sighash ALL for now
+            return Err(Error::SighashFail);
+        }
+        Ok(hash)
+    }
+
+    pub fn inner_sign_input_segwit(
         &self,
         hash: Message,
         input: &mut Input,
@@ -377,6 +388,28 @@ impl HotSigner {
         }
 
         Ok(())
+    }
+
+    #[allow(unused)]
+    fn sign_input_tapkey(
+        &self,
+        psbt: &mut Psbt,
+        index: usize,
+        derivator: &SpkDerivator,
+        cache: &mut sighash::SighashCache<bitcoin::Transaction>,
+    ) -> Result<(), Error> {
+        todo!()
+    }
+
+    #[allow(unused)]
+    fn sign_input_taptree(
+        &self,
+        psbt: &mut Psbt,
+        index: usize,
+        derivator: &SpkDerivator,
+        cache: &mut sighash::SighashCache<bitcoin::Transaction>,
+    ) -> Result<(), Error> {
+        todo!()
     }
 
     /// Returns the [`Fingerprint`] of this [`HotSigner`].

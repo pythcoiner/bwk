@@ -14,6 +14,10 @@ pub enum Error {
     UnregisteredDescriptor,
     DescriptorNetwork,
     Derivator,
+    InputIndex,
+    NotSegwit,
+    NotTapKey,
+    NotTapTree,
 }
 
 impl Display for Error {
@@ -30,6 +34,10 @@ impl Display for Error {
             Error::UnregisteredDescriptor => write!(f, "Unknown descriptor"),
             Error::DescriptorNetwork => write!(f, "Wrong descriptor network"),
             Error::Derivator => write!(f, "Fail to create derivator"),
+            Error::InputIndex => write!(f, "Wrong input index"),
+            Error::NotSegwit => write!(f, "This input miss segwit signing informations"),
+            Error::NotTapKey => write!(f, "This input miss tap key signing informations"),
+            Error::NotTapTree => write!(f, "This input miss taptree signing informations"),
         }
     }
 }
