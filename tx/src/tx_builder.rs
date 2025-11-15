@@ -257,6 +257,11 @@ impl TxBuilder {
         self.tx_template.inputs.push(coin);
     }
     #[cfg(test)]
+    pub fn self_recipient(&mut self, amount: u64) -> Recipient {
+        let index: u8 = random();
+        self_recipient(amount, &self.derivator, index as u32)
+    }
+    #[cfg(test)]
     pub fn dummy_external_output(&mut self, amount: u64) {
         let recipient = external_recipient(amount);
         self.tx_template.outputs.push(recipient);
@@ -834,5 +839,41 @@ mod test {
         builder.dummy_external_output_max();
 
         generate_sign_broadcast(&mut builder, &signer, bitcoind, 129, 0, &[], 129);
+    }
+
+    #[test]
+    fn test_tx_multiparty() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer_a, derivator_a) = tr_signer();
+        let (signer_b, derivator_b) = taptree_signer();
+        let mut builder_a =
+            TxBuilder::new_standalone(derivator_a.descriptor(), Network::Regtest).unwrap();
+        let mut builder_b =
+            TxBuilder::new_standalone(derivator_b.descriptor(), Network::Regtest).unwrap();
+
+        let c1 = builder_a.fund_with_bitcoind(bitcoind, 30_000);
+        let c2 = builder_b.fund_with_bitcoind(bitcoind, 30_000);
+
+        let r1 = builder_a.self_recipient(29_850);
+        let r2 = builder_b.self_recipient(29_850);
+
+        builder_a.add_input(c1);
+        builder_a.add_input(c2);
+        builder_a.add_output(r1);
+        builder_a.add_output(r2);
+
+        let res = builder_a.simulate();
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(300)));
+        assert_eq!(res.change, None);
+        assert_eq!(res.warnings, vec![Warning::ChangeUnderDust(71)]);
+        assert!(res.error.is_none());
+        let mut psbt = builder_a.generate().unwrap();
+        signer_a.sign(&mut psbt);
+        signer_b.sign(&mut psbt);
+        let tx = signer_a.finalize(&mut psbt).unwrap();
+        let size = tx.weight().to_vbytes_ceil();
+        assert_eq!(size, 229);
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
     }
 }
