@@ -7,7 +7,10 @@ use crate::{
 };
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_keys::{KeyDerivator, OXpriv, OXpub};
-use miniscript::psbt::PsbtExt;
+use miniscript::{
+    bitcoin::{hashes::Hash, key::TapTweak},
+    psbt::PsbtExt,
+};
 use serde::{Deserialize, Serialize};
 use {
     bip39,
@@ -272,9 +275,6 @@ impl HotSigner {
                 (true, false, false) => {
                     self.sign_input_segwit(psbt, index, &derivator, &mut cache)?
                 }
-                (false, true, false) => {
-                    self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?
-                }
                 (false, false, true) => {
                     self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
                 }
@@ -282,11 +282,28 @@ impl HotSigner {
                     self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?;
                     self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
                 }
-                _ => {}
+                (false, false, false) => return Err(Error::SigningInfo),
+                _ => {
+                    unreachable!()
+                }
             }
         }
 
         Ok(())
+    }
+
+    fn has_witness_utxo(psbt: &Psbt, index: usize) -> Result<(), Error> {
+        if psbt
+            .inputs
+            .get(index)
+            .ok_or(Error::InputIndex)?
+            .witness_utxo
+            .is_none()
+        {
+            Err(Error::MissingWitnessUtxo)?
+        } else {
+            Ok(())
+        }
     }
 
     fn sign_input_segwit(
@@ -296,17 +313,9 @@ impl HotSigner {
         derivator: &SpkDerivator,
         cache: &mut sighash::SighashCache<bitcoin::Transaction>,
     ) -> Result<(), Error> {
-        if psbt
-            .inputs
-            .get(index)
-            .ok_or(Error::InputIndex)?
-            .witness_utxo
-            .is_none()
-        {
-            Err(Error::MissingWitnessUtxo)?
-        }
+        Self::has_witness_utxo(psbt, index)?;
         let sighash = self.segwit_hash(psbt, index, cache)?;
-        let input = psbt.inputs.get_mut(index).ok_or(Error::InputIndex)?;
+        let input = psbt.inputs.get_mut(index).expect("already checked");
         if input.bip32_derivation.is_empty() {
             return Err(Error::NotSegwit);
         }
@@ -390,7 +399,6 @@ impl HotSigner {
         Ok(())
     }
 
-    #[allow(unused)]
     fn sign_input_tapkey(
         &self,
         psbt: &mut Psbt,
@@ -398,7 +406,67 @@ impl HotSigner {
         derivator: &SpkDerivator,
         cache: &mut sighash::SighashCache<bitcoin::Transaction>,
     ) -> Result<(), Error> {
-        todo!()
+        Self::has_witness_utxo(psbt, index)?;
+        let prevouts: Vec<_> = psbt
+            .inputs
+            .iter()
+            .filter_map(|psbt_in| psbt_in.witness_utxo.clone())
+            .collect();
+
+        // NOTE: only support for SIGHASH_ALL for now
+        let sighash_type = sighash::TapSighashType::Default;
+        let prevouts = sighash::Prevouts::All(&prevouts);
+
+        let input = psbt.inputs.get_mut(index).ok_or(Error::InputIndex)?;
+
+        // Sign
+        if let Some(ref int_key) = input.tap_internal_key {
+            if let Some((_, (fg, der_path))) = input.tap_key_origins.get(int_key) {
+                if *fg == self.fingerprint() {
+                    // Check the spk matches
+                    if let Some(wit) = &input.witness_utxo {
+                        let ap = account_path(der_path)?;
+                        let expected_spk = match ap.0 {
+                            false => derivator.receive_at(ap.1),
+                            true => derivator.change_at(ap.1),
+                        }
+                        .script_pubkey();
+                        if wit.script_pubkey != expected_spk {
+                            Err(Error::SpkNotMatch)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Err(Error::MissingWitnessUtxo)
+                    }?;
+
+                    // Then sign
+                    let sk = self.private_key_at(der_path);
+                    let keypair = secp256k1::Keypair::from_secret_key(self.secp(), &sk);
+                    if keypair.x_only_public_key().0 != *int_key {
+                        return Err(Error::InternalKeyNotMatch);
+                    }
+                    let keypair = keypair
+                        .tap_tweak(self.secp(), input.tap_merkle_root)
+                        .to_inner();
+                    let sighash = cache
+                        .taproot_key_spend_signature_hash(index, &prevouts, sighash_type)
+                        .map_err(|_| Error::InsanePrevouts)?;
+                    let sighash = secp256k1::Message::from_digest_slice(
+                        &sighash.as_raw_hash().to_byte_array(),
+                    )
+                    .expect("Sighash is always 32 bytes.");
+                    let signature = self.secp().sign_schnorr_no_aux_rand(&sighash, &keypair);
+                    let sig = bitcoin::taproot::Signature {
+                        signature,
+                        sighash_type,
+                    };
+                    input.tap_key_sig = Some(sig);
+                }
+                return Ok(());
+            }
+        }
+        Err(Error::NotTapKey)
     }
 
     #[allow(unused)]
@@ -409,7 +477,8 @@ impl HotSigner {
         derivator: &SpkDerivator,
         cache: &mut sighash::SighashCache<bitcoin::Transaction>,
     ) -> Result<(), Error> {
-        todo!()
+        // TODO:
+        Ok(())
     }
 
     /// Returns the [`Fingerprint`] of this [`HotSigner`].
@@ -539,7 +608,8 @@ mod tests {
         assert!(psbt.inputs[0].partial_sigs.is_empty());
 
         // try to sign the tx
-        signer.inner_sign(&mut psbt, &descriptor).unwrap();
+        let err = signer.inner_sign(&mut psbt, &descriptor).unwrap_err();
+        assert_eq!(err, Error::SigningInfo);
 
         // there is no signature as bip32_derivation is missing
         assert!(psbt.inputs[0].partial_sigs.is_empty());
@@ -728,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signer_sign() {
+    fn test_signer_sign_segwit() {
         let (sender, mock) = MockSender::new();
         let mut signer = HotSigner::new_from_xpriv(
             Network::Regtest,

@@ -18,6 +18,9 @@ pub enum Error {
     NotSegwit,
     NotTapKey,
     NotTapTree,
+    InternalKeyNotMatch,
+    InsanePrevouts,
+    SigningInfo,
 }
 
 impl Display for Error {
@@ -38,6 +41,9 @@ impl Display for Error {
             Error::NotSegwit => write!(f, "This input miss segwit signing informations"),
             Error::NotTapKey => write!(f, "This input miss tap key signing informations"),
             Error::NotTapTree => write!(f, "This input miss taptree signing informations"),
+            Error::InternalKeyNotMatch => write!(f, "Provided & generated internal key not match"),
+            Error::InsanePrevouts => write!(f, "Insane prevouts for taproot sighash"),
+            Error::SigningInfo => write!(f, "Missing signing informations"),
         }
     }
 }
