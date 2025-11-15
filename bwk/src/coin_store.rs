@@ -2,6 +2,7 @@ use bwk_descriptor::derivator::SpkDerivator;
 use bwk_tx::{
     coin::{self, KeyChain},
     transaction::max_input_satisfaction_size,
+    tx_builder::CoinSource,
     Coin, CoinStatus,
 };
 use miniscript::{
@@ -75,6 +76,26 @@ impl From<TxEntry> for Payment {
     }
 }
 
+pub struct CoinStoreSource(Arc<Mutex<CoinStore>>);
+
+impl CoinStoreSource {
+    pub fn new(store: Arc<Mutex<CoinStore>>) -> Self {
+        Self(store)
+    }
+}
+
+impl CoinSource for CoinStoreSource {
+    fn spendable_coins(&self) -> Vec<Coin> {
+        self.0
+            .lock()
+            .expect("poisoned")
+            .spendable_coins()
+            .coins
+            .into_values()
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 /// Represents a store for managing coins and their associated data.
 ///
@@ -86,7 +107,7 @@ pub struct CoinStore {
     store: BTreeMap<OutPoint, CoinEntry>,
     label_store: Arc<Mutex<LabelStore>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
-    address_store: AddressStore,
+    address_store: Arc<Mutex<AddressStore>>,
     tx_store: TxStore,
     spk_history: BTreeMap<ScriptBuf, SpkHistory>,
     updates: Vec<Update>,
@@ -200,14 +221,14 @@ impl CoinStore {
         config: Config,
     ) -> Self {
         let derivator = SpkDerivator::new(descriptor, network).unwrap();
-        let address_store = AddressStore::new(
+        let address_store = Arc::new(Mutex::new(AddressStore::new(
             derivator.clone(),
             notification.clone(),
             recv_tip,
             change_tip,
             look_ahead,
             config.clone(),
-        );
+        )));
         Self {
             store: BTreeMap::new(),
             spk_to_outpoint: BTreeMap::new(),
@@ -227,7 +248,10 @@ impl CoinStore {
     /// This method sets up the address store to send updates to the
     /// specified transaction listener.
     pub fn init(&mut self, tx_listener: mpsc::Sender<AddressTip>) {
-        self.address_store.init(tx_listener);
+        self.address_store
+            .lock()
+            .expect("poisoned")
+            .init(tx_listener);
     }
     /// Returns a clone of the derivator used for generating addresses.
     ///
@@ -248,7 +272,10 @@ impl CoinStore {
     /// # Returns
     /// The index of the last generated receiving address.
     pub fn recv_watch_tip(&self) -> u32 {
-        self.address_store.recv_watch_tip()
+        self.address_store
+            .lock()
+            .expect("poisoned")
+            .recv_watch_tip()
     }
 
     /// Returns the current change watch tip index.
@@ -256,7 +283,10 @@ impl CoinStore {
     /// # Returns
     /// The index of the last generated change address.
     pub fn change_watch_tip(&self) -> u32 {
-        self.address_store.change_watch_tip()
+        self.address_store
+            .lock()
+            .expect("poisoned")
+            .change_watch_tip()
     }
 
     /// Generates a new receiving address.
@@ -264,7 +294,7 @@ impl CoinStore {
     /// # Returns
     /// A new `bitcoin::Address` for receiving funds.
     pub fn new_recv_addr(&mut self) -> bitcoin::Address {
-        self.address_store.new_recv_addr()
+        self.address_store.lock().expect("poisoned").new_recv_addr()
     }
 
     /// Returns the current receiving address tip index.
@@ -272,7 +302,7 @@ impl CoinStore {
     /// # Returns
     /// The index of the last generated receiving address.
     pub fn recv_tip(&self) -> u32 {
-        self.address_store.recv_tip()
+        self.address_store.lock().expect("poisoned").recv_tip()
     }
 
     /// Generates a new change address.
@@ -280,7 +310,10 @@ impl CoinStore {
     /// # Returns
     /// A new `bitcoin::Address` for change outputs.
     pub fn new_change_addr(&mut self) -> bitcoin::Address {
-        self.address_store.new_change_addr()
+        self.address_store
+            .lock()
+            .expect("poisoned")
+            .new_change_addr()
     }
 
     /// Retrieves information about an address associated with the given script public key (SPK).
@@ -293,7 +326,7 @@ impl CoinStore {
     /// # Returns
     /// An `Option<AddressEntry>` containing the address information if found, or `None` if no entry exists for the given SPK.
     pub fn address_info(&self, spk: &ScriptBuf) -> Option<AddressEntry> {
-        self.address_store.get_entry(spk)
+        self.address_store.lock().expect("poisoned").get_entry(spk)
     }
 
     /// Processes a received coin at the specified script public key.
@@ -301,7 +334,10 @@ impl CoinStore {
     /// # Parameters
     /// - `spk`: The script public key of the received coin.
     pub fn recv_coin_at(&mut self, spk: &ScriptBuf) {
-        self.address_store.recv_coin_at(spk);
+        self.address_store
+            .lock()
+            .expect("poisoned")
+            .recv_coin_at(spk);
     }
 
     /// Handles the response containing transaction history for SPKs.
@@ -484,7 +520,11 @@ impl CoinStore {
             let tx = entry.tx();
             let txid = tx.compute_txid();
             for (vout, txout) in tx.output.iter().enumerate() {
-                if let Some(addr) = addr_store.get_entry(&txout.script_pubkey) {
+                if let Some(addr) = addr_store
+                    .lock()
+                    .expect("poisoned")
+                    .get_entry(&txout.script_pubkey)
+                {
                     let txout = txout.clone();
                     let outpoint = OutPoint {
                         txid,
@@ -569,7 +609,7 @@ impl CoinStore {
                 1 => AddressStatus::Used,
                 _ => AddressStatus::Reused,
             };
-            if let Some(e) = addr_store.get_entry_mut(spk) {
+            if let Some(e) = addr_store.lock().expect("poisoned").get_entry_mut(spk) {
                 e.set_status(status)
             }
         });
@@ -602,7 +642,11 @@ impl CoinStore {
                     };
                     if let Some(coin) = self.store.get(&op) {
                         let spk = coin.address.clone().assume_checked().script_pubkey();
-                        let owned = self.address_store.contains_spk(&spk);
+                        let owned = self
+                            .address_store
+                            .lock()
+                            .expect("poisoned")
+                            .contains_spk(&spk);
                         input.owned = Some(owned);
                         input.value = if owned {
                             Some(coin.amount_sat())
@@ -751,6 +795,10 @@ impl CoinStore {
     pub fn restore(&mut self, value: serde_json::Value) -> Result<(), serde_json::Error> {
         self.store = serde_json::from_value(value)?;
         Ok(())
+    }
+
+    pub fn address_store(&self) -> Arc<Mutex<AddressStore>> {
+        self.address_store.clone()
     }
 }
 

@@ -31,9 +31,9 @@ pub trait ChangeTip {
 pub trait CoinSource {
     fn spendable_coins(&self) -> Vec<Coin>;
     #[cfg(feature = "test")]
-    fn add_coin(&mut self, coin: Coin);
+    fn add_coin(&mut self, _coin: Coin) {}
     #[cfg(feature = "test")]
-    fn remove_coin(&mut self, coin: &Coin);
+    fn remove_coin(&mut self, _coin: &Coin) {}
 }
 
 #[cfg(feature = "test")]

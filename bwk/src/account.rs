@@ -13,7 +13,7 @@ use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
 use bwk_sign::{signing_manager::SigningManager, HotSigner, Signer};
-use bwk_tx::{coin::KeyChain, Coin};
+use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, Coin};
 use miniscript::{
     bitcoin::{self, OutPoint, ScriptBuf, TxOut},
     Descriptor, DescriptorPublicKey,
@@ -21,8 +21,8 @@ use miniscript::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    address_store::{AddressEntry, AddressStatus, AddressTip},
-    coin_store::{CoinEntry, CoinStore, Payment},
+    address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
+    coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
     tx_store::{TxEntry, TxStore},
@@ -538,6 +538,14 @@ impl Account {
         let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
         signer.register_descriptor(self.descriptor());
         Some(signer)
+    }
+
+    pub fn tx_builder(&self) -> Result<TxBuilder, bwk_tx::transaction::Error> {
+        let tip_handle = Box::new(ChangeTipUpdater::new(
+            self.coin_store.lock().expect("poisoned").address_store(),
+        ));
+        let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
+        Ok(TxBuilder::new(self.descriptor(), tip_handle, self.network())?.coin_source(coin_source))
     }
 }
 

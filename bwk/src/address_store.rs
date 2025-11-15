@@ -1,8 +1,11 @@
 use bwk_descriptor::derivator::SpkDerivator;
-use bwk_tx::coin::KeyChain;
+use bwk_tx::{coin::KeyChain, tx_builder::ChangeTip};
 use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::mpsc};
+use std::{
+    collections::BTreeMap,
+    sync::{mpsc, Arc, Mutex},
+};
 
 use crate::{account::Notification, config::Config};
 
@@ -23,6 +26,24 @@ pub enum AddressStatus {
 pub struct AddressTip {
     pub recv: u32,
     pub change: u32,
+}
+
+pub struct ChangeTipUpdater(Arc<Mutex<AddressStore>>);
+
+impl ChangeTipUpdater {
+    pub fn new(store: Arc<Mutex<AddressStore>>) -> Self {
+        ChangeTipUpdater(store)
+    }
+}
+
+impl ChangeTip for ChangeTipUpdater {
+    fn next_index(&mut self) -> u32 {
+        let mut store = self.0.lock().expect("poisoned");
+        store.change_generated_tip += 1;
+        let tip = store.change_generated_tip;
+        store.update_change(tip);
+        tip
+    }
 }
 
 #[derive(Debug)]
