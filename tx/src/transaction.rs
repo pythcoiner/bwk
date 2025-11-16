@@ -467,7 +467,7 @@ mod test {
     use super::*;
     use crate::{
         transaction::finalize_transaction,
-        tx_builder::{external_recipient, funding_coin, sum_inputs, sum_outputs, tr_signer},
+        tx_builder::test::{external_recipient, funding_coin, sum_inputs, sum_outputs, tr_signer},
     };
     use miniscript::bitcoin;
 

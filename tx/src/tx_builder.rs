@@ -205,7 +205,10 @@ impl TxBuilder {
         let res = process_transaction(self.tx_template.clone(), &descriptor);
         finalize_transaction(res, &mut (|| self.new_change_index()), descriptor, true)
     }
-    #[cfg(feature = "test")]
+}
+
+#[cfg(feature = "test")]
+impl TxBuilder {
     pub fn mark_tx_mined(&mut self) {
         use crate::transaction::max_input_satisfaction_size;
 
@@ -241,7 +244,6 @@ impl TxBuilder {
             }
         }
     }
-    #[cfg(feature = "test")]
     pub fn receive_coin(&mut self, coin: Coin) {
         if coin.descriptor != self.derivator.descriptor() {
             return;
@@ -250,28 +252,23 @@ impl TxBuilder {
             source.add_coin(coin);
         }
     }
-    #[cfg(feature = "test")]
     pub fn funding_input(&mut self, amount: u64) {
         let index: u8 = random();
-        let coin = receive_coin(amount, &self.derivator, index as u32);
+        let coin = test::receive_coin(amount, &self.derivator, index as u32);
         self.tx_template.inputs.push(coin);
     }
-    #[cfg(feature = "test")]
     pub fn self_recipient(&mut self, amount: u64) -> Recipient {
         let index: u8 = random();
-        self_recipient(amount, &self.derivator, index as u32)
+        test::self_recipient(amount, &self.derivator, index as u32)
     }
-    #[cfg(feature = "test")]
     pub fn dummy_external_output(&mut self, amount: u64) {
-        let recipient = external_recipient(amount);
+        let recipient = test::external_recipient(amount);
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(feature = "test")]
     pub fn dummy_external_output_max(&mut self) {
-        let recipient = external_recipient_max();
+        let recipient = test::external_recipient_max();
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(feature = "test")]
     pub fn self_output(&mut self, amount: u64) {
         use crate::coin::KeyChain;
         let index: u8 = random();
@@ -285,11 +282,9 @@ impl TxBuilder {
         };
         self.tx_template.outputs.push(recipient);
     }
-    #[cfg(feature = "test")]
     pub fn receive_address_at(&self, index: u32) -> bitcoin::Address {
         self.derivator.receive_at(index)
     }
-    #[cfg(feature = "test")]
     pub fn fund_with_bitcoind(&mut self, bitcoind: &mut corepc_node::Client, amount: u64) -> Coin {
         use crate::{coin::KeyChain, transaction::max_input_satisfaction_size};
 
@@ -333,243 +328,240 @@ impl TxBuilder {
 }
 
 #[cfg(feature = "test")]
-fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-    use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
+pub mod test {
+    use super::*;
+    use crate::Amount;
+    pub fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
+        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
 
-    let spk = derivator.receive_at(index).script_pubkey();
-    let txout = TxOut {
-        value: bitcoin::Amount::from_sat(amount),
-        script_pubkey: spk.clone(),
-    };
-    let vout: u8 = random();
-    let outpoint = OutPoint {
-        txid: txid(),
-        vout: vout as u32,
-    };
-    let descriptor = derivator.descriptor();
-    let satisfaction = max_input_satisfaction_size(&descriptor);
-    Coin {
-        txout,
-        outpoint,
-        coin_path: (KeyChain::Receive, index),
-        height: None,
-        sequence: Sequence::ZERO,
-        status: CoinStatus::Unconfirmed,
-        label: None,
-        descriptor,
-        satisfaction_size: satisfaction as u64,
-    }
-}
-
-#[cfg(feature = "test")]
-pub fn tr_signer() -> (HotSigner, SpkDerivator) {
-    let nw = Network::Regtest;
-    let mut signer = HotSigner::new(nw).unwrap();
-    let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
-    let xpub = signer.xpub(&path);
-    let derivator = SpkDerivator::new_tr(xpub, nw).unwrap();
-    signer.register_descriptor(derivator.descriptor());
-    (signer, derivator)
-}
-
-#[cfg(feature = "test")]
-pub fn taptree_signer() -> (HotSigner, SpkDerivator) {
-    use std::str::FromStr;
-
-    let nw = Network::Regtest;
-    let not_signer = HotSigner::new(nw).unwrap();
-    let mut signer = HotSigner::new(nw).unwrap();
-    let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
-    let xpub = signer.xpub(&path);
-    let not_xpub = not_signer.xpub(&path);
-
-    let descr_str = format!(
-        "tr([{}/{}]{}/<0;1>/*,pk([{}/{}]{}/<0;1>/*))",
-        not_xpub.origin.0,
-        not_xpub.origin.1,
-        not_xpub.xkey,
-        xpub.origin.0,
-        xpub.origin.1,
-        xpub.xkey
-    );
-    let desccriptor =
-        Descriptor::<DescriptorPublicKey>::from_str(&descr_str).expect("hardcoded descriptor");
-    let derivator = SpkDerivator::new(desccriptor, nw).unwrap();
-    signer.register_descriptor(derivator.descriptor());
-    (signer, derivator)
-}
-
-#[cfg(feature = "test")]
-pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
-    let nw = Network::Regtest;
-    let mut signer = HotSigner::new(nw).unwrap();
-    let path = wpkh_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
-    let xpub = signer.xpub(&path);
-    let derivator = SpkDerivator::new_wpkh(xpub, nw).unwrap();
-    signer.register_descriptor(derivator.descriptor());
-    (signer, derivator)
-}
-
-#[cfg(feature = "test")]
-pub fn sum_inputs(psbt: &Psbt) -> u64 {
-    psbt.inputs.iter().enumerate().fold(0, |sum, (pos, i)| {
-        if let Some(txout) = &i.witness_utxo {
-            sum + txout.value.to_sat()
-        } else if let Some(tx) = &i.non_witness_utxo {
-            sum + tx.output[pos].value.to_sat()
-        } else {
-            panic!("missing amount")
-        }
-    })
-}
-
-#[cfg(feature = "test")]
-pub fn sum_outputs(psbt: &Psbt) -> u64 {
-    psbt.unsigned_tx
-        .output
-        .iter()
-        .fold(0, |sum, o| sum + o.value.to_sat())
-}
-
-#[cfg(feature = "test")]
-pub fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Recipient {
-    use crate::coin::KeyChain;
-
-    let address = derivator.receive_at(index).as_unchecked().clone();
-    Recipient {
-        address,
-        amount: super::Amount::Value(amount),
-        label: None,
-        origin: Some((KeyChain::Receive, index)),
-        descriptor: Some(derivator.descriptor()),
-    }
-}
-
-#[cfg(feature = "test")]
-pub fn external_recipient(amount: u64) -> Recipient {
-    let (_signer, derivator) = tr_signer();
-    let index: u16 = random();
-
-    let address = derivator.receive_at(index as u32).as_unchecked().clone();
-    Recipient {
-        address,
-        amount: super::Amount::Value(amount),
-        label: None,
-        origin: None,
-        descriptor: None,
-    }
-}
-
-#[cfg(feature = "test")]
-pub fn external_recipient_max() -> Recipient {
-    let (_signer, derivator) = tr_signer();
-    let index: u16 = random();
-    let address = derivator.receive_at(index as u32).as_unchecked().clone();
-    Recipient {
-        address,
-        amount: super::Amount::Max(None),
-        label: None,
-        origin: None,
-        descriptor: None,
-    }
-}
-
-#[cfg(feature = "test")]
-pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-    use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
-
-    let spk = derivator.receive_at(index).script_pubkey();
-    let descriptor = derivator.descriptor();
-    let (tx, pos) = funding_tx(spk, (amount as f64) / 100_000_000.0);
-    let txid = tx.compute_txid();
-
-    let txout = tx.output[pos].clone();
-    let outpoint = OutPoint {
-        txid,
-        vout: (pos as u32),
-    };
-
-    let satisfaction = max_input_satisfaction_size(&descriptor);
-
-    Coin {
-        txout,
-        outpoint,
-        coin_path: (KeyChain::Receive, index),
-        height: None,
-        sequence: Sequence::ZERO,
-        status: CoinStatus::Unconfirmed,
-        label: None,
-        descriptor,
-        satisfaction_size: satisfaction as u64,
-    }
-}
-
-#[cfg(feature = "test")]
-pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /* position */) {
-    let num_inputs = rand::thread_rng().gen_range(1..10);
-    let num_outputs: usize = rand::thread_rng().gen_range(1..5);
-
-    let mut inserted = false;
-    let mut pos = 0;
-    let mut input = vec![];
-    let mut output = vec![];
-
-    for _ in 0..num_inputs {
-        input.push(random_input());
-    }
-
-    for p in 0..num_outputs {
-        let r = rand::thread_rng().gen_range(1..5);
-        if (r == 0 || p == (num_outputs.saturating_sub(1))) && !inserted {
-            output.push(TxOut {
-                value: bitcoin::Amount::from_btc(amount).unwrap(),
-                script_pubkey: spk.clone(),
-            });
-            pos = p;
-            inserted = true;
-        } else {
-            output.push(random_output());
+        let spk = derivator.receive_at(index).script_pubkey();
+        let txout = TxOut {
+            value: bitcoin::Amount::from_sat(amount),
+            script_pubkey: spk.clone(),
+        };
+        let vout: u8 = random();
+        let outpoint = OutPoint {
+            txid: txid(),
+            vout: vout as u32,
+        };
+        let descriptor = derivator.descriptor();
+        let satisfaction = max_input_satisfaction_size(&descriptor);
+        Coin {
+            txout,
+            outpoint,
+            coin_path: (KeyChain::Receive, index),
+            height: None,
+            sequence: Sequence::ZERO,
+            status: CoinStatus::Unconfirmed,
+            label: None,
+            descriptor,
+            satisfaction_size: satisfaction as u64,
         }
     }
 
-    (
-        bitcoin::Transaction {
-            version: bitcoin::transaction::Version(2),
-            lock_time: bitcoin::absolute::LockTime::Blocks(bitcoin::absolute::Height::ZERO),
-            input,
-            output,
-        },
-        pos,
-    )
-}
+    pub fn tr_signer() -> (HotSigner, SpkDerivator) {
+        let nw = Network::Regtest;
+        let mut signer = HotSigner::new(nw).unwrap();
+        let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let derivator = SpkDerivator::new_tr(xpub, nw).unwrap();
+        signer.register_descriptor(derivator.descriptor());
+        (signer, derivator)
+    }
 
-#[cfg(feature = "test")]
-pub fn generate_sign_broadcast(
-    builder: &mut TxBuilder,
-    signer: &HotSigner,
-    bitcoind: &mut corepc_node::Client,
-    fee: u64,
-    change: u64,
-    warnings: &[Warning],
-    tx_size: u64,
-) {
-    let change = (change > 0).then_some(bitcoin::Amount::from_sat(change));
-    let res = builder.simulate();
-    assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(fee)));
-    assert_eq!(res.change, change);
-    assert_eq!(res.warnings, warnings.to_vec());
-    assert!(res.error.is_none());
-    let mut psbt = builder.generate().unwrap();
-    signer.sign(&mut psbt);
-    let tx = signer.finalize(&mut psbt).unwrap();
-    let size = tx.weight().to_vbytes_ceil();
-    assert_eq!(size, tx_size);
-    let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    pub fn taptree_signer() -> (HotSigner, SpkDerivator) {
+        use std::str::FromStr;
+
+        let nw = Network::Regtest;
+        let not_signer = HotSigner::new(nw).unwrap();
+        let mut signer = HotSigner::new(nw).unwrap();
+        let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let not_xpub = not_signer.xpub(&path);
+
+        let descr_str = format!(
+            "tr([{}/{}]{}/<0;1>/*,pk([{}/{}]{}/<0;1>/*))",
+            not_xpub.origin.0,
+            not_xpub.origin.1,
+            not_xpub.xkey,
+            xpub.origin.0,
+            xpub.origin.1,
+            xpub.xkey
+        );
+        let desccriptor =
+            Descriptor::<DescriptorPublicKey>::from_str(&descr_str).expect("hardcoded descriptor");
+        let derivator = SpkDerivator::new(desccriptor, nw).unwrap();
+        signer.register_descriptor(derivator.descriptor());
+        (signer, derivator)
+    }
+
+    pub fn wpkh_signer() -> (HotSigner, SpkDerivator) {
+        let nw = Network::Regtest;
+        let mut signer = HotSigner::new(nw).unwrap();
+        let path = wpkh_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let derivator = SpkDerivator::new_wpkh(xpub, nw).unwrap();
+        signer.register_descriptor(derivator.descriptor());
+        (signer, derivator)
+    }
+
+    pub fn sum_inputs(psbt: &Psbt) -> u64 {
+        psbt.inputs.iter().enumerate().fold(0, |sum, (pos, i)| {
+            if let Some(txout) = &i.witness_utxo {
+                sum + txout.value.to_sat()
+            } else if let Some(tx) = &i.non_witness_utxo {
+                sum + tx.output[pos].value.to_sat()
+            } else {
+                panic!("missing amount")
+            }
+        })
+    }
+
+    pub fn sum_outputs(psbt: &Psbt) -> u64 {
+        psbt.unsigned_tx
+            .output
+            .iter()
+            .fold(0, |sum, o| sum + o.value.to_sat())
+    }
+
+    pub fn self_recipient(amount: u64, derivator: &SpkDerivator, index: u32) -> Recipient {
+        use crate::coin::KeyChain;
+
+        let address = derivator.receive_at(index).as_unchecked().clone();
+        Recipient {
+            address,
+            amount: Amount::Value(amount),
+            label: None,
+            origin: Some((KeyChain::Receive, index)),
+            descriptor: Some(derivator.descriptor()),
+        }
+    }
+
+    pub fn external_recipient(amount: u64) -> Recipient {
+        let (_signer, derivator) = tr_signer();
+        let index: u16 = random();
+
+        let address = derivator.receive_at(index as u32).as_unchecked().clone();
+        Recipient {
+            address,
+            amount: Amount::Value(amount),
+            label: None,
+            origin: None,
+            descriptor: None,
+        }
+    }
+
+    pub fn external_recipient_max() -> Recipient {
+        let (_signer, derivator) = tr_signer();
+        let index: u16 = random();
+        let address = derivator.receive_at(index as u32).as_unchecked().clone();
+        Recipient {
+            address,
+            amount: Amount::Max(None),
+            label: None,
+            origin: None,
+            descriptor: None,
+        }
+    }
+
+    pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
+        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
+
+        let spk = derivator.receive_at(index).script_pubkey();
+        let descriptor = derivator.descriptor();
+        let (tx, pos) = funding_tx(spk, (amount as f64) / 100_000_000.0);
+        let txid = tx.compute_txid();
+
+        let txout = tx.output[pos].clone();
+        let outpoint = OutPoint {
+            txid,
+            vout: (pos as u32),
+        };
+
+        let satisfaction = max_input_satisfaction_size(&descriptor);
+
+        Coin {
+            txout,
+            outpoint,
+            coin_path: (KeyChain::Receive, index),
+            height: None,
+            sequence: Sequence::ZERO,
+            status: CoinStatus::Unconfirmed,
+            label: None,
+            descriptor,
+            satisfaction_size: satisfaction as u64,
+        }
+    }
+
+    pub fn funding_tx(spk: ScriptBuf, amount: f64) -> (bitcoin::Transaction, usize /* position */) {
+        let num_inputs = rand::thread_rng().gen_range(1..10);
+        let num_outputs: usize = rand::thread_rng().gen_range(1..5);
+
+        let mut inserted = false;
+        let mut pos = 0;
+        let mut input = vec![];
+        let mut output = vec![];
+
+        for _ in 0..num_inputs {
+            input.push(random_input());
+        }
+
+        for p in 0..num_outputs {
+            let r = rand::thread_rng().gen_range(1..5);
+            if (r == 0 || p == (num_outputs.saturating_sub(1))) && !inserted {
+                output.push(TxOut {
+                    value: bitcoin::Amount::from_btc(amount).unwrap(),
+                    script_pubkey: spk.clone(),
+                });
+                pos = p;
+                inserted = true;
+            } else {
+                output.push(random_output());
+            }
+        }
+
+        (
+            bitcoin::Transaction {
+                version: bitcoin::transaction::Version(2),
+                lock_time: bitcoin::absolute::LockTime::Blocks(bitcoin::absolute::Height::ZERO),
+                input,
+                output,
+            },
+            pos,
+        )
+    }
+
+    pub fn generate_sign_broadcast(
+        builder: &mut TxBuilder,
+        signer: &HotSigner,
+        bitcoind: &mut corepc_node::Client,
+        fee: u64,
+        change: u64,
+        warnings: &[Warning],
+        tx_size: u64,
+    ) {
+        let change = (change > 0).then_some(bitcoin::Amount::from_sat(change));
+        let res = builder.simulate();
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(fee)));
+        assert_eq!(res.change, change);
+        assert_eq!(res.warnings, warnings.to_vec());
+        assert!(res.error.is_none());
+        let mut psbt = builder.generate().unwrap();
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let size = tx.weight().to_vbytes_ceil();
+        assert_eq!(size, tx_size);
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
+    use crate::tx_builder::test::generate_sign_broadcast;
+    use crate::tx_builder::test::taptree_signer;
+    use crate::tx_builder::test::tr_signer;
+    use crate::tx_builder::test::wpkh_signer;
     use bwk_utils::test::bitcoind_with_txindex;
 
     #[test]
