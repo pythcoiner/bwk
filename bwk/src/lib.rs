@@ -7,6 +7,14 @@ pub mod log;
 pub mod tx_store;
 
 pub use account::Account;
-pub use bwk_electrum;
 pub use config::Config;
+
+// Re-exports
+pub use bwk_backoff;
+pub use bwk_descriptor;
+pub use bwk_electrum;
+pub use bwk_keys;
+pub use bwk_sign;
+pub use bwk_tx;
+pub use bwk_utils;
 pub use miniscript;
