@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
-    coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment},
+    coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
     tx_store::{TxEntry, TxStore},
@@ -546,6 +546,16 @@ impl Account {
         ));
         let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
         Ok(TxBuilder::new(self.descriptor(), tip_handle, self.network())?.coin_source(coin_source))
+    }
+
+    pub fn balance(&self) -> (u64, Vec<Payment>) {
+        let payments = self.payment_history();
+        let balance = payments.iter().fold(0, |a, b| match b.payment_type {
+            PaymentType::Receive => a + (b.amount as i128),
+            PaymentType::Send => a - (b.amount as i128),
+            PaymentType::ToSelf => unimplemented!(),
+        }) as u64;
+        (balance, payments)
     }
 }
 
