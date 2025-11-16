@@ -6,6 +6,7 @@ use crate::{
 use bitcoin::Psbt;
 use bwk_descriptor::SpkDerivator;
 use miniscript::{Descriptor, DescriptorPublicKey};
+use std::collections::BTreeMap;
 
 #[cfg(feature = "test")]
 use {
@@ -22,7 +23,6 @@ use {
         key::rand::{self, random, Rng},
         OutPoint, ScriptBuf, Sequence, TxOut,
     },
-    std::collections::BTreeMap,
 };
 
 pub trait ChangeTip {
@@ -81,9 +81,9 @@ impl TxBuilder {
                 fees: crate::Fees::MilliSatsVb(1_000),
                 change_descriptor: descriptor.clone(),
             },
-            #[cfg(not(test))]
+            #[cfg(not(feature = "test"))]
             coin_source: None,
-            #[cfg(test)]
+            #[cfg(feature = "test")]
             coin_source: Some(Box::new(BTreeMap::new())),
         })
     }
@@ -108,9 +108,9 @@ impl TxBuilder {
                 fees: crate::Fees::MilliSatsVb(1_000),
                 change_descriptor: descriptor.clone(),
             },
-            #[cfg(not(test))]
+            #[cfg(not(feature = "test"))]
             coin_source: None,
-            #[cfg(test)]
+            #[cfg(feature = "test")]
             coin_source: Some(Box::new(BTreeMap::new())),
         })
     }
@@ -631,7 +631,7 @@ pub mod test {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test"))]
 mod tests {
     use super::*;
     use crate::tx_builder::test::generate_sign_broadcast;

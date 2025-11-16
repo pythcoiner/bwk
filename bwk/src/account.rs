@@ -789,7 +789,7 @@ fn listen_txs<T: From<TxListenerNotif>>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test"))]
 mod tests {
     use super::*;
     use crate::tx_store::TxStore;

@@ -573,7 +573,7 @@ pub fn account_path(path: &DerivationPath) -> Result<(bool /* is_change */, u32)
     Ok((is_change, path[1]))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test"))]
 mod tests {
     use super::*;
     use bitcoin::Network;

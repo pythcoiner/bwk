@@ -3,20 +3,23 @@ use std::{collections::BTreeMap, sync::Once, thread::sleep, time::Duration};
 
 use crate::utils::bootstrap_electrs;
 use bwk::{
-    coin_store::Payment,
     config::{maybe_create_dir, Config},
     Account,
 };
 use bwk_descriptor::descriptor::ScriptType;
-use bwk_tx::tx_builder::TxBuilder;
-use electrsd::bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD};
+use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
 use miniscript::bitcoin::bip32::ChildNumber;
-use rand::random_range;
 use temp_dir::TempDir;
 use utils::{dump_logs, generate, get_block_hash, get_block_height, reorg_chain, send_to_address};
 use {
     bip39::Mnemonic,
     miniscript::bitcoin::{self, Amount, Network},
+};
+
+#[cfg(feature = "test")]
+use {
+    bwk::coin_store::Payment, bwk_tx::tx_builder::TxBuilder, electrsd::bitcoind::BitcoinD,
+    rand::random_range,
 };
 
 static INIT: Once = Once::new();
@@ -300,6 +303,7 @@ fn simple_reorg() {
     assert_eq!(coins.len(), 2);
 }
 
+#[cfg(feature = "test")]
 fn spend(
     account: &mut Account,
     builder: &mut TxBuilder,
@@ -320,6 +324,7 @@ fn spend(
     txid
 }
 
+#[cfg(feature = "test")]
 fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) {
     let recv_addr = account.new_recv_addr();
     send_to_address(bitcoind, &recv_addr, Amount::from_sat(amount));
@@ -327,6 +332,7 @@ fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) {
     generate(bitcoind, blocks);
 }
 
+#[cfg(feature = "test")]
 fn sort_payments(payments: &Vec<Payment>) -> (usize, usize) {
     let mut recv = 0;
     let mut sent = 0;
@@ -340,6 +346,7 @@ fn sort_payments(payments: &Vec<Payment>) -> (usize, usize) {
     (recv, sent)
 }
 
+#[cfg(feature = "test")]
 #[test]
 fn test_list_payments() {
     setup_logger();

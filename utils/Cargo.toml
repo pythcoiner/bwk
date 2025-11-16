@@ -18,3 +18,8 @@ rand.workspace = true
 env_logger.workspace = true
 log.workspace = true
 corepc-node.workspace = true
+corepc-node.optional = true
+
+[features]
+default = []
+test = ["dep:corepc-node"]

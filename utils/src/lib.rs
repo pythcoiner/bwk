@@ -1,3 +1,4 @@
+#[cfg(feature = "test")]
 pub mod test;
 
 pub fn short_string(s: String, len: usize) -> String {

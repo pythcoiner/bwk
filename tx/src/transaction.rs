@@ -458,7 +458,7 @@ pub fn process_transaction(
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test"))]
 mod test {
     use super::*;
     use crate::{
