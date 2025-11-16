@@ -1,7 +1,8 @@
 use miniscript::bitcoin::{self, Txid};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
+    fmt::Debug,
     fs::File,
     io::{Read, Write},
     path::PathBuf,
@@ -14,7 +15,6 @@ use crate::{coin_store::Update, config::maybe_create_dir};
 pub struct TxStore {
     store: BTreeMap<Txid, TxEntry>,
     path: Option<PathBuf>,
-    unpopulated_metadata: BTreeSet<Txid>,
     persist: bool,
 }
 
@@ -29,7 +29,6 @@ impl TxStore {
             store,
             path,
             persist: true,
-            unpopulated_metadata: BTreeSet::new(),
         }
     }
 
@@ -37,10 +36,8 @@ impl TxStore {
         self.store.values().cloned().collect()
     }
 
-    pub fn take_unpopulated_metadata(&mut self) -> BTreeSet<Txid> {
-        let unpopulated = self.unpopulated_metadata.clone();
-        self.unpopulated_metadata.clear();
-        unpopulated
+    pub fn get(&self, txid: &Txid) -> Option<&TxEntry> {
+        self.store.get(txid)
     }
 
     pub fn get_mut(&mut self, txid: &Txid) -> Option<&mut TxEntry> {
@@ -71,7 +68,6 @@ impl TxStore {
         for upd in updates {
             for (txid, tx, height) in upd.txs {
                 let tx = tx.expect("all txs populated");
-                self.unpopulated_metadata.insert(tx.compute_txid());
                 let weight = tx.weight().to_wu();
                 let entry = TxEntry {
                     height,
@@ -82,7 +78,7 @@ impl TxStore {
                     fees: 0,
                     weight,
                 };
-                self.store.insert(txid, entry);
+                self.store.entry(txid).or_insert(entry);
             }
         }
     }
@@ -163,16 +159,16 @@ impl TxStore {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputMetadata {
     pub value: Option<u64>,
-    pub owned: Option<bool>,
+    pub owned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputMetadata {
-    pub owned: Option<bool>,
+    pub owned: bool,
 }
 
 /// A structure representing a Bitcoin transaction entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TxEntry {
     /// Blockheight at which the tx have been mined
     height: Option<u64>,
@@ -188,6 +184,20 @@ pub struct TxEntry {
     fees: u64,
     /// Tx weight in wu
     weight: u64,
+}
+
+impl Debug for TxEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxEntry")
+            .field("height", &self.height)
+            .field("tx", &self.tx.compute_txid())
+            .field("merkle", &self.merkle)
+            .field("inputs", &self.inputs)
+            .field("outputs", &self.outputs)
+            .field("fees", &self.fees)
+            .field("weight", &self.weight)
+            .finish()
+    }
 }
 
 impl TxEntry {
@@ -209,5 +219,11 @@ impl TxEntry {
     /// A vector of byte vectors representing the Merkle proof.
     pub fn merkle(&self) -> Vec<Vec<u8>> {
         self.merkle.clone()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        let inputs_filled = self.tx().input.len() == self.inputs.len();
+        let outputs_filled = self.tx().output.len() == self.outputs.len();
+        inputs_filled && outputs_filled
     }
 }

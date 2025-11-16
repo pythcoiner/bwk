@@ -94,7 +94,7 @@ impl AddressStore {
         look_ahead: u32,
         config: Config,
     ) -> Self {
-        let store = Self {
+        let mut store = Self {
             derivator,
             store: BTreeMap::new(),
             recv_generated_tip: recv_tip,
@@ -104,6 +104,7 @@ impl AddressStore {
             look_ahead,
             config,
         };
+        store.populate_maybe();
         store.update_watch_tip();
 
         store

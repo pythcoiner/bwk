@@ -11,7 +11,7 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::{mpsc, Arc, Mutex},
 };
 
@@ -40,22 +40,15 @@ pub struct Payment {
 impl From<TxEntry> for Payment {
     fn from(value: TxEntry) -> Self {
         // FIXME: handle ToSelf
+        assert!(value.is_complete());
         let inputs = value.inputs.iter().fold(0, |a, (_, b)| {
-            let v = if b.owned.unwrap_or(false) {
-                b.value.unwrap_or(0)
-            } else {
-                0
-            };
+            let v = if b.owned { b.value.unwrap_or(0) } else { 0 };
             a + v
         });
         let mut outputs = 0;
         for index in 0..value.tx().output.len() {
             let amount = value.tx().output[index].value.to_sat();
-            let owned = value
-                .outputs
-                .get(&index)
-                .and_then(|o| o.owned)
-                .unwrap_or(false);
+            let owned = value.outputs.get(&index).map(|o| o.owned).unwrap_or(false);
             if owned {
                 outputs += amount;
             }
@@ -464,7 +457,7 @@ impl CoinStore {
     /// # Parameters
     /// - `txs`: A vector of Bitcoin transactions received.
     pub fn handle_txs_response(&mut self, txs: Vec<bitcoin::Transaction>) {
-        // iter over updates & fill where the transaction is requested
+        // iter over updates & populate where the transaction is required
         for new_tx in txs {
             let new_txid = new_tx.compute_txid();
             for Update { txs, .. } in &mut self.updates {
@@ -503,7 +496,6 @@ impl CoinStore {
     /// transactions in the transaction store and updates the address
     /// statuses accordingly.
     pub fn generate(&mut self) {
-        self.tx_store.persist();
         let addr_store = &mut self.address_store;
         let tx_store = &self.tx_store;
 
@@ -614,6 +606,7 @@ impl CoinStore {
         });
 
         self.populate_tx_metadata();
+        self.tx_store.persist();
 
         // FIXME: update statuses of those w/ CoinStatus::BeeingSpent
 
@@ -623,69 +616,74 @@ impl CoinStore {
     }
 
     pub fn populate_tx_metadata(&mut self) {
-        let unpopulated = self.tx_store.take_unpopulated_metadata();
-        for txid in unpopulated {
-            if let Some(tx) = self.tx_store.get_mut(&txid) {
-                // populate inputs
-                let outpoints: Vec<_> = tx
-                    .tx()
-                    .input
-                    .iter()
-                    .enumerate()
-                    .map(|(i, inp)| (i, inp.previous_output))
-                    .collect();
-                for (i, op) in outpoints {
-                    let mut input = InputMetadata {
-                        value: None,
-                        owned: Some(false),
-                    };
-                    if let Some(coin) = self.store.get(&op) {
-                        let spk = coin.address.clone().assume_checked().script_pubkey();
-                        let owned = self
-                            .address_store
-                            .lock()
-                            .expect("poisoned")
-                            .contains_spk(&spk);
-                        input.owned = Some(owned);
-                        input.value = if owned {
-                            Some(coin.amount_sat())
-                        } else {
-                            Some(0)
-                        };
-                    }
-                    tx.inputs.insert(i, input);
-                    // FIXME: we do not populate values of non owned inputs as we do not have their
-                    // coin in the store
-                }
-                // populate outputs
-                let outpoints: Vec<_> = tx
-                    .tx()
-                    .output
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| {
-                        (
-                            i,
-                            OutPoint {
-                                txid,
-                                vout: i as u32,
-                            },
-                        )
-                    })
-                    .collect();
-                for (i, op) in outpoints {
-                    let mut output = OutputMetadata { owned: Some(false) };
-                    if self.store.contains_key(&op) {
-                        output.owned = Some(true);
-                    }
-                    tx.outputs.insert(i, output);
-                }
+        let unpopulated: Vec<_> = self
+            .tx_store
+            .transactions()
+            .into_iter()
+            .filter_map(|tx| (!tx.is_complete()).then_some(tx.txid()))
+            .collect();
 
-                // FIXME: as inputs values of non owned coins are unknown, we cannot update the tx
-                // fees
-            } else {
-                log::error!("CoinStore.populate_tx_metadata() => tx {txid} missing.");
+        if unpopulated.is_empty() {
+            return;
+        }
+
+        // We get all outpoints info first
+        let mut outpoints = BTreeSet::new();
+        for txid in &unpopulated {
+            if let Some(tx) = self.tx_store.get(txid) {
+                for inp in &tx.tx().input {
+                    outpoints.insert(inp.previous_output);
+                }
             }
+        }
+        let mut txouts = BTreeMap::new();
+        for op in outpoints {
+            if let Some(tx) = self.tx_store.get(&op.txid) {
+                let index = op.vout as usize;
+                txouts.insert(op, tx.tx().output[index].clone());
+            }
+        }
+
+        // Populate all transactions metadata
+        for txid in unpopulated {
+            let mut tx = self.tx_store.get(&txid).expect("present").clone();
+            if tx.is_complete() {
+                continue;
+            }
+            // Populate all outputs (looking for received coins)
+            for (i, txout) in tx.tx().output.clone().iter().enumerate() {
+                let spk = txout.script_pubkey.clone();
+                let owned = self
+                    .address_store
+                    .lock()
+                    .expect("poisoned")
+                    .contains_spk(&spk);
+                let output = OutputMetadata { owned };
+                tx.outputs.insert(i, output);
+            }
+            // Populate all inputs
+            for (i, txin) in tx.tx().input.clone().iter().enumerate() {
+                let input = if let Some(txout) = txouts.get(&txin.previous_output) {
+                    let spk = txout.script_pubkey.clone();
+                    let owned = self
+                        .address_store
+                        .lock()
+                        .expect("poisoned")
+                        .contains_spk(&spk);
+                    InputMetadata {
+                        value: owned.then_some(txout.value.to_sat()),
+                        owned,
+                    }
+                } else {
+                    InputMetadata {
+                        value: None,
+                        owned: false,
+                    }
+                };
+                tx.inputs.insert(i, input);
+            }
+            // Update the store
+            *self.tx_store.get_mut(&txid).expect("exists") = tx;
         }
     }
 

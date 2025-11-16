@@ -404,3 +404,88 @@ fn test_list_payments() {
     let sorted = sort_payments(&payments);
     assert_eq!(sorted, (1, 1));
 }
+
+#[cfg(feature = "test")]
+#[test]
+fn test_persist_payments() {
+    use rand::random;
+
+    // setup_logger();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    generate(&bitcoind, 100);
+
+    let look_ahead = 20;
+
+    let dir = TempDir::new().unwrap();
+    let mut path = dir.path().to_path_buf();
+    path.push(".bwk");
+    maybe_create_dir(&path);
+    let path = path.parent().unwrap().to_path_buf();
+
+    let mnemonic = Mnemonic::generate(12).unwrap();
+    let mut config = Config::new(
+        Some(mnemonic.to_string()),
+        "account_dir".to_string(),
+        bitcoin::Network::Regtest,
+        ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+        path,
+        ".bwk",
+        true,
+    )
+    .unwrap();
+    config.network = Network::Regtest;
+    config.look_ahead = look_ahead;
+    config.set_electrum_url(url);
+    config.set_electrum_port(port.to_string());
+    config.set_mnemonic(mnemonic.to_string());
+    let saved_config = config.clone();
+    let mut account = Account::new(config);
+    sleep(Duration::from_millis(300));
+    let mut builder = account.tx_builder().unwrap();
+    let signer = account.hot_signer().unwrap();
+
+    receive(&mut account, &bitcoind, 100_000_000);
+    for round in 0..15 {
+        wait_until_timeout(|| account.spendable_coins().coins.len() > 0, 5);
+        sleep(Duration::from_millis(1000));
+        let coins = account.spendable_coins();
+        let balance = coins
+            .coins
+            .into_iter()
+            .fold(0, |a, (_, c)| a + c.txout.value.to_sat());
+        assert!(balance > 1_100_000);
+        let pay: bool = random();
+        if pay {
+            let addr = bitcoind
+                .client
+                .get_new_address(None, None)
+                .unwrap()
+                .assume_checked();
+            let mut psbt = builder
+                .pay(random_range(10_000..1_000_000), addr, 1000)
+                .unwrap();
+            signer.sign(&mut psbt);
+            let tx = signer.finalize(&mut psbt).unwrap();
+            let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+            generate(&bitcoind, random_range(1..5));
+        } else {
+            receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
+        }
+    }
+    wait_until_timeout(
+        || {
+            let payments = account.payment_history();
+            payments.len() == 15
+        },
+        5,
+    );
+    sleep(Duration::from_secs(3));
+    let payments = account.payment_history();
+    assert_eq!(payments.len(), 16);
+    drop(account);
+
+    let mut account = Account::new(saved_config);
+    sleep(Duration::from_millis(300));
+    let payments = account.payment_history();
+    assert_eq!(payments.len(), 16);
+}
