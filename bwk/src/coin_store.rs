@@ -54,8 +54,7 @@ impl From<TxEntry> for Payment {
             let owned = value
                 .outputs
                 .get(&index)
-                .expect("present")
-                .owned
+                .and_then(|o| o.owned)
                 .unwrap_or(false);
             if owned {
                 outputs += amount;
