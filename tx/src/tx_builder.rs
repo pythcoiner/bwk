@@ -1,5 +1,6 @@
 use crate::{
-    transaction::{finalize_transaction, process_transaction, Error},
+    coin_selection,
+    transaction::{finalize_transaction, process_transaction, tx_estimated_weight, Error},
     Coin, Fees, Recipient, TransactionResult, TxTemplate,
 };
 use bitcoin::Psbt;
@@ -204,6 +205,81 @@ impl TxBuilder {
         let descriptor = self.derivator.descriptor();
         let res = process_transaction(self.tx_template.clone(), &descriptor);
         finalize_transaction(res, &mut (|| self.new_change_index()), descriptor, true)
+    }
+    pub fn select_coins(&self, target: u64, feerate: u64 /* msats/vb */) -> Vec<Coin> {
+        // NOTE: target must contains fees for base tx + outputs
+        if let Some(source) = &self.coin_source {
+            let coins = source.spendable_coins();
+            if coins.is_empty() {
+                return coins;
+            }
+            let (selection, _) = coin_selection::select(
+                coins.iter().collect(),
+                target,
+                feerate,
+                50_000,
+                5_000_000,
+                500,
+            );
+            if let Some(sel) = selection {
+                let mut coins: BTreeMap<_, _> =
+                    coins.into_iter().map(|c| (c.outpoint, c)).collect();
+                sel.outpoints
+                    .iter()
+                    .map(|op| coins.remove(op).expect("exists"))
+                    .collect()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    }
+    pub fn pay_with_label(
+        &mut self,
+        amount: u64,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+        label: Option<String>,
+    ) -> Result<bitcoin::Psbt, Error> {
+        self.new_template();
+        let recipient = Recipient {
+            address: address.as_unchecked().clone(),
+            amount: crate::Amount::Value(amount),
+            label,
+            origin: None,
+            descriptor: None,
+        };
+        self.add_output(recipient);
+        let base_fee = tx_estimated_weight(&self.tx_template).to_vbytes_ceil() * feerate / 1000;
+        let coins = self.select_coins(amount + base_fee, feerate);
+        if coins.is_empty() {
+            return Err(Error::CoinSelection);
+        }
+        for c in coins {
+            self.add_input(c);
+        }
+        let res = self.simulate();
+        let psbt = self.generate()?;
+        let tx_weight = psbt.unsigned_tx.weight().to_vbytes_ceil();
+        let min_fee = tx_weight * feerate / 1000;
+        if let Some(fees) = res.fees {
+            if min_fee > fees.to_sat() {
+                Err(Error::CoinSelectionFee)
+            } else {
+                Ok(psbt)
+            }
+        } else {
+            Err(Error::CoinSelectionFee)
+        }
+    }
+    pub fn pay(
+        &mut self,
+        amount: u64,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+    ) -> Result<bitcoin::Psbt, Error> {
+        self.pay_with_label(amount, address, feerate, None)
     }
 }
 
@@ -563,6 +639,8 @@ mod tests {
     use crate::tx_builder::test::tr_signer;
     use crate::tx_builder::test::wpkh_signer;
     use bwk_utils::test::bitcoind_with_txindex;
+    use test::sum_inputs;
+    use test::sum_outputs;
 
     #[test]
     fn test_segwit_offline() {
@@ -868,5 +946,46 @@ mod tests {
         let size = tx.weight().to_vbytes_ceil();
         assert_eq!(size, 229);
         let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_pay_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder =
+            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+
+        // receive few coins
+        builder.fund_with_bitcoind(bitcoind, 1_000_000);
+        builder.fund_with_bitcoind(bitcoind, 2_000_000);
+        builder.fund_with_bitcoind(bitcoind, 3_000_000);
+        builder.fund_with_bitcoind(bitcoind, 7_000_000);
+        builder.fund_with_bitcoind(bitcoind, 10_000_000);
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        let psbt = builder.pay(5_300_000, address, 1000).unwrap();
+        // NOTE: Coin selection avoids consolidation, a "dumb" choice should be coins 1 + 2 + 3
+        // as it's sufficient for macth selection criteria, but it's bad privacy wise, so we give
+        // priority to selection w/ less inputs, it's also better fee wise
+        assert_eq!(psbt.inputs.len(), 1);
+        assert_eq!(sum_inputs(&psbt), 7_000_000);
+        assert_eq!(sum_outputs(&psbt), 7_000_000 - 142);
+
+        generate_sign_broadcast(
+            &mut builder,
+            &signer,
+            bitcoind,
+            142,
+            7_000_000 - 5_300_000 - 142,
+            &[],
+            142,
+        );
     }
 }

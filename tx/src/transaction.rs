@@ -24,6 +24,8 @@ pub enum Error {
     Descriptor,
     Input,
     Output,
+    CoinSelection,
+    CoinSelectionFee,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -130,7 +132,7 @@ pub fn max_input_satisfaction_size(descriptor: &Descriptor<DescriptorPublicKey>)
 }
 
 /// Estimates the maximum possible weight of an unsigned transaction
-pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Result<Weight, Error> {
+pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Weight {
     let mut inputs_weight = 0u64;
     for inp in &tx_template.inputs {
         inputs_weight += inp.satisfaction_size;
@@ -158,7 +160,7 @@ pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Result<Weight, Error> {
             )
         })
         .unwrap();
-    Ok(Weight::from_wu(size))
+    Weight::from_wu(size)
 }
 
 pub fn change_weight(descriptor: &Descriptor<DescriptorPublicKey>) -> Weight {
@@ -407,13 +409,7 @@ pub fn process_transaction(
         .fold(0u64, |sum, coin| sum + coin.txout.value.to_sat());
 
     // let tx = tx_template.tx();
-    let tx_weight_wo_change = match tx_estimated_weight(&tx_template) {
-        Ok(w) => w,
-        Err(e) => {
-            result.error = Some(e);
-            return result;
-        }
-    };
+    let tx_weight_wo_change = tx_estimated_weight(&tx_template);
     let tx_weight_with_change = tx_weight_wo_change + change_weight(descriptor);
 
     let drain = match maxed_output {

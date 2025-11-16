@@ -7,9 +7,9 @@ use crate::Coin;
 
 #[derive(Debug, Clone)]
 pub struct Selection {
-    spendable_amount: u64,
-    fees: u64,
-    outpoints: Vec<bitcoin::OutPoint>,
+    pub spendable_amount: u64,
+    pub fees: u64,
+    pub outpoints: Vec<bitcoin::OutPoint>,
 }
 
 impl Selection {
@@ -37,18 +37,18 @@ pub fn fees(coin: &Coin, feerate: u64 /* msats/vb */) -> u64 {
 }
 
 // Sort out coins if fees >= spendable value
-pub fn discard_dust(coins: Vec<Coin>, feerate: u64 /* msats/vb */) -> Vec<Coin> {
+pub fn discard_dust(coins: Vec<&Coin>, feerate: u64 /* msats/vb */) -> Vec<&Coin> {
     coins
         .into_iter()
-        .filter_map(|c| {
-            let fee = fees(&c, feerate);
-            (fee * 2 < c.txout.value.to_sat()).then_some(c)
+        .filter(|c| {
+            let fee = fees(c, feerate);
+            fee * 2 < c.txout.value.to_sat()
         })
         .collect()
 }
 
 pub fn all_coins_combinations(
-    coins: Vec<Coin>,
+    coins: Vec<&Coin>,
     feerate: u64, /* msats/vb*/
 ) -> Option<BTreeMap<u64, Selection>> {
     let coins = discard_dust(coins, feerate);
@@ -67,7 +67,7 @@ pub fn all_coins_combinations(
         #[allow(clippy::needless_range_loop)]
         for i in 0..n {
             if (mask & (1 << i)) != 0 {
-                selected.push(&coins[i]);
+                selected.push(coins[i]);
             }
         }
 
@@ -79,7 +79,7 @@ pub fn all_coins_combinations(
 }
 
 pub fn select(
-    coins: Vec<Coin>,
+    coins: Vec<&Coin>,
     target: u64,
     feerate: u64,
     min_change: u64,
@@ -123,26 +123,52 @@ pub fn select(
 
     if selection.is_none() {
         // Get the list of selection that match min_change < change < max_change
-        let min_change: Vec<_> = selections
+        let mut change_range: Vec<_> = selections
             .range(target + min_change..target + max_change)
             .collect();
-        if !min_change.is_empty() {
-            let index = random_range(0..min_change.len());
-            selection = Some(min_change[index].1.clone());
+        if !change_range.is_empty() {
+            change_range.sort_by(|a, b| {
+                a.1.outpoints
+                    .len()
+                    // First sort by least inputs count in order to avoid consolidation
+                    .cmp(&b.1.outpoints.len())
+                    // Then minimize fees
+                    .then_with(|| a.1.fees.cmp(&a.1.fees))
+            });
+            selection = Some(change_range.first().expect("exists").1.clone());
         }
     }
 
     if selection.is_none() {
         // Not so good choice
-        selection = selections
-            .range(target + max_change..)
-            .next()
-            .map(|s| s.1.clone());
+        let mut sel: Vec<_> = selections.range(target + max_change..).collect();
+        if !sel.is_empty() {
+            sel.sort_by(|a, b| {
+                a.1.outpoints
+                    .len()
+                    // First sort by least inputs count in order to avoid consolidation
+                    .cmp(&b.1.outpoints.len())
+                    // Then minimize fees
+                    .then_with(|| a.1.fees.cmp(&a.1.fees))
+            });
+            selection = Some(sel.first().expect("exists").1.clone());
+        }
     }
 
     if selection.is_none() {
         // Default choice
-        selection = selections.range(target..).next().map(|s| s.1.clone());
+        let mut sel: Vec<_> = selections.range(target..).collect();
+        if !sel.is_empty() {
+            sel.sort_by(|a, b| {
+                a.1.outpoints
+                    .len()
+                    // First sort by least inputs count in order to avoid consolidation
+                    .cmp(&b.1.outpoints.len())
+                    // Then minimize fees
+                    .then_with(|| a.1.fees.cmp(&a.1.fees))
+            });
+            selection = Some(sel.first().expect("exists").1.clone());
+        }
     }
 
     (selection, cj_selection)
