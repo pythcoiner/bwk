@@ -67,6 +67,8 @@ pub struct Config {
     pub electrum_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrum_port: Option<u16>,
+    #[serde(default)]
+    pub offline: Option<bool>,
     pub network: bitcoin::Network,
     pub look_ahead: u32,
     pub mnemonic: Option<String>,
@@ -117,6 +119,7 @@ impl Config {
             mnemonic,
             descriptor,
             persist,
+            offline: None,
         })
     }
     /// Allow to disable persistance of data, useful for tests
@@ -168,6 +171,12 @@ impl Config {
     /// Sets the account name.
     pub fn set_account(&mut self, name: String) {
         self.account = name;
+    }
+    pub fn set_offline(&mut self, offline: bool) {
+        self.offline = Some(offline);
+    }
+    pub fn offline(&self) -> bool {
+        self.offline.unwrap_or(false)
     }
     /// Saves the configuration to a file.
     pub fn to_file(&self) {

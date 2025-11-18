@@ -167,7 +167,9 @@ impl Account {
             config,
             signing_manager,
         };
-        account.start_electrum();
+        if !account.config.offline() {
+            account.start_electrum();
+        }
         account
     }
 }
@@ -468,7 +470,7 @@ impl Account {
     }
 
     /// Starts the Electrum listener for the account.
-    pub fn start_electrum(&mut self) {
+    fn start_electrum(&mut self) {
         if let (None, Some(addr), Some(port)) = (
             &self.tx_listener,
             self.config.electrum_url.clone(),
@@ -478,7 +480,18 @@ impl Account {
                 self.start_listen_txs(addr, port, self.config.clone());
             self.coin_store.lock().expect("poisoned").init(tx_listener);
             self.electrum_stop = Some(electrum_stop);
+            if self.config.offline() {
+                self.config.set_offline(false);
+                self.config.to_file();
+            }
         }
+    }
+
+    pub fn restart_electrum(&mut self) {
+        let mut new_account = Account::new(self.config.clone());
+        new_account.config.set_offline(false);
+        new_account.config.to_file();
+        *self = new_account;
     }
 
     /// Stops the Electrum listener for the account.
@@ -487,6 +500,8 @@ impl Account {
             stop.store(true, Ordering::Relaxed);
         }
         self.electrum_stop = None;
+        self.config.set_offline(true);
+        self.config.to_file();
     }
 
     /// Sets the look-ahead value for the account.
@@ -1322,7 +1337,6 @@ mod integration_tests {
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
-        account.start_electrum();
         sleep(Duration::from_millis(300));
 
         let recv_addr = account.new_recv_addr();
@@ -1445,7 +1459,6 @@ mod integration_tests {
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
-        account.start_electrum();
         sleep(Duration::from_millis(300));
 
         let recv_addr = account.new_recv_addr();
