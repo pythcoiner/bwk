@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 const CONFIG_FILENAME: &str = "config.json";
 
 /// Returns the data directory path based on the operating system.
-/// NOTE: do NOT use on mobile
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn datadir(dir_name: &str) -> PathBuf {
     #[cfg(target_os = "linux")]
     let dir = {
