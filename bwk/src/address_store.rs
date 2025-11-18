@@ -377,6 +377,35 @@ impl AddressStore {
     pub fn contains_spk(&self, spk: &ScriptBuf) -> bool {
         self.store.contains_key(spk)
     }
+
+    pub fn get_generated_addresses(
+        &self,
+    ) -> (
+        Vec<AddressEntry>, /* receive */
+        Vec<AddressEntry>, /* change */
+    ) {
+        let mut recv = self
+            .store
+            .iter()
+            .filter_map(|(_, entry)| {
+                (entry.account == KeyChain::Receive && entry.index <= self.change_generated_tip)
+                    .then_some(entry)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        recv.sort_by(|a, b| a.index.cmp(&b.index));
+        let mut change = self
+            .store
+            .iter()
+            .filter_map(|(_, entry)| {
+                (entry.account == KeyChain::Change && entry.index <= self.change_generated_tip)
+                    .then_some(entry)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        change.sort_by(|a, b| a.index.cmp(&b.index));
+        (recv, change)
+    }
 }
 
 /// Represents an entry in the address store.

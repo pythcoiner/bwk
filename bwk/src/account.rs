@@ -361,6 +361,21 @@ impl Account {
     pub fn change_watch_tip(&self) -> u32 {
         self.coin_store.lock().expect("poisoned").change_watch_tip()
     }
+
+    pub fn generated_addresses(
+        &self,
+    ) -> (
+        Vec<AddressEntry>, /* receive */
+        Vec<AddressEntry>, /* change*/
+    ) {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .address_store()
+            .lock()
+            .expect("poisoned")
+            .get_generated_addresses()
+    }
 }
 
 // Electrum specific implementation
