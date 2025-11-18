@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Once};
+
+pub static INIT: Once = Once::new();
 
 #[derive(Debug, Clone, Copy)]
 pub enum LogLevel {
@@ -55,12 +57,14 @@ impl Logger {
     }
 
     pub fn init(&mut self) {
-        let mut logger = env_logger::builder();
-        logger.filter_level(self.level.into());
-        for (module, lvl) in self.levels.clone() {
-            logger.filter_module(&module, lvl.into());
-        }
-        logger.init();
+        INIT.call_once(|| {
+            let mut logger = env_logger::builder();
+            logger.filter_level(self.level.into());
+            for (module, lvl) in self.levels.clone() {
+                logger.filter_module(&module, lvl.into());
+            }
+            logger.init();
+        });
     }
 }
 

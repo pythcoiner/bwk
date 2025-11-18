@@ -15,7 +15,7 @@ use bwk_electrum::client::{CoinRequest, CoinResponse};
 use bwk_sign::{signing_manager::SigningManager, HotSigner, Signer};
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, Coin};
 use miniscript::{
-    bitcoin::{self, OutPoint, ScriptBuf, TxOut},
+    bitcoin::{self, OutPoint, ScriptBuf},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
@@ -110,7 +110,7 @@ impl Drop for Account {
     }
 }
 
-// Rust only interface
+// Constructor
 impl Account {
     /// Creates a new `Account` instance with the given configuration.
     ///
@@ -170,7 +170,10 @@ impl Account {
         account.start_electrum();
         account
     }
+}
 
+// Non (b)locking API
+impl Account {
     pub fn network(&self) -> bitcoin::Network {
         self.config.network()
     }
@@ -187,6 +190,185 @@ impl Account {
         self.config.descriptor.clone()
     }
 
+    pub fn receiver(&mut self) -> Option<mpsc::Receiver<Notification>> {
+        self.receiver.take()
+    }
+
+    /// Returns the configuration of the account.
+    ///
+    /// # Returns
+    ///
+    /// A boxed `Config` instance.
+    pub fn get_config(&self) -> Config {
+        self.config.clone()
+    }
+
+    pub fn hot_signer(&self) -> Option<HotSigner> {
+        let mnemonic_str = self.config.mnemonic.clone()?;
+        let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
+        signer.register_descriptor(self.descriptor());
+        Some(signer)
+    }
+
+    pub fn sign(&self, psbt: String) {
+        self.signing_manager.sign(self.config.network(), psbt);
+    }
+}
+
+// Locking API
+impl Account {
+    pub fn tx_builder(&self) -> Result<TxBuilder, bwk_tx::transaction::Error> {
+        let tip_handle = Box::new(ChangeTipUpdater::new(
+            self.coin_store.lock().expect("poisoned").address_store(),
+        ));
+        let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
+        Ok(TxBuilder::new(self.descriptor(), tip_handle, self.network())?.coin_source(coin_source))
+    }
+
+    pub fn balance(&self) -> (u64, Vec<Payment>) {
+        let payments = self.payment_history();
+        let balance = payments.iter().fold(0, |a, b| match b.payment_type {
+            PaymentType::Receive => a + (b.amount as i128),
+            PaymentType::Send => a - (b.amount as i128),
+            PaymentType::ToSelf => unimplemented!(),
+        }) as u64;
+        (balance, payments)
+    }
+    /// Returns a map of coins associated with the account.
+    ///
+    /// # Returns
+    ///
+    /// A `BTreeMap` of `OutPoint` to `CoinEntry`.
+    pub fn coins(&self) -> BTreeMap<OutPoint, CoinEntry> {
+        self.coin_store.lock().expect("poisoned").coins()
+    }
+
+    /// Returns the coin matching the given outpoint if found, else None.
+    pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .get(outpoint)
+            .map(|e| e.coin)
+    }
+
+    /// Returns spendable coins for the account.
+    pub fn spendable_coins(&self) -> CoinState {
+        self.coin_store.lock().expect("poisoned").spendable_coins()
+    }
+
+    /// Returns a list of all historical transactions
+    pub fn tx_history(&self) -> Vec<TxEntry> {
+        self.coin_store.lock().expect("poisoned").tx_history()
+    }
+
+    /// Returns a list of all historical payments
+    pub fn payment_history(&self) -> Vec<Payment> {
+        self.tx_history().into_iter().map(Into::into).collect()
+    }
+
+    /// Updates the label of a coin identified by the given outpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `outpoint` - A string representation of the outpoint for the coin.
+    /// * `label` - The new label to set for the coin. If the label is empty, the label will be removed.
+    pub fn update_coin_label(&self, outpoint: String, label: String) {
+        if let Ok(outpoint) = bitcoin::OutPoint::from_str(&outpoint) {
+            if !label.is_empty() {
+                self.label_store
+                    .lock()
+                    .expect("poisoned")
+                    .edit(LabelKey::OutPoint(outpoint), Some(label));
+            } else {
+                self.label_store
+                    .lock()
+                    .expect("poisoned")
+                    .remove(LabelKey::OutPoint(outpoint));
+            }
+        }
+        if let Ok(mut store) = self.coin_store.try_lock() {
+            store.generate();
+        }
+    }
+
+    /// Generates a new receiving address entry for the account.
+    ///
+    /// # Returns
+    ///
+    /// A boxed `AddressEntry` instance.
+    pub fn new_addr(&mut self) -> AddressEntry {
+        let addr = self.new_recv_addr();
+        let index = self.coin_store.lock().expect("poisoned").recv_tip();
+        AddressEntry {
+            status: AddressStatus::NotUsed,
+            address: addr.as_unchecked().clone(),
+            account: KeyChain::Receive,
+            index,
+        }
+    }
+    fn new_recv_addr(&mut self) -> bitcoin::Address {
+        self.coin_store.lock().expect("poisoned").new_recv_addr()
+    }
+    #[allow(unused)]
+    fn new_change_addr(&mut self) -> bitcoin::Address {
+        self.coin_store.lock().expect("poisoned").new_change_addr()
+    }
+}
+
+// Derivation specific implementation
+impl Account {
+    /// Returns the derivator associated with the account.
+    ///
+    /// # Returns
+    ///
+    /// A `Derivator` instance.
+    pub fn derivator(&self) -> SpkDerivator {
+        self.coin_store.lock().expect("poisoned").derivator()
+    }
+    #[allow(unused)] // Internal usage only
+    fn recv_at(&self, index: u32) -> bitcoin::Address {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .derivator_ref()
+            .receive_at(index)
+    }
+
+    #[allow(unused)] // Internal usage only
+    fn change_at(&self, index: u32) -> bitcoin::Address {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .derivator_ref()
+            .change_at(index)
+    }
+
+    /// Returns the current receiving watch tip index.
+    ///
+    /// # Returns
+    ///
+    /// The receiving watch tip index as a `u32`.
+    pub fn recv_watch_tip(&self) -> u32 {
+        self.coin_store.lock().expect("poisoned").recv_watch_tip()
+    }
+
+    /// Returns the current change watch tip index.
+    ///
+    /// # Returns
+    ///
+    /// The change watch tip index as a `u32`.
+    pub fn change_watch_tip(&self) -> u32 {
+        self.coin_store.lock().expect("poisoned").change_watch_tip()
+    }
+}
+
+// Electrum specific implementation
+impl Account {
+    /// Re-generate coin_store from tx_store
+    pub fn generate_coins(&mut self) {
+        self.coin_store.lock().expect("poisoned").generate();
+    }
     pub fn electrum_url(&self) -> String {
         self.config.electrum_url()
     }
@@ -252,141 +434,6 @@ impl Account {
         self.tx_listener = Some(poller);
         (sender, stop)
     }
-
-    pub fn receiver(&mut self) -> Option<mpsc::Receiver<Notification>> {
-        self.receiver.take()
-    }
-
-    /// Returns the derivator associated with the account.
-    ///
-    /// # Returns
-    ///
-    /// A `Derivator` instance.
-    pub fn derivator(&self) -> SpkDerivator {
-        self.coin_store.lock().expect("poisoned").derivator()
-    }
-
-    /// Returns a map of coins associated with the account.
-    ///
-    /// # Returns
-    ///
-    /// A `BTreeMap` of `OutPoint` to `CoinEntry`.
-    pub fn coins(&self) -> BTreeMap<OutPoint, CoinEntry> {
-        self.coin_store.lock().expect("poisoned").coins()
-    }
-
-    /// Returns the receiving address at the specified index.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The index of the receiving address.
-    ///
-    /// # Returns
-    ///
-    /// A `bitcoin::Address` instance.
-    pub fn recv_at(&self, index: u32) -> bitcoin::Address {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .derivator_ref()
-            .receive_at(index)
-    }
-
-    /// Returns the change address at the specified index.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The index of the change address.
-    ///
-    /// # Returns
-    ///
-    /// A `bitcoin::Address` instance.
-    pub fn change_at(&self, index: u32) -> bitcoin::Address {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .derivator_ref()
-            .change_at(index)
-    }
-
-    /// Generates a new receiving address for the account.
-    ///
-    /// # Returns
-    ///
-    /// A `bitcoin::Address` instance.
-    pub fn new_recv_addr(&mut self) -> bitcoin::Address {
-        self.coin_store.lock().expect("poisoned").new_recv_addr()
-    }
-    /// Generates a new change address for the account.
-    ///
-    /// # Returns
-    ///
-    /// A `bitcoin::Address` instance.
-    pub fn new_change_addr(&mut self) -> bitcoin::Address {
-        self.coin_store.lock().expect("poisoned").new_change_addr()
-    }
-
-    /// Returns the current receiving watch tip index.
-    ///
-    /// # Returns
-    ///
-    /// The receiving watch tip index as a `u32`.
-    pub fn recv_watch_tip(&self) -> u32 {
-        self.coin_store.lock().expect("poisoned").recv_watch_tip()
-    }
-
-    /// Returns the current change watch tip index.
-    ///
-    /// # Returns
-    ///
-    /// The change watch tip index as a `u32`.
-    pub fn change_watch_tip(&self) -> u32 {
-        self.coin_store.lock().expect("poisoned").change_watch_tip()
-    }
-
-    /// Re-generate coin_store from tx_store
-    pub fn generate_coins(&mut self) {
-        self.coin_store.lock().expect("poisoned").generate();
-    }
-    /// Returns spendable coins for the account.
-    pub fn spendable_coins(&self) -> CoinState {
-        self.coin_store.lock().expect("poisoned").spendable_coins()
-    }
-
-    /// Returns a list of all historical transactions
-    pub fn tx_history(&self) -> Vec<TxEntry> {
-        self.coin_store.lock().expect("poisoned").tx_history()
-    }
-
-    /// Returns a list of all historical payments
-    pub fn payment_history(&self) -> Vec<Payment> {
-        self.tx_history().into_iter().map(Into::into).collect()
-    }
-
-    /// Returns the coin matching the given outpoint if found, else None.
-    pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .get(outpoint)
-            .map(|e| e.coin)
-    }
-
-    /// We uses receive address at index 0 as dummy spk
-    fn dummy_spk(&self) -> ScriptBuf {
-        self.derivator().receive_spk_at(0)
-    }
-
-    pub fn change_index(&self, tx: &bitcoin::Transaction) -> Option<usize> {
-        let dummy_spk = self.dummy_spk();
-        for (index, TxOut { script_pubkey, .. }) in tx.output.iter().enumerate() {
-            if *script_pubkey == dummy_spk {
-                return Some(index);
-            }
-        }
-        None
-    }
-
     /// Sets the Electrum server URL and port for the account.
     ///
     /// # Arguments
@@ -441,121 +488,6 @@ impl Account {
                 .send(Notification::InvalidLookAhead)
                 .expect("cannot fail");
         }
-    }
-
-    /// Returns the configuration of the account.
-    ///
-    /// # Returns
-    ///
-    /// A boxed `Config` instance.
-    pub fn get_config(&self) -> Config {
-        self.config.clone()
-    }
-
-    /// Returns the receiving address at the specified index as a string.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The index of the receiving address.
-    ///
-    /// # Returns
-    ///
-    /// The receiving address as a string.
-    pub fn recv_addr_at(&self, index: u32) -> String {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .derivator_ref()
-            .receive_at(index)
-            .to_string()
-    }
-
-    /// Returns the change address at the specified index as a string.
-    ///
-    /// # Arguments
-    ///
-    /// * `index` - The index of the change address.
-    ///
-    /// # Returns
-    ///
-    /// The change address as a string.
-    pub fn change_addr_at(&self, index: u32) -> String {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .derivator_ref()
-            .change_at(index)
-            .to_string()
-    }
-
-    /// Generates a new receiving address entry for the account.
-    ///
-    /// # Returns
-    ///
-    /// A boxed `AddressEntry` instance.
-    pub fn new_addr(&mut self) -> AddressEntry {
-        let addr = self.new_recv_addr();
-        let index = self.coin_store.lock().expect("poisoned").recv_tip();
-        AddressEntry {
-            status: AddressStatus::NotUsed,
-            address: addr.as_unchecked().clone(),
-            account: KeyChain::Receive,
-            index,
-        }
-    }
-
-    /// Edits the label of a coin identified by the given outpoint.
-    ///
-    /// # Arguments
-    ///
-    /// * `outpoint` - A string representation of the outpoint for the coin.
-    /// * `label` - The new label to set for the coin. If the label is empty, the label will be removed.
-    pub fn edit_coin_label(&self, outpoint: String, label: String) {
-        if let Ok(outpoint) = bitcoin::OutPoint::from_str(&outpoint) {
-            if !label.is_empty() {
-                self.label_store
-                    .lock()
-                    .expect("poisoned")
-                    .edit(LabelKey::OutPoint(outpoint), Some(label));
-            } else {
-                self.label_store
-                    .lock()
-                    .expect("poisoned")
-                    .remove(LabelKey::OutPoint(outpoint));
-            }
-        }
-        if let Ok(mut store) = self.coin_store.try_lock() {
-            store.generate();
-        }
-    }
-
-    pub fn sign(&self, psbt: String) {
-        self.signing_manager.sign(self.config.network(), psbt);
-    }
-
-    pub fn hot_signer(&self) -> Option<HotSigner> {
-        let mnemonic_str = self.config.mnemonic.clone()?;
-        let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
-        signer.register_descriptor(self.descriptor());
-        Some(signer)
-    }
-
-    pub fn tx_builder(&self) -> Result<TxBuilder, bwk_tx::transaction::Error> {
-        let tip_handle = Box::new(ChangeTipUpdater::new(
-            self.coin_store.lock().expect("poisoned").address_store(),
-        ));
-        let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
-        Ok(TxBuilder::new(self.descriptor(), tip_handle, self.network())?.coin_source(coin_source))
-    }
-
-    pub fn balance(&self) -> (u64, Vec<Payment>) {
-        let payments = self.payment_history();
-        let balance = payments.iter().fold(0, |a, b| match b.payment_type {
-            PaymentType::Receive => a + (b.amount as i128),
-            PaymentType::Send => a - (b.amount as i128),
-            PaymentType::ToSelf => unimplemented!(),
-        }) as u64;
-        (balance, payments)
     }
 }
 
@@ -1160,5 +1092,612 @@ mod tests {
 
         // the coin have a confirmation height of 2
         assert_eq!(coin.height(), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+
+    use rand::random_range;
+    use std::{collections::BTreeMap, env, path::PathBuf, thread::sleep, time::Duration};
+
+    use crate::{
+        coin_store::Payment,
+        config::{maybe_create_dir, Config},
+        log::INIT,
+        Account,
+    };
+    use bip39::Mnemonic;
+    use bwk_descriptor::descriptor::ScriptType;
+    use bwk_electrum::client::Client;
+    use miniscript::bitcoin::{
+        self, bip32::ChildNumber, Address, Amount, Network, Transaction, Txid,
+    };
+    use temp_dir::TempDir;
+
+    use electrsd::{
+        bitcoind::{
+            bitcoincore_rpc::{jsonrpc::serde_json::Value, RpcApi},
+            BitcoinD, P2P,
+        },
+        ElectrsD,
+    };
+
+    pub fn bootstrap_electrs() -> (
+        String, /* url */
+        u16,    /* port */
+        ElectrsD,
+        BitcoinD,
+    ) {
+        let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
+        cwd.push("tests");
+
+        let mut electrs_path = cwd.clone();
+        electrs_path.push("bin");
+        electrs_path.push("electrs_0_9_11");
+
+        let mut bitcoind_path = cwd.clone();
+        bitcoind_path.push("bin");
+        bitcoind_path.push("bitcoind_25_2");
+
+        let mut conf = electrsd::bitcoind::Conf::default();
+        conf.p2p = P2P::Yes;
+        let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
+
+        let mut electrsd_conf = electrsd::Conf::default();
+        electrsd_conf.args = vec!["--log-filters", "DEBUG"];
+        electrsd_conf.buffered_logs = true;
+
+        let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
+        let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
+        let port = port.parse::<u16>().unwrap();
+
+        // mine 101 blocks
+        let node_address = bitcoind.client.call::<Value>("getnewaddress", &[]).unwrap();
+        bitcoind
+            .client
+            .call::<Value>("generatetoaddress", &[101.into(), node_address])
+            .unwrap();
+
+        (url.into(), port, electrsd, bitcoind)
+    }
+
+    #[allow(unused)]
+    pub fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
+        let (url, port, e, b) = bootstrap_electrs();
+        let client = Client::new(&url, port).unwrap();
+
+        (client, e, b)
+    }
+
+    pub fn send_to_address(bitcoind: &BitcoinD, addr: &Address, amount: Amount) -> Txid {
+        let txid = bitcoind
+            .client
+            .send_to_address(addr, amount, None, None, None, None, None, None)
+            .unwrap();
+        log::debug!("send_to_address({}, {}) => {}", addr, amount, txid);
+        txid
+    }
+
+    #[allow(unused)]
+    pub fn get_tx(bitcoind: &BitcoinD, txid: Txid) -> Transaction {
+        bitcoind.client.get_raw_transaction(&txid, None).unwrap()
+    }
+
+    #[allow(unused)]
+    pub fn broadcast(bitcoind: &BitcoinD, transaction: Transaction) {
+        let _txid = bitcoind.client.send_raw_transaction(&transaction).unwrap();
+    }
+
+    pub fn get_block_hash(bitcoind: &BitcoinD, height: u32) -> String {
+        bitcoind
+            .client
+            .call("getblockhash", &[height.into()])
+            .unwrap()
+    }
+
+    pub fn get_block_height(bitcoind: &BitcoinD) -> u32 {
+        bitcoind.client.call("getblockcount", &[]).unwrap()
+    }
+
+    pub fn generate(bitcoind: &BitcoinD, blocks: u32) {
+        let node_address = bitcoind.client.call::<Value>("getnewaddress", &[]).unwrap();
+        bitcoind
+            .client
+            .call::<Value>("generatetoaddress", &[blocks.into(), node_address])
+            .unwrap();
+    }
+
+    pub fn reorg_chain(bitcoind: &BitcoinD, blocks: u32) {
+        let chain_height: u32 = get_block_height(bitcoind);
+        let reorg_height = chain_height - blocks;
+        let block_hash = get_block_hash(bitcoind, reorg_height);
+
+        invalidate_block(bitcoind, block_hash);
+
+        generate(bitcoind, blocks);
+    }
+
+    pub fn invalidate_block(bitcoind: &BitcoinD, block_hash: String) {
+        bitcoind
+            .client
+            .call::<Value>("invalidateblock", &[block_hash.clone().into()])
+            .unwrap();
+
+        log::info!("Invalidated block with hash: {}", block_hash);
+    }
+
+    pub fn dump_logs(e: &mut ElectrsD) {
+        while let Ok(msg) = e.logs.try_recv() {
+            println!("{}", msg);
+        }
+    }
+
+    #[allow(unused)]
+    pub fn setup_logger() {
+        INIT.call_once(|| {
+            env_logger::builder()
+                .is_test(true)
+                .filter_level(log::LevelFilter::Debug)
+                .filter_module("bitcoind", log::LevelFilter::Info)
+                .filter_module("bitcoincore_rpc", log::LevelFilter::Info)
+                .filter_module("bwk::account", log::LevelFilter::Debug)
+                .filter_module("bwk-electrum::electrum", log::LevelFilter::Debug)
+                .filter_module("bwk-electrum::raw_client", log::LevelFilter::Debug)
+                .init();
+        });
+    }
+
+    pub fn wait_until_timeout<F>(condition: F, timeout: u64)
+    where
+        F: Fn() -> bool,
+    {
+        let delay = Duration::from_millis(100);
+        let start_time = std::time::Instant::now();
+
+        while start_time.elapsed().as_secs() < timeout {
+            if condition() {
+                return;
+            }
+            sleep(delay);
+        }
+        panic!("Timeout elapsed while waiting for condition.");
+    }
+
+    #[test]
+    fn test_reorg() {
+        // setup_logger();
+        let (_, _, _electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 100);
+
+        reorg_chain(&bitcoind, 5);
+    }
+
+    #[test]
+    fn simple_wallet() {
+        // setup_logger();
+        let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 100);
+
+        const TIMEOUT: u64 = 5;
+        const BLOCKS: u32 = 1;
+
+        let look_ahead = 20;
+
+        let dir = TempDir::new().unwrap();
+        let mut path = dir.path().to_path_buf();
+        path.push(".bwk");
+        maybe_create_dir(&path);
+        let path = path.parent().unwrap().to_path_buf();
+
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "account_dir".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path,
+            ".bwk",
+            true,
+        )
+        .unwrap();
+        config.network = Network::Regtest;
+        config.look_ahead = look_ahead;
+        config.set_electrum_url(url);
+        config.set_electrum_port(port.to_string());
+        config.set_mnemonic(mnemonic.to_string());
+        let mut account = Account::new(config);
+        account.start_electrum();
+        sleep(Duration::from_millis(300));
+
+        let recv_addr = account.new_recv_addr();
+        let change_addr = account.new_change_addr();
+
+        send_to_address(&bitcoind, &recv_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 1
+            },
+            TIMEOUT,
+        );
+
+        // Test change address
+        send_to_address(&bitcoind, &change_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 2
+            },
+            TIMEOUT,
+        );
+
+        // receive at look_ahead bound
+        let recv_addr = account.recv_at(look_ahead);
+        send_to_address(&bitcoind, &recv_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 3
+            },
+            TIMEOUT,
+        );
+
+        // change at look_ahead bound
+        let change_addr = account.change_at(look_ahead);
+        send_to_address(&bitcoind, &change_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 4
+            },
+            TIMEOUT,
+        );
+
+        let undiscovered_tip = account.recv_watch_tip() + 1;
+
+        // receive beyond the look_ahead bound
+        let recv_addr = account.recv_at(undiscovered_tip);
+        send_to_address(&bitcoind, &recv_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        let coins = account.coins();
+        // the coin is not detected for receiving address
+        assert_eq!(coins.len(), 4);
+
+        // change beyond the look_ahead bound
+        let change_addr = account.change_at(undiscovered_tip);
+        send_to_address(&bitcoind, &change_addr, Amount::from_btc(0.1).unwrap());
+        generate(&bitcoind, BLOCKS);
+        let coins = account.coins();
+        // the coin is not detected for change address
+        assert_eq!(coins.len(), 4);
+
+        // move the watch tip forward
+        account.new_recv_addr();
+        account.new_recv_addr();
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 5
+            },
+            TIMEOUT,
+        );
+
+        account.new_change_addr();
+        account.new_change_addr();
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 6
+            },
+            TIMEOUT,
+        );
+    }
+
+    #[test]
+    fn simple_reorg() {
+        // setup_logger();
+        let (url, port, mut electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 110);
+
+        const TIMEOUT: u64 = 5;
+
+        let look_ahead = 20;
+
+        let dir = TempDir::new().unwrap();
+        let mut path = dir.path().to_path_buf();
+        path.push(".bwk");
+        maybe_create_dir(&path);
+        let path = path.parent().unwrap().to_path_buf();
+
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "account".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path,
+            ".bwk",
+            true,
+        )
+        .unwrap();
+        config.look_ahead = look_ahead;
+        config.set_electrum_url(url);
+        config.set_electrum_port(port.to_string());
+        config.set_mnemonic(mnemonic.to_string());
+        let mut account = Account::new(config);
+        account.start_electrum();
+        sleep(Duration::from_millis(300));
+
+        let recv_addr = account.new_recv_addr();
+        let change_addr = account.new_change_addr();
+
+        sleep(Duration::from_secs(1));
+
+        // send to recv address
+        let recv_txid = send_to_address(&bitcoind, &recv_addr, Amount::from_btc(0.1).unwrap());
+        let recv_tx = bitcoind
+            .client
+            .get_raw_transaction(&recv_txid, None)
+            .unwrap();
+
+        generate(&bitcoind, 1);
+
+        sleep(Duration::from_secs(1));
+        dump_logs(&mut electrsd);
+
+        // send to change address
+        let change_txid = send_to_address(&bitcoind, &change_addr, Amount::from_btc(0.1).unwrap());
+        let change_tx = bitcoind
+            .client
+            .get_raw_transaction(&change_txid, None)
+            .unwrap();
+        generate(&bitcoind, 1);
+
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 2
+            },
+            TIMEOUT,
+        );
+
+        let coins = account.coins();
+        let coins_height: BTreeMap<_, _> =
+            coins.into_iter().map(|(c, e)| (c, e.height())).collect();
+
+        // all coins are confirmed
+        assert!(coins_height.iter().all(|(_, e)| e.is_some()));
+
+        let height_before_reorg = get_block_height(&bitcoind);
+        let h_before_reorg = get_block_hash(&bitcoind, height_before_reorg);
+
+        sleep(Duration::from_secs(2));
+
+        electrsd.clear_logs();
+        log::warn!(" ------------------------------- reorg now ------------------------");
+        reorg_chain(&bitcoind, 7);
+        generate(&bitcoind, 2);
+        dump_logs(&mut electrsd);
+        sleep(Duration::from_secs(2));
+        dump_logs(&mut electrsd);
+
+        // FIXME:
+        // NOTE: here we likely hitting an `electrs` bug:
+        // - we can see in the electrs logs that 2 status (None) updates are assumed sent
+        //   from electrs end
+        // - only 1 status update is received on our raw client TCP stream end
+
+        log::warn!(" ------------------------------- rebroadcast recv ------------------------");
+        let _ = bitcoind.client.send_raw_transaction(&recv_tx);
+        generate(&bitcoind, 1);
+        sleep(Duration::from_secs(2));
+        dump_logs(&mut electrsd);
+
+        log::warn!(" ------------------------------- rebroadcast change ------------------------");
+        let _ = bitcoind.client.send_raw_transaction(&change_tx);
+        generate(&bitcoind, 1);
+        sleep(Duration::from_secs(2));
+        dump_logs(&mut electrsd);
+
+        let new_h = get_block_hash(&bitcoind, height_before_reorg);
+        assert_ne!(h_before_reorg, new_h);
+
+        let coins = account.coins();
+        // there is still 2 coins
+        assert_eq!(coins.len(), 2);
+    }
+
+    #[cfg(feature = "test")]
+    use bwk_tx::tx_builder::TxBuilder;
+
+    #[cfg(feature = "test")]
+    fn spend(
+        account: &mut Account,
+        builder: &mut TxBuilder,
+        bitcoind: &BitcoinD,
+        amount: u64,
+    ) -> bitcoin::Txid {
+        let coins = account.spendable_coins().coins.into_values().collect();
+        builder.new_template();
+        builder.tx_template.inputs = coins;
+        builder.dummy_external_output(amount);
+        let mut psbt = builder.generate().unwrap();
+        let signer = account.hot_signer().unwrap();
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+        let blocks: u32 = random_range(2..15);
+        generate(bitcoind, blocks);
+        txid
+    }
+
+    fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) {
+        let recv_addr = account.new_recv_addr();
+        send_to_address(bitcoind, &recv_addr, Amount::from_sat(amount));
+        let blocks: u32 = random_range(2..15);
+        generate(bitcoind, blocks);
+    }
+
+    #[allow(unused)]
+    fn sort_payments(payments: &Vec<Payment>) -> (usize, usize) {
+        let mut recv = 0;
+        let mut sent = 0;
+        for p in payments {
+            match p.payment_type {
+                crate::coin_store::PaymentType::Receive => recv += 1,
+                crate::coin_store::PaymentType::Send => sent += 1,
+                crate::coin_store::PaymentType::ToSelf => {}
+            }
+        }
+        (recv, sent)
+    }
+
+    #[cfg(feature = "test")]
+    #[test]
+    fn test_list_payments() {
+        // setup_logger();
+        let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 100);
+
+        let look_ahead = 20;
+
+        let dir = TempDir::new().unwrap();
+        let mut path = dir.path().to_path_buf();
+        path.push(".bwk");
+        maybe_create_dir(&path);
+        let path = path.parent().unwrap().to_path_buf();
+
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "account_dir".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path,
+            ".bwk",
+            true,
+        )
+        .unwrap();
+        config.network = Network::Regtest;
+        config.look_ahead = look_ahead;
+        config.set_electrum_url(url);
+        config.set_electrum_port(port.to_string());
+        config.set_mnemonic(mnemonic.to_string());
+        let mut account = Account::new(config);
+        account.start_electrum();
+        sleep(Duration::from_millis(300));
+        let mut builder =
+            TxBuilder::new_standalone(account.descriptor(), Network::Regtest).unwrap();
+
+        receive(&mut account, &bitcoind, 200_000);
+        wait_until_timeout(
+            || {
+                let coins = account.coins();
+                coins.len() == 1
+            },
+            5,
+        );
+        spend(&mut account, &mut builder, &bitcoind, 100_000);
+        wait_until_timeout(
+            || {
+                let payments = account.payment_history();
+                payments.len() == 2
+            },
+            5,
+        );
+
+        let payments = account.payment_history();
+        assert_eq!(2, payments.len());
+        let sorted = sort_payments(&payments);
+        assert_eq!(sorted, (1, 1));
+    }
+
+    #[test]
+    fn test_persist_payments() {
+        use rand::random;
+
+        // setup_logger();
+        let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 100);
+
+        let look_ahead = 20;
+
+        let dir = TempDir::new().unwrap();
+        let mut path = dir.path().to_path_buf();
+        path.push(".bwk");
+        maybe_create_dir(&path);
+        let path = path.parent().unwrap().to_path_buf();
+
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "account_dir".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path,
+            ".bwk",
+            true,
+        )
+        .unwrap();
+        config.network = Network::Regtest;
+        config.look_ahead = look_ahead;
+        config.set_electrum_url(url);
+        config.set_electrum_port(port.to_string());
+        config.set_mnemonic(mnemonic.to_string());
+        let saved_config = config.clone();
+        let mut account = Account::new(config);
+        sleep(Duration::from_millis(300));
+        let mut builder = account.tx_builder().unwrap();
+        let signer = account.hot_signer().unwrap();
+
+        receive(&mut account, &bitcoind, 100_000_000);
+        for _ in 0..15 {
+            wait_until_timeout(|| !account.spendable_coins().coins.is_empty(), 5);
+            sleep(Duration::from_millis(1000));
+            let coins = account.spendable_coins();
+            let balance = coins
+                .coins
+                .into_iter()
+                .fold(0, |a, (_, c)| a + c.txout.value.to_sat());
+            assert!(balance > 1_100_000);
+            let pay: bool = random();
+            if pay {
+                let addr = bitcoind
+                    .client
+                    .get_new_address(None, None)
+                    .unwrap()
+                    .assume_checked();
+                let mut psbt = builder
+                    .pay(random_range(10_000..1_000_000), addr, 1000)
+                    .unwrap();
+                signer.sign(&mut psbt);
+                let tx = signer.finalize(&mut psbt).unwrap();
+                let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+                generate(&bitcoind, random_range(1..5));
+            } else {
+                receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
+            }
+        }
+        wait_until_timeout(
+            || {
+                let payments = account.payment_history();
+                payments.len() == 15
+            },
+            5,
+        );
+        sleep(Duration::from_secs(3));
+        let payments = account.payment_history();
+        assert_eq!(payments.len(), 16);
+        drop(account);
+
+        let account = Account::new(saved_config);
+        sleep(Duration::from_millis(300));
+        let payments = account.payment_history();
+        assert_eq!(payments.len(), 16);
     }
 }
