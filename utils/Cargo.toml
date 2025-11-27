@@ -14,6 +14,7 @@ doctest = false
 
 [dependencies]
 miniscript.workspace = true
+bitcoin.workspace = true
 rand.workspace = true
 env_logger.workspace = true
 log.workspace = true
@@ -22,4 +23,4 @@ corepc-node.optional = true
 
 [features]
 default = []
-test = ["dep:corepc-node"]
+test = ["dep:corepc-node", "bitcoin/rand-std"]
