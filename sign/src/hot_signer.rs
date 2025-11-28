@@ -5,10 +5,10 @@ use crate::{
     send,
     signer::{Signer, SignerNotif},
 };
-use bwk_descriptor::derivator::SpkDerivator;
+use bwk_descriptor::{derivator::SpkDerivator, tr, tr_path, wpkh, wpkh_path};
 use bwk_keys::{KeyDerivator, OXpriv, OXpub};
 use miniscript::{
-    bitcoin::{hashes::Hash, key::TapTweak},
+    bitcoin::{bip32::ChildNumber, hashes::Hash, key::TapTweak},
     psbt::PsbtExt,
 };
 use serde::{Deserialize, Serialize};
@@ -163,6 +163,62 @@ impl HotSigner {
             network,
             sender: None,
         })
+    }
+
+    /// Create a new [`HotSigner`] instance with a Taproot descriptor from a mnemonic phrase.
+    ///
+    /// This method initializes a signer from the provided mnemonic and automatically registers
+    /// a Taproot (P2TR) descriptor using the BIP86 derivation path at account index 0.
+    ///
+    /// # Arguments
+    /// * `network` - The Bitcoin network (e.g., Bitcoin, Testnet, Signet, Regtest).
+    /// * `mnemonic` - A string representing the mnemonic phrase used to generate the keys.
+    ///
+    /// # Returns
+    /// A result containing a new instance of [`HotSigner`] with a registered Taproot descriptor,
+    /// or an error if the mnemonic is invalid or the derivation path cannot be constructed.
+    pub fn new_taproot_from_mnemonics(
+        network: bitcoin::Network,
+        mnemonic: &str,
+    ) -> Result<Self, Error> {
+        let mut signer = Self::new_from_mnemonics(network, mnemonic)?;
+        let deriv = tr_path(
+            network,
+            ChildNumber::from_hardened_idx(0).expect("hardcoded child number"),
+        )
+        .map_err(|_| Error::DerivationPath)?;
+        let oxpub = signer.xpub(&deriv);
+        let descriptor = tr(oxpub);
+        signer.register_descriptor(descriptor);
+        Ok(signer)
+    }
+
+    /// Create a new [`HotSigner`] instance with a native SegWit descriptor from a mnemonic phrase.
+    ///
+    /// This method initializes a signer from the provided mnemonic and automatically registers
+    /// a Witness Public Key Hash (P2WPKH) descriptor using the BIP84 derivation path at account index 0.
+    ///
+    /// # Arguments
+    /// * `network` - The Bitcoin network (e.g., Bitcoin, Testnet, Signet, Regtest).
+    /// * `mnemonic` - A string representing the mnemonic phrase used to generate the keys.
+    ///
+    /// # Returns
+    /// A result containing a new instance of [`HotSigner`] with a registered WPKH descriptor,
+    /// or an error if the mnemonic is invalid or the derivation path cannot be constructed.
+    pub fn new_wpkh_from_mnemonics(
+        network: bitcoin::Network,
+        mnemonic: &str,
+    ) -> Result<Self, Error> {
+        let mut signer = Self::new_from_mnemonics(network, mnemonic)?;
+        let deriv = wpkh_path(
+            network,
+            ChildNumber::from_hardened_idx(0).expect("hardcoded child number"),
+        )
+        .map_err(|_| Error::DerivationPath)?;
+        let oxpub = signer.xpub(&deriv);
+        let descriptor = wpkh(oxpub);
+        signer.register_descriptor(descriptor);
+        Ok(signer)
     }
 
     /// Generate a new signer and it's private key.
