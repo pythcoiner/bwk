@@ -504,6 +504,10 @@ impl Account {
         self.config.to_file();
     }
 
+    pub fn electrum_offline(&self) -> bool {
+        self.config.offline()
+    }
+
     /// Sets the look-ahead value for the account.
     ///
     /// # Arguments
