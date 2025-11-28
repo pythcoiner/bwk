@@ -502,6 +502,7 @@ impl HotSigner {
                     if keypair.x_only_public_key().0 != *int_key {
                         return Err(Error::InternalKeyNotMatch);
                     }
+                    #[allow(deprecated)]
                     let keypair = keypair
                         .tap_tweak(self.secp(), input.tap_merkle_root)
                         .to_inner();
