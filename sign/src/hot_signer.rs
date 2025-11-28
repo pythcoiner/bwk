@@ -584,6 +584,10 @@ impl HotSigner {
     fn mnemonic(&self) -> Option<bip39::Mnemonic> {
         self.derivator.mnemonic()
     }
+
+    pub fn descriptors(&self) -> Vec<Descriptor<DescriptorPublicKey>> {
+        self.descriptors.clone().into_iter().collect()
+    }
 }
 
 /// Converts a tuple containing an account type and an index into a derivation path.
