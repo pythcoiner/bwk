@@ -9,6 +9,8 @@ use miniscript::{
     Descriptor, DescriptorPublicKey,
 };
 
+use crate::SpkDerivator;
+
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
     UnhardenedAccount,
@@ -98,4 +100,19 @@ pub fn tr(xpub: OXpub) -> Descriptor<DescriptorPublicKey> {
         xpub.origin.0, xpub.origin.1, xpub.xkey
     );
     Descriptor::<DescriptorPublicKey>::from_str(&descr_str).expect("hardcoded descriptor")
+}
+
+pub trait DescriptorDerivator {
+    type Error;
+    fn spk_derivator(&self, network: bitcoin::Network) -> Result<SpkDerivator, Self::Error>;
+}
+
+impl DescriptorDerivator for Descriptor<DescriptorPublicKey> {
+    type Error = crate::derivator::Error;
+    fn spk_derivator(
+        &self,
+        network: bitcoin::Network,
+    ) -> Result<SpkDerivator, crate::derivator::Error> {
+        SpkDerivator::new(self.clone(), network)
+    }
 }
