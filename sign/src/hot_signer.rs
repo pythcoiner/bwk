@@ -284,7 +284,7 @@ impl HotSigner {
     ///
     /// # Returns
     /// The private key as a [`secp256k1::SecretKey`].
-    fn private_key_at(&self, path: &DerivationPath) -> secp256k1::SecretKey {
+    pub fn private_key_at(&self, path: &DerivationPath) -> secp256k1::SecretKey {
         self.derivator.secret_key_at(path)
     }
 
