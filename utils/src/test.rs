@@ -157,6 +157,16 @@ pub fn get_tx_height(bitcoind: &mut Client, txid: Txid) -> Option<u64> {
     bitcoind.get_block(hash).unwrap().bip34_block_height().ok()
 }
 
+pub fn txouts_for(addr: &Address, tx: &Transaction) -> Vec<(usize /* index */, TxOut)> {
+    let mut txouts = vec![];
+    for (index, txout) in tx.output.iter().enumerate() {
+        if txout.script_pubkey == addr.script_pubkey() {
+            txouts.push((index, txout.clone()));
+        }
+    }
+    txouts
+}
+
 #[test]
 fn gen_txid() {
     setup_logger();
