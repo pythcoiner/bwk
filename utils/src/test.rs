@@ -128,6 +128,14 @@ pub fn send(bitcoind: &mut Client, addr: Address, btc: f64) -> Option<Txid> {
         .ok()
 }
 
+pub fn send_sats(bitcoind: &mut Client, addr: Address, sats: u64) -> Option<Txid> {
+    bitcoind
+        .send_to_address(&addr, Amount::from_sat(sats))
+        .unwrap()
+        .txid()
+        .ok()
+}
+
 pub fn bitcoind_with_txindex() -> corepc_node::Node {
     let mut conf = corepc_node::Conf::default();
     conf.args.push("-txindex");
