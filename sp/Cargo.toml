@@ -1,0 +1,34 @@
+[package]
+name = "bwk-sp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# spdk dependencies
+spdk-core = { workspace = true, features = ["sync", "mnemonic", "bitcoin_32"] }
+backend-blindbit-native-non-async = { workspace = true }
+
+# Bitcoin
+bitcoin = { workspace = true }
+silentpayments = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+log = { workspace = true }
+hex = { workspace = true }
+
+# HTTP client for broadcasting
+ureq = { workspace = true }
+
+# Random number generation
+getrandom = { workspace = true }
+
+[dev-dependencies]
+blindbitd = { workspace = true }
+bwk-utils = { workspace = true, features = ["test"] }
+bwk-sign = { workspace = true }
+bip39 = { workspace = true }

@@ -16,7 +16,7 @@ doctest = false
 bwk-keys.workspace = true
 bwk-descriptor.workspace = true
 bwk-utils.workspace = true
-bip39.workspace = true
+bip39 = { workspace = true, features = ["rand"] }
 serde.workspace = true
 serde_json.workspace = true
 miniscript.workspace = true

@@ -51,7 +51,6 @@ impl From<raw_client::Error> for Error {
     }
 }
 
-
 pub fn short_hash(s: &ScriptBuf) -> String {
     let s = ScriptHash::new(s).to_string();
     short_string(s, 10)

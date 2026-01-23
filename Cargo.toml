@@ -3,6 +3,7 @@ resolver = "2"
 
 members = [
     "bwk",
+    "sp",
     "electrum",
     "backoff",
     "keys", "utils", "sign", "descriptor", "tx",
@@ -19,10 +20,11 @@ readme = "README.md"
 [workspace.dependencies]
 base64ct = "=1.6.0"
 url = "=2.5.2"
-bip39 = "2.0.0"
+bip39 = "2.2.0"
 bitcoin = "0.32.0"
 bitcoin_slices = "0.8.0"
 dirs = "6.0.0"
+hex = "0.4"
 hex-conservative = "0.2.1"
 hex_lit = "0.1.1"
 home = "=0.5.9"
@@ -37,9 +39,18 @@ serde_json = "1.0.128"
 env_logger = "0.11.6"
 temp-dir = "0.1.16"
 thiserror = "2.0.0"
-corepc-node = { version = "0.10.0", features = ["download", "29_0"]}
+ureq = { version = "2.10", default-features = false }
+getrandom = "0.2"
+corepc-node = { version = "0.10.0", features = ["download", "29_0"] }
 
-bwk-electrum = { path = "electrum"}
+# spdk dependencies
+spdk-core = { path = "../spdk/spdk-core", default-features = false }
+backend-blindbit-native-non-async = { path = "../spdk/backend-blindbit-native-non-async" }
+silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
+blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
+
+# bwk crates
+bwk-electrum = { path = "electrum" }
 bwk-backoff = { path = "backoff" }
 bwk-keys = { path = "keys" }
 bwk-tx = { path = "tx" }
