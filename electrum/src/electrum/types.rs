@@ -24,7 +24,7 @@ macro_rules! impl_consensus_encoding {
 
         impl Decodable for $thing {
             #[inline]
-            fn consensus_decode<D: miniscript::bitcoin::io::BufRead + ?Sized>(
+            fn consensus_decode<D: miniscript::bitcoin::io::Read + ?Sized>(
                 d: &mut D,
             ) -> Result<$thing, miniscript::bitcoin::consensus::encode::Error> {
                 Ok($thing {
