@@ -144,9 +144,34 @@ impl Config {
                 e
             ))
         })?;
-        let config: Config = serde_json::from_str(&content)
+        let mut config: Config = serde_json::from_str(&content)
             .map_err(|e| ConfigError::Parse(format!("failed to parse config: {}", e)))?;
+        config.sanitize();
         Ok(config)
+    }
+
+    //-------------------------------------------------------------------------
+    // Sanitization
+    //-------------------------------------------------------------------------
+
+    /// Sanitize all config values, clamping or fixing invalid fields.
+    pub fn sanitize(&mut self) {
+        // Birthday height
+        let min = self.min_birthday_height();
+        match self.birthday_height {
+            Some(h) if h < min => self.birthday_height = Some(min),
+            None => self.birthday_height = Some(min),
+            _ => {}
+        }
+    }
+
+    /// Returns the minimum valid birthday height for this config's network.
+    /// Taproot activation height for mainnet, 1 for test networks.
+    pub fn min_birthday_height(&self) -> u32 {
+        match self.network {
+            Network::Bitcoin => 709_632,
+            _ => 1,
+        }
     }
 
     //-------------------------------------------------------------------------

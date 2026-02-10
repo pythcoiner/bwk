@@ -143,6 +143,16 @@ impl ScanState {
         self.last_block_hash = Some(block_hash);
     }
 
+    /// Sets only the last scanned height without updating the block hash.
+    /// Used for progress tracking when the block hash is not available.
+    pub fn set_last_scanned_height(&mut self, height: u32) {
+        match self.last_scanned_height {
+            Some(h) if height > h => self.last_scanned_height = Some(height),
+            None => self.last_scanned_height = Some(height),
+            _ => {}
+        }
+    }
+
     //-------------------------------------------------------------------------
     // Queries
     //-------------------------------------------------------------------------

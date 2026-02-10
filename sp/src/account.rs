@@ -81,7 +81,7 @@ pub enum AccountError {
 /// Notifications sent by the Account to signal events.
 #[derive(Debug, Clone)]
 pub enum Notification {
-    /// Scanner is starting (sent immediately when start_scanner() is called)
+    /// Scanner is starting (sent immediately when start_scan() is called)
     StartingScan,
     /// Scan has started (sent when scan_blocks begins)
     ScanStarted {
@@ -100,7 +100,7 @@ pub enum Notification {
         /// Error message
         message: String,
     },
-    /// Scanner is stopping (sent when stop_scanner() is called)
+    /// Scanner is stopping (sent when stop_scan() is called)
     StoppingScan,
     /// Scanner has stopped
     ScanStopped,
@@ -117,6 +117,34 @@ pub enum Notification {
     NewOutput(OutPoint),
     /// An output was spent
     OutputSpent(OutPoint),
+    /// Continuous mode: at chain tip, waiting for new blocks
+    WaitingForBlocks {
+        /// Current chain tip height
+        tip_height: u32,
+    },
+    /// Continuous mode: new block(s) detected
+    NewBlocksDetected {
+        /// Previous tip height
+        from_height: u32,
+        /// New tip height
+        to_height: u32,
+    },
+}
+
+//=============================================================================
+// ScanMode
+//=============================================================================
+
+/// Scan mode for the scanner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScanMode {
+    /// One-shot scan: scan from last position to current chain tip, then return.
+    /// If already at tip, returns immediately.
+    #[default]
+    OneShot,
+    /// Continuous watch mode: scan to tip, then keep watching for new blocks.
+    /// Runs in background until explicitly stopped via `stop_scan()`.
+    Continuous,
 }
 
 //=============================================================================
@@ -330,7 +358,9 @@ impl Account {
 
     /// Create or load stores based on config.persist.
     fn create_or_load_stores(config: &Config) -> Stores {
-        let birthday = config.birthday_height.unwrap_or(0);
+        let birthday = config
+            .birthday_height
+            .unwrap_or_else(|| config.min_birthday_height());
 
         // Coin store
         let coin_store = if config.persist && config.coins_path().exists() {
@@ -673,28 +703,34 @@ impl Account {
         }
     }
 
-    /// Scan a range of blocks for silent payment outputs.
+    /// Start a scan with the specified mode.
     ///
     /// # Arguments
-    /// * `start` - Starting block height (or None to continue from last scan)
-    /// * `end` - Ending block height (or None to use current chain tip)
-    pub fn scan_blocks(
-        &mut self,
-        start: Option<u32>,
-        end: Option<u32>,
-    ) -> Result<(), AccountError> {
-        // Determine start height
-        let start_height =
-            start.unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start());
+    /// * `mode` - The scanning mode (OneShot or Continuous)
+    ///
+    /// # Modes
+    /// - `OneShot`: Synchronous scan from last position to current chain tip, then returns.
+    ///   If already at tip, returns immediately without scanning.
+    /// - `Continuous`: Spawns a background thread that scans to tip, then watches for new blocks.
+    ///   Returns immediately after spawning. Use `stop_scan()` to stop.
+    ///
+    /// # Errors
+    /// - `AccountError::ScannerAlreadyRunning` if continuous scan is already active
+    /// - `AccountError::Scan` if scan fails
+    pub fn start_scan(&mut self, mode: ScanMode) -> Result<(), AccountError> {
+        match mode {
+            ScanMode::OneShot => self.scan_oneshot(),
+            ScanMode::Continuous => self.start_continuous_scan(),
+        }
+    }
 
-        // Determine end height
-        let end_height = match end {
-            Some(h) => h,
-            None => self.block_height()?,
-        };
+    /// Internal: Execute one-shot scan to current chain tip.
+    fn scan_oneshot(&mut self) -> Result<(), AccountError> {
+        let start_height = self.scan_state.lock().expect("poisoned").next_scan_start();
+        let end_height = self.block_height()?;
 
         if start_height > end_height {
-            return Ok(()); // Nothing to scan
+            return Ok(()); // Already at tip, nothing to scan
         }
 
         let start = Height::from_consensus(start_height)
@@ -702,19 +738,14 @@ impl Account {
         let end = Height::from_consensus(end_height)
             .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
 
-        // Get dust limit
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-
-        // Create a fresh backend for the scanner (scanner takes ownership)
         let scan_backend = Self::create_backend(&self.config)?;
 
-        // Query server info to determine cutthrough support
         let with_cutthrough = scan_backend
             .info()
             .map(|info| info.tweaks_cut_through_with_dust_filter)
             .unwrap_or(false);
 
-        // Create scanner
         let mut scanner = SpAccount::new(
             scan_backend,
             self.client.clone(),
@@ -726,32 +757,29 @@ impl Account {
             },
         );
 
-        // Perform scan
+        let _ = self.sender.send(Notification::ScanStarted {
+            start: start_height,
+            end: end_height,
+        });
+
         scanner
             .scan_blocks(start, end, dust_limit, with_cutthrough)
             .map_err(|e| AccountError::Scan(e.to_string()))?;
 
-        // Send completion notification
         let _ = self.sender.send(Notification::ScanCompleted);
 
         Ok(())
     }
 
-    /// Start a background scanner thread.
-    ///
-    /// The scanner will continuously poll for new blocks and scan them.
-    pub fn start_scanner(&mut self) -> Result<(), AccountError> {
+    /// Internal: Start continuous scan in background thread.
+    fn start_continuous_scan(&mut self) -> Result<(), AccountError> {
         if self.scanner_handle.is_some() {
             return Err(AccountError::ScannerAlreadyRunning);
         }
 
-        // Reset stop flag
         self.scanner_stop.store(false, Ordering::Relaxed);
-
-        // Send starting notification
         let _ = self.sender.send(Notification::StartingScan);
 
-        // Clone what we need for the thread
         let client = self.client.clone();
         let blindbit_url = self.config.blindbit_url.clone();
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
@@ -762,7 +790,6 @@ impl Account {
         let stop = self.scanner_stop.clone();
 
         let handle = thread::spawn(move || {
-            // Create backend in thread for block height checks
             let http_client = UreqClient::new();
             let backend = match BlindbitBackend::new(blindbit_url.clone(), http_client) {
                 Ok(b) => b,
@@ -775,8 +802,10 @@ impl Account {
                 }
             };
 
+            let mut last_notified_tip: Option<u32> = None;
+            let mut waiting = false;
+
             while !stop.load(Ordering::Relaxed) {
-                // Get current chain tip
                 let chain_height = match backend.block_height() {
                     Ok(h) => h.to_consensus_u32(),
                     Err(e) => {
@@ -788,13 +817,29 @@ impl Account {
                     }
                 };
 
-                // Get scan start
                 let start_height = scan_state.lock().expect("poisoned").next_scan_start();
 
                 if start_height > chain_height {
-                    // Nothing to scan, wait a bit
-                    thread::sleep(Duration::from_secs(10));
+                    if !waiting {
+                        let _ = sender.send(Notification::WaitingForBlocks {
+                            tip_height: chain_height,
+                        });
+                        waiting = true;
+                    }
+                    thread::sleep(Duration::from_secs(2));
                     continue;
+                }
+
+                waiting = false;
+
+                // New blocks detected - notify if we were previously waiting
+                if let Some(prev_tip) = last_notified_tip {
+                    if chain_height > prev_tip {
+                        let _ = sender.send(Notification::NewBlocksDetected {
+                            from_height: prev_tip,
+                            to_height: chain_height,
+                        });
+                    }
                 }
 
                 let start = match Height::from_consensus(start_height) {
@@ -806,7 +851,6 @@ impl Account {
                     Err(_) => continue,
                 };
 
-                // Create a fresh backend for this scan iteration
                 let http_client_scan = UreqClient::new();
                 let scan_backend =
                     match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
@@ -819,13 +863,11 @@ impl Account {
                         }
                     };
 
-                // Query server info to determine cutthrough support
                 let with_cutthrough = scan_backend
                     .info()
                     .map(|info| info.tweaks_cut_through_with_dust_filter)
                     .unwrap_or(false);
 
-                // Create scanner
                 let mut scanner = SpAccount::new(
                     scan_backend,
                     client.clone(),
@@ -837,16 +879,15 @@ impl Account {
                     },
                 );
 
-                // Notify scan started
                 let _ = sender.send(Notification::ScanStarted {
                     start: start.to_consensus_u32(),
                     end: end.to_consensus_u32(),
                 });
 
-                // Scan
                 match scanner.scan_blocks(start, end, dust_limit, with_cutthrough) {
                     Ok(()) => {
                         let _ = sender.send(Notification::ScanCompleted);
+                        last_notified_tip = Some(chain_height);
                     }
                     Err(e) => {
                         let _ = sender.send(Notification::FailScan {
@@ -856,8 +897,8 @@ impl Account {
                     }
                 }
 
-                // Brief pause before next iteration
-                thread::sleep(Duration::from_secs(5));
+                // Brief pause before checking for new blocks
+                thread::sleep(Duration::from_millis(500));
             }
 
             let _ = sender.send(Notification::ScanStopped);
@@ -867,19 +908,91 @@ impl Account {
         Ok(())
     }
 
-    /// Stop the background scanner thread.
-    pub fn stop_scanner(&mut self) {
+    /// Stop the continuous scan.
+    ///
+    /// No-op if not running in continuous mode.
+    pub fn stop_scan(&mut self) {
         let _ = self.sender.send(Notification::StoppingScan);
         self.scanner_stop.store(true, Ordering::Relaxed);
         self.scanner_handle = None;
     }
 
-    /// Check if the scanner is currently running.
-    pub fn scanner_running(&self) -> bool {
+    /// Check if a continuous scan is currently running.
+    pub fn is_scanning(&self) -> bool {
         self.scanner_handle
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+    }
+
+    /// Scan a range of blocks for silent payment outputs.
+    pub fn scan_blocks(
+        &mut self,
+        start: Option<u32>,
+        end: Option<u32>,
+    ) -> Result<(), AccountError> {
+        // If both are None, use the new one-shot scan
+        if start.is_none() && end.is_none() {
+            return self.start_scan(ScanMode::OneShot);
+        }
+
+        // Custom range scan (legacy behavior)
+        let start_height =
+            start.unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start());
+        let end_height = match end {
+            Some(h) => h,
+            None => self.block_height()?,
+        };
+
+        if start_height > end_height {
+            return Ok(());
+        }
+
+        let start = Height::from_consensus(start_height)
+            .map_err(|e| AccountError::Scan(format!("invalid start height: {}", e)))?;
+        let end = Height::from_consensus(end_height)
+            .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
+
+        let dust_limit = self.config.dust_limit.map(Amount::from_sat);
+        let scan_backend = Self::create_backend(&self.config)?;
+
+        let with_cutthrough = scan_backend
+            .info()
+            .map(|info| info.tweaks_cut_through_with_dust_filter)
+            .unwrap_or(false);
+
+        let mut scanner = SpAccount::new(
+            scan_backend,
+            self.client.clone(),
+            AccountUpdater {
+                coin_store: self.coin_store.clone(),
+                tx_store: self.tx_store.clone(),
+                scan_state: self.scan_state.clone(),
+                sender: self.sender.clone(),
+            },
+        );
+
+        scanner
+            .scan_blocks(start, end, dust_limit, with_cutthrough)
+            .map_err(|e| AccountError::Scan(e.to_string()))?;
+
+        let _ = self.sender.send(Notification::ScanCompleted);
+        Ok(())
+    }
+
+    /// Start a background scanner thread.
+    pub fn start_scanner(&mut self) -> Result<(), AccountError> {
+        self.start_scan(ScanMode::Continuous)
+    }
+
+    /// Stop the background scanner thread.
+    pub fn stop_scanner(&mut self) {
+        self.stop_scan()
+    }
+
+    /// Check if the scanner is currently running.
+    pub fn scanner_running(&self) -> bool {
+        self.is_scanning()
     }
 
     /// Returns the last scanned block height.
@@ -1111,7 +1224,7 @@ impl Account {
 
 impl Drop for Account {
     fn drop(&mut self) {
-        self.stop_scanner();
+        self.stop_scan();
         self.persist();
     }
 }
@@ -1135,11 +1248,19 @@ impl Updater for AccountUpdater {
         current: Height,
         end: Height,
     ) -> Result<(), spdk_core::Error> {
-        log::info!(
+        log::debug!(
             "record_scan_progress: current={}, end={}",
             current.to_consensus_u32(),
             end.to_consensus_u32()
         );
+
+        // Update scan state with current progress
+        {
+            let mut state = self.scan_state.lock().expect("poisoned");
+            state.set_last_scanned_height(current.to_consensus_u32());
+            state.persist();
+        }
+
         // Send progress notification
         let _ = self.sender.send(Notification::ScanProgress {
             current: current.to_consensus_u32(),
