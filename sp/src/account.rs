@@ -861,9 +861,7 @@ impl Account {
     /// Stop the background scanner thread.
     pub fn stop_scanner(&mut self) {
         self.scanner_stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.scanner_handle.take() {
-            let _ = handle.join();
-        }
+        self.scanner_handle = None;
     }
 
     /// Check if the scanner is currently running.
