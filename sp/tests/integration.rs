@@ -459,7 +459,7 @@ fn test_notification_channel_send_receive() {
     let (sender, receiver) = mpsc::channel::<Notification>();
 
     // Send various notifications
-    sender.send(Notification::ScanStarted).unwrap();
+    sender.send(Notification::StartingScan).unwrap();
     sender
         .send(Notification::ScanProgress {
             current: 100,
@@ -468,17 +468,22 @@ fn test_notification_channel_send_receive() {
         .unwrap();
     sender.send(Notification::ScanCompleted).unwrap();
     sender
-        .send(Notification::ScanError {
+        .send(Notification::FailStartScanning {
             message: "test error".to_string(),
-            retries_attempted: 2,
         })
         .unwrap();
-    sender.send(Notification::Stopped).unwrap();
+    sender
+        .send(Notification::FailScan {
+            message: "scan error".to_string(),
+        })
+        .unwrap();
+    sender.send(Notification::StoppingScan).unwrap();
+    sender.send(Notification::ScanStopped).unwrap();
 
     // Verify received notifications
     assert!(matches!(
         receiver.recv().unwrap(),
-        Notification::ScanStarted
+        Notification::StartingScan
     ));
     match receiver.recv().unwrap() {
         Notification::ScanProgress { current, end } => {
@@ -492,16 +497,25 @@ fn test_notification_channel_send_receive() {
         Notification::ScanCompleted
     ));
     match receiver.recv().unwrap() {
-        Notification::ScanError {
-            message,
-            retries_attempted,
-        } => {
+        Notification::FailStartScanning { message } => {
             assert_eq!(message, "test error");
-            assert_eq!(retries_attempted, 2);
         }
-        _ => panic!("expected ScanError"),
+        _ => panic!("expected FailStartScanning"),
     }
-    assert!(matches!(receiver.recv().unwrap(), Notification::Stopped));
+    match receiver.recv().unwrap() {
+        Notification::FailScan { message } => {
+            assert_eq!(message, "scan error");
+        }
+        _ => panic!("expected FailScan"),
+    }
+    assert!(matches!(
+        receiver.recv().unwrap(),
+        Notification::StoppingScan
+    ));
+    assert!(matches!(
+        receiver.recv().unwrap(),
+        Notification::ScanStopped
+    ));
 }
 
 /// Test NewOutput and OutputSpent notifications.
@@ -1638,7 +1652,6 @@ fn test_rescan_idempotent() {
 /// Test 10.4.4.1: Notifications are sent during scanning.
 ///
 /// This test verifies:
-/// - ScanStarted notification is sent when scan begins
 /// - ScanProgress notifications are sent during scan
 /// - ScanCompleted notification is sent when scan finishes
 #[test]
@@ -1675,14 +1688,12 @@ fn test_scan_notifications() {
     account.scan_blocks(Some(1), Some(100)).unwrap();
 
     // 7. Collect notifications
-    let mut saw_started = false;
     let mut saw_progress = false;
     let mut saw_completed = false;
 
     // Non-blocking receive with timeout
     while let Ok(notif) = receiver.try_recv() {
         match notif {
-            Notification::ScanStarted => saw_started = true,
             Notification::ScanProgress { .. } => saw_progress = true,
             Notification::ScanCompleted => saw_completed = true,
             _ => {}
@@ -1690,7 +1701,6 @@ fn test_scan_notifications() {
     }
 
     // 8. Verify notifications
-    assert!(saw_started, "Should have received ScanStarted notification");
     assert!(
         saw_progress,
         "Should have received ScanProgress notification"
@@ -2171,7 +2181,7 @@ fn test_background_scanner_detects_new_blocks() {
     while start_time.elapsed() < timeout {
         while let Ok(notification) = receiver.try_recv() {
             match notification {
-                Notification::ScanStarted
+                Notification::StartingScan
                 | Notification::ScanProgress { .. }
                 | Notification::ScanCompleted => {
                     received_progress = true;

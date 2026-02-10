@@ -81,8 +81,22 @@ pub enum AccountError {
 /// Notifications sent by the Account to signal events.
 #[derive(Debug, Clone)]
 pub enum Notification {
-    /// Scan has started
-    ScanStarted,
+    /// Scanner is starting (sent immediately when start_scanner() is called)
+    StartingScan,
+    /// Scanner failed to start (backend creation or block_height failure)
+    FailStartScanning {
+        /// Error message
+        message: String,
+    },
+    /// Scan failed during scanning (scan_blocks failure)
+    FailScan {
+        /// Error message
+        message: String,
+    },
+    /// Scanner is stopping (sent when stop_scanner() is called)
+    StoppingScan,
+    /// Scanner has stopped
+    ScanStopped,
     /// Scan progress update
     ScanProgress {
         /// Current block being scanned
@@ -92,19 +106,10 @@ pub enum Notification {
     },
     /// Scan completed successfully
     ScanCompleted,
-    /// Scan encountered an error
-    ScanError {
-        /// Error message
-        message: String,
-        /// Number of retries attempted before giving up
-        retries_attempted: u32,
-    },
     /// A new output was found
     NewOutput(OutPoint),
     /// An output was spent
     OutputSpent(OutPoint),
-    /// Scanner has stopped
-    Stopped,
 }
 
 //=============================================================================
@@ -714,9 +719,6 @@ impl Account {
             },
         );
 
-        // Send notification
-        let _ = self.sender.send(Notification::ScanStarted);
-
         // Perform scan
         scanner
             .scan_blocks(start, end, dust_limit, with_cutthrough)
@@ -739,6 +741,9 @@ impl Account {
         // Reset stop flag
         self.scanner_stop.store(false, Ordering::Relaxed);
 
+        // Send starting notification
+        let _ = self.sender.send(Notification::StartingScan);
+
         // Clone what we need for the thread
         let client = self.client.clone();
         let blindbit_url = self.config.blindbit_url.clone();
@@ -755,15 +760,13 @@ impl Account {
             let backend = match BlindbitBackend::new(blindbit_url.clone(), http_client) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = sender.send(Notification::ScanError {
+                    let _ = sender.send(Notification::FailStartScanning {
                         message: e.to_string(),
-                        retries_attempted: 0,
                     });
+                    let _ = sender.send(Notification::ScanStopped);
                     return;
                 }
             };
-
-            let mut attempt = 0u32;
 
             while !stop.load(Ordering::Relaxed) {
                 // Get current chain tip
@@ -771,16 +774,12 @@ impl Account {
                     Ok(h) => h.to_consensus_u32(),
                     Err(e) => {
                         log::warn!("scanner: failed to get block height: {}", e);
-                        // Exponential backoff
-                        let delay = Duration::from_millis(100 << attempt.min(10));
-                        thread::sleep(delay);
-                        attempt += 1;
-                        continue;
+                        let _ = sender.send(Notification::FailStartScanning {
+                            message: e.to_string(),
+                        });
+                        break;
                     }
                 };
-
-                // Reset backoff on success
-                attempt = 0;
 
                 // Get scan start
                 let start_height = scan_state.lock().expect("poisoned").next_scan_start();
@@ -800,19 +799,16 @@ impl Account {
                     Err(_) => continue,
                 };
 
-                let _ = sender.send(Notification::ScanStarted);
-
                 // Create a fresh backend for this scan iteration
                 let http_client_scan = UreqClient::new();
                 let scan_backend =
                     match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
                         Ok(b) => b,
                         Err(e) => {
-                            let _ = sender.send(Notification::ScanError {
+                            let _ = sender.send(Notification::FailStartScanning {
                                 message: e.to_string(),
-                                retries_attempted: 0,
                             });
-                            continue;
+                            break;
                         }
                     };
 
@@ -840,10 +836,10 @@ impl Account {
                         let _ = sender.send(Notification::ScanCompleted);
                     }
                     Err(e) => {
-                        let _ = sender.send(Notification::ScanError {
+                        let _ = sender.send(Notification::FailScan {
                             message: e.to_string(),
-                            retries_attempted: 0,
                         });
+                        break;
                     }
                 }
 
@@ -851,7 +847,7 @@ impl Account {
                 thread::sleep(Duration::from_secs(5));
             }
 
-            let _ = sender.send(Notification::Stopped);
+            let _ = sender.send(Notification::ScanStopped);
         });
 
         self.scanner_handle = Some(handle);
@@ -860,6 +856,7 @@ impl Account {
 
     /// Stop the background scanner thread.
     pub fn stop_scanner(&mut self) {
+        let _ = self.sender.send(Notification::StoppingScan);
         self.scanner_stop.store(true, Ordering::Relaxed);
         self.scanner_handle = None;
     }
@@ -1238,8 +1235,32 @@ mod tests {
 
     #[test]
     fn test_notification_variants() {
-        let notif = Notification::ScanStarted;
-        assert!(matches!(notif, Notification::ScanStarted));
+        let notif = Notification::StartingScan;
+        assert!(matches!(notif, Notification::StartingScan));
+
+        let notif = Notification::FailStartScanning {
+            message: "test error".to_string(),
+        };
+        if let Notification::FailStartScanning { message } = notif {
+            assert_eq!(message, "test error");
+        } else {
+            panic!("expected FailStartScanning");
+        }
+
+        let notif = Notification::FailScan {
+            message: "scan error".to_string(),
+        };
+        if let Notification::FailScan { message } = notif {
+            assert_eq!(message, "scan error");
+        } else {
+            panic!("expected FailScan");
+        }
+
+        let notif = Notification::StoppingScan;
+        assert!(matches!(notif, Notification::StoppingScan));
+
+        let notif = Notification::ScanStopped;
+        assert!(matches!(notif, Notification::ScanStopped));
 
         let notif = Notification::ScanProgress {
             current: 100,
@@ -1254,24 +1275,6 @@ mod tests {
 
         let notif = Notification::ScanCompleted;
         assert!(matches!(notif, Notification::ScanCompleted));
-
-        let notif = Notification::ScanError {
-            message: "test error".to_string(),
-            retries_attempted: 3,
-        };
-        if let Notification::ScanError {
-            message,
-            retries_attempted,
-        } = notif
-        {
-            assert_eq!(message, "test error");
-            assert_eq!(retries_attempted, 3);
-        } else {
-            panic!("expected ScanError");
-        }
-
-        let notif = Notification::Stopped;
-        assert!(matches!(notif, Notification::Stopped));
     }
 
     #[test]
