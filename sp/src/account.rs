@@ -83,6 +83,13 @@ pub enum AccountError {
 pub enum Notification {
     /// Scanner is starting (sent immediately when start_scanner() is called)
     StartingScan,
+    /// Scan has started (sent when scan_blocks begins)
+    ScanStarted {
+        /// Start block of this scan
+        start: u32,
+        /// End block of this scan
+        end: u32,
+    },
     /// Scanner failed to start (backend creation or block_height failure)
     FailStartScanning {
         /// Error message
@@ -830,6 +837,12 @@ impl Account {
                     },
                 );
 
+                // Notify scan started
+                let _ = sender.send(Notification::ScanStarted {
+                    start: start.to_consensus_u32(),
+                    end: end.to_consensus_u32(),
+                });
+
                 // Scan
                 match scanner.scan_blocks(start, end, dust_limit, with_cutthrough) {
                     Ok(()) => {
@@ -1122,6 +1135,11 @@ impl Updater for AccountUpdater {
         current: Height,
         end: Height,
     ) -> Result<(), spdk_core::Error> {
+        log::info!(
+            "record_scan_progress: current={}, end={}",
+            current.to_consensus_u32(),
+            end.to_consensus_u32()
+        );
         // Send progress notification
         let _ = self.sender.send(Notification::ScanProgress {
             current: current.to_consensus_u32(),
