@@ -17,7 +17,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, BlockHash, Network, OutPoint, Transaction, Txid};
 use silentpayments::SilentPaymentAddress;
 
-use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
+use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClient};
 use spdk_core::account::SpAccount;
 use spdk_core::{
     bip39, FeeRate, OwnedOutput, Recipient, RecipientAddress, SilentPaymentUnsignedTransaction,
@@ -1220,7 +1220,6 @@ impl Account {
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();
     }
-
 }
 
 impl Drop for Account {
@@ -1558,4 +1557,25 @@ mod tests {
     // Note: Full Account creation tests require a working blindbit backend
     // which is not available in unit tests. Integration tests would test
     // the full flow.
+}
+
+/// Get backend info without an Account.
+pub fn backend_info(blindbit_url: String) -> Result<InfoResponse, AccountError> {
+    let http_client = UreqClient::new();
+    let backend = BlindbitBackend::new(blindbit_url, http_client)
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+    backend
+        .info()
+        .map_err(|e| AccountError::Network(e.to_string()))
+}
+
+/// Get block height without an Account.
+pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
+    let http_client = UreqClient::new();
+    let backend = BlindbitBackend::new(blindbit_url, http_client)
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+    backend
+        .block_height()
+        .map(|h| h.to_consensus_u32())
+        .map_err(|e| AccountError::Network(e.to_string()))
 }

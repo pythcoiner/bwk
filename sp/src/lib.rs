@@ -11,7 +11,11 @@ mod scan_state;
 mod tx_store;
 
 // Internal types
-pub use account::{Account, AccountError, Notification, Payment, PaymentType, ScanMode};
+pub use account::{
+    backend_block_height, backend_info, Account, AccountError, Notification, Payment, PaymentType,
+    ScanMode,
+};
+pub use backend_blindbit_native_non_async::InfoResponse;
 pub use coin_store::{CoinState, CoinStoreError, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError};
 pub use label_store::{LabelKey, LabelStoreError, SpLabelStore};
