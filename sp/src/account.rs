@@ -1220,6 +1220,7 @@ impl Account {
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();
     }
+
 }
 
 impl Drop for Account {
