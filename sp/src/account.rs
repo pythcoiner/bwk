@@ -802,6 +802,7 @@ impl Account {
                 }
             };
 
+            let http_client_scan = UreqClient::new();
             let mut last_notified_tip: Option<u32> = None;
             let mut waiting = false;
 
@@ -851,9 +852,8 @@ impl Account {
                     Err(_) => continue,
                 };
 
-                let http_client_scan = UreqClient::new();
                 let scan_backend =
-                    match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
+                    match BlindbitBackend::new(blindbit_url.clone(), http_client_scan.clone()) {
                         Ok(b) => b,
                         Err(e) => {
                             let _ = sender.send(Notification::FailStartScanning {
