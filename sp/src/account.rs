@@ -1329,6 +1329,48 @@ impl Updater for AccountUpdater {
     }
 }
 
+/// Get backend info without an Account.
+///
+/// If the URL already has a scheme, uses it directly. Otherwise tries `http://` then `https://`.
+/// Returns the `InfoResponse` and the URL that worked.
+pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), AccountError> {
+    let try_url = |url: &str| -> Result<InfoResponse, AccountError> {
+        let http_client = UreqClient::new();
+        let backend = BlindbitBackend::new(url.to_string(), http_client)
+            .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+        backend
+            .info()
+            .map_err(|e| AccountError::Network(e.to_string()))
+    };
+
+    // If a scheme is already present, use as-is.
+    if blindbit_url.starts_with("https://") || blindbit_url.starts_with("http://") {
+        let info = try_url(&blindbit_url)?;
+        return Ok((info, blindbit_url));
+    }
+
+    // No scheme — try http:// then https://.
+    let http_url = format!("http://{}", blindbit_url);
+    if let Ok(info) = try_url(&http_url) {
+        return Ok((info, http_url));
+    }
+
+    let https_url = format!("https://{}", blindbit_url);
+    let info = try_url(&https_url)?;
+    Ok((info, https_url))
+}
+
+/// Get block height without an Account.
+pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
+    let http_client = UreqClient::new();
+    let backend = BlindbitBackend::new(blindbit_url, http_client)
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+    backend
+        .block_height()
+        .map(|h| h.to_consensus_u32())
+        .map_err(|e| AccountError::Network(e.to_string()))
+}
+
 //=============================================================================
 // Tests
 //=============================================================================
@@ -1557,25 +1599,4 @@ mod tests {
     // Note: Full Account creation tests require a working blindbit backend
     // which is not available in unit tests. Integration tests would test
     // the full flow.
-}
-
-/// Get backend info without an Account.
-pub fn backend_info(blindbit_url: String) -> Result<InfoResponse, AccountError> {
-    let http_client = UreqClient::new();
-    let backend = BlindbitBackend::new(blindbit_url, http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
-    backend
-        .info()
-        .map_err(|e| AccountError::Network(e.to_string()))
-}
-
-/// Get block height without an Account.
-pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
-    let http_client = UreqClient::new();
-    let backend = BlindbitBackend::new(blindbit_url, http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
-    backend
-        .block_height()
-        .map(|h| h.to_consensus_u32())
-        .map_err(|e| AccountError::Network(e.to_string()))
 }
