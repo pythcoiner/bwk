@@ -239,9 +239,8 @@ impl Config {
     /// Must only be called when no `Account` instance is using this directory.
     pub fn delete_account_dir(data_dir: &Path, account_name: &str) -> Result<(), ConfigError> {
         let dir = data_dir.join(account_name);
-        fs::remove_dir_all(&dir).map_err(|e| {
-            ConfigError::Io(format!("failed to remove {}: {}", dir.display(), e))
-        })
+        fs::remove_dir_all(&dir)
+            .map_err(|e| ConfigError::Io(format!("failed to remove {}: {}", dir.display(), e)))
     }
 
     /// Returns the path for the coins store file.

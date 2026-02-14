@@ -755,6 +755,7 @@ impl Account {
                 scan_state: self.scan_state.clone(),
                 sender: self.sender.clone(),
             },
+            self.scanner_stop.clone(),
         );
 
         let _ = self.sender.send(Notification::ScanStarted {
@@ -877,6 +878,7 @@ impl Account {
                         scan_state: scan_state.clone(),
                         sender: sender.clone(),
                     },
+                    stop.clone(),
                 );
 
                 let _ = sender.send(Notification::ScanStarted {
@@ -970,6 +972,7 @@ impl Account {
                 scan_state: self.scan_state.clone(),
                 sender: self.sender.clone(),
             },
+            self.scanner_stop.clone(),
         );
 
         scanner

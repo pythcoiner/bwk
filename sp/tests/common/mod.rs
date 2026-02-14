@@ -18,7 +18,8 @@ use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey};
 use backend_blindbit_native_non_async::BlindbitBackend;
 use spdk_core::ChainBackend;
 
-use bwk_sp::{Config, OutputSpendStatus, OwnedOutput};
+use bwk_sp::Config;
+use spdk_core::{OutputSpendStatus, OwnedOutput};
 
 //=============================================================================
 // MockBackendError
@@ -340,164 +341,6 @@ pub fn cleanup_temp_dir(path: &std::path::Path) {
 }
 
 //=============================================================================
-// Tests for test utilities
-//=============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mock_backend_new() {
-        let backend = MockBackend::new(100);
-        assert_eq!(backend.block_height().unwrap(), 100);
-        assert_eq!(backend.call_count(), 1);
-    }
-
-    #[test]
-    fn test_mock_backend_with_blocks() {
-        let blocks = vec![
-            MockBlock::new(100),
-            MockBlock::new(101),
-            MockBlock::new(102),
-        ];
-        let backend = MockBackend::with_blocks(blocks);
-
-        assert_eq!(backend.block_height().unwrap(), 102);
-        assert!(backend.get_block(100).unwrap().is_some());
-        assert!(backend.get_block(101).unwrap().is_some());
-        assert!(backend.get_block(102).unwrap().is_some());
-        assert!(backend.get_block(103).unwrap().is_none());
-    }
-
-    #[test]
-    fn test_mock_backend_fail_after() {
-        let backend = MockBackend::new(100).fail_after(2);
-
-        // First two calls succeed
-        assert!(backend.block_height().is_ok());
-        assert!(backend.block_height().is_ok());
-
-        // Third call fails
-        let result = backend.block_height();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            MockBackendError::SimulatedFailure(2)
-        ));
-    }
-
-    #[test]
-    fn test_mock_backend_call_count() {
-        let backend = MockBackend::new(100);
-
-        assert_eq!(backend.call_count(), 0);
-        let _ = backend.block_height();
-        assert_eq!(backend.call_count(), 1);
-        let _ = backend.block_height();
-        assert_eq!(backend.call_count(), 2);
-
-        backend.reset_call_count();
-        assert_eq!(backend.call_count(), 0);
-    }
-
-    #[test]
-    fn test_mock_block_builder() {
-        let outpoint = test_outpoint();
-        let output = test_owned_output(100, 50000);
-
-        let block = MockBlock::new(100)
-            .with_output(outpoint, output)
-            .with_spent_input(test_outpoint_2());
-
-        assert_eq!(block.height, 100);
-        assert_eq!(block.outputs.len(), 1);
-        assert_eq!(block.spent_inputs.len(), 1);
-    }
-
-    #[test]
-    fn test_mock_backend_get_blocks_in_range() {
-        let blocks = vec![
-            MockBlock::new(100),
-            MockBlock::new(101),
-            MockBlock::new(102),
-            MockBlock::new(103),
-        ];
-        let backend = MockBackend::with_blocks(blocks);
-
-        let range = backend.get_blocks_in_range(101, 102).unwrap();
-        assert_eq!(range.len(), 2);
-        assert!(range.iter().any(|b| b.height == 101));
-        assert!(range.iter().any(|b| b.height == 102));
-    }
-
-    #[test]
-    fn test_test_mnemonic() {
-        let mnemonic = test_mnemonic();
-        assert_eq!(mnemonic.split_whitespace().count(), 12);
-        assert!(mnemonic.starts_with("abandon"));
-    }
-
-    #[test]
-    fn test_test_config() {
-        let dir = temp_dir();
-        let config = test_config(&dir);
-
-        assert_eq!(config.account_name, "test-account");
-        assert_eq!(config.network, bitcoin::Network::Signet);
-        assert!(!config.persist);
-        assert!(config.mnemonic.is_some());
-
-        cleanup_temp_dir(&dir);
-    }
-
-    #[test]
-    fn test_test_outpoints() {
-        let op1 = test_outpoint();
-        let op2 = test_outpoint_2();
-        let op3 = test_outpoint_3();
-
-        // All should be different
-        assert_ne!(op1.txid, op2.txid);
-        assert_ne!(op2.txid, op3.txid);
-        assert_ne!(op1.txid, op3.txid);
-
-        // Vouts should be as expected
-        assert_eq!(op1.vout, 0);
-        assert_eq!(op2.vout, 1);
-        assert_eq!(op3.vout, 2);
-    }
-
-    #[test]
-    fn test_test_owned_output() {
-        let output = test_owned_output(100, 50000);
-
-        assert_eq!(output.blockheight.to_consensus_u32(), 100);
-        assert_eq!(output.amount.to_sat(), 50000);
-        assert!(matches!(output.spend_status, OutputSpendStatus::Unspent));
-    }
-
-    #[test]
-    fn test_test_spent_output() {
-        let output = test_spent_output(100, 50000);
-
-        assert_eq!(output.blockheight.to_consensus_u32(), 100);
-        assert_eq!(output.amount.to_sat(), 50000);
-        assert!(matches!(output.spend_status, OutputSpendStatus::Spent(_)));
-    }
-
-    #[test]
-    fn test_temp_dir_creation() {
-        let dir = temp_dir();
-        assert!(dir.exists());
-        assert!(dir.is_dir());
-
-        cleanup_temp_dir(&dir);
-        assert!(!dir.exists());
-    }
-}
-
-//=============================================================================
 // Blindbitd Helpers (Phase 10.4)
 //=============================================================================
 
@@ -693,4 +536,162 @@ pub fn swap_to_sp(
     tx.input[0].witness = witness;
 
     Some(tx)
+}
+
+//=============================================================================
+// Tests for test utilities
+//=============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mock_backend_new() {
+        let backend = MockBackend::new(100);
+        assert_eq!(backend.block_height().unwrap(), 100);
+        assert_eq!(backend.call_count(), 1);
+    }
+
+    #[test]
+    fn test_mock_backend_with_blocks() {
+        let blocks = vec![
+            MockBlock::new(100),
+            MockBlock::new(101),
+            MockBlock::new(102),
+        ];
+        let backend = MockBackend::with_blocks(blocks);
+
+        assert_eq!(backend.block_height().unwrap(), 102);
+        assert!(backend.get_block(100).unwrap().is_some());
+        assert!(backend.get_block(101).unwrap().is_some());
+        assert!(backend.get_block(102).unwrap().is_some());
+        assert!(backend.get_block(103).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_mock_backend_fail_after() {
+        let backend = MockBackend::new(100).fail_after(2);
+
+        // First two calls succeed
+        assert!(backend.block_height().is_ok());
+        assert!(backend.block_height().is_ok());
+
+        // Third call fails
+        let result = backend.block_height();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            MockBackendError::SimulatedFailure(2)
+        ));
+    }
+
+    #[test]
+    fn test_mock_backend_call_count() {
+        let backend = MockBackend::new(100);
+
+        assert_eq!(backend.call_count(), 0);
+        let _ = backend.block_height();
+        assert_eq!(backend.call_count(), 1);
+        let _ = backend.block_height();
+        assert_eq!(backend.call_count(), 2);
+
+        backend.reset_call_count();
+        assert_eq!(backend.call_count(), 0);
+    }
+
+    #[test]
+    fn test_mock_block_builder() {
+        let outpoint = test_outpoint();
+        let output = test_owned_output(100, 50000);
+
+        let block = MockBlock::new(100)
+            .with_output(outpoint, output)
+            .with_spent_input(test_outpoint_2());
+
+        assert_eq!(block.height, 100);
+        assert_eq!(block.outputs.len(), 1);
+        assert_eq!(block.spent_inputs.len(), 1);
+    }
+
+    #[test]
+    fn test_mock_backend_get_blocks_in_range() {
+        let blocks = vec![
+            MockBlock::new(100),
+            MockBlock::new(101),
+            MockBlock::new(102),
+            MockBlock::new(103),
+        ];
+        let backend = MockBackend::with_blocks(blocks);
+
+        let range = backend.get_blocks_in_range(101, 102).unwrap();
+        assert_eq!(range.len(), 2);
+        assert!(range.iter().any(|b| b.height == 101));
+        assert!(range.iter().any(|b| b.height == 102));
+    }
+
+    #[test]
+    fn test_test_mnemonic() {
+        let mnemonic = test_mnemonic();
+        assert_eq!(mnemonic.split_whitespace().count(), 12);
+        assert!(mnemonic.starts_with("abandon"));
+    }
+
+    #[test]
+    fn test_test_config() {
+        let dir = temp_dir();
+        let config = test_config(&dir);
+
+        assert_eq!(config.account_name, "test-account");
+        assert_eq!(config.network, bitcoin::Network::Signet);
+        assert!(!config.persist);
+        assert!(config.mnemonic.is_some());
+
+        cleanup_temp_dir(&dir);
+    }
+
+    #[test]
+    fn test_test_outpoints() {
+        let op1 = test_outpoint();
+        let op2 = test_outpoint_2();
+        let op3 = test_outpoint_3();
+
+        // All should be different
+        assert_ne!(op1.txid, op2.txid);
+        assert_ne!(op2.txid, op3.txid);
+        assert_ne!(op1.txid, op3.txid);
+
+        // Vouts should be as expected
+        assert_eq!(op1.vout, 0);
+        assert_eq!(op2.vout, 1);
+        assert_eq!(op3.vout, 2);
+    }
+
+    #[test]
+    fn test_test_owned_output() {
+        let output = test_owned_output(100, 50000);
+
+        assert_eq!(output.blockheight.to_consensus_u32(), 100);
+        assert_eq!(output.amount.to_sat(), 50000);
+        assert!(matches!(output.spend_status, OutputSpendStatus::Unspent));
+    }
+
+    #[test]
+    fn test_test_spent_output() {
+        let output = test_spent_output(100, 50000);
+
+        assert_eq!(output.blockheight.to_consensus_u32(), 100);
+        assert_eq!(output.amount.to_sat(), 50000);
+        assert!(matches!(output.spend_status, OutputSpendStatus::Spent(_)));
+    }
+
+    #[test]
+    fn test_temp_dir_creation() {
+        let dir = temp_dir();
+        assert!(dir.exists());
+        assert!(dir.is_dir());
+
+        cleanup_temp_dir(&dir);
+        assert!(!dir.exists());
+    }
 }

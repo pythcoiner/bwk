@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -682,7 +683,7 @@ fn test_config_with_broadcast_url() {
 // 10.3.11 Concurrency Tests
 //-----------------------------------------------------------------------------
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 /// Test that SpCoinStore can be read concurrently from multiple threads.
 #[test]
@@ -1160,9 +1161,8 @@ fn test_scan_single_sp_output() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -1186,7 +1186,12 @@ fn test_scan_single_sp_output() {
     // 10. Create scanner
     let updater = DummyUpdater::new();
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -1307,9 +1312,8 @@ fn test_scan_multiple_sp_outputs() {
         };
 
         // Create SP transaction
-        let recipient_pubkey =
-            generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-                .expect("generate recipient pubkey");
+        let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+            .expect("generate recipient pubkey");
 
         let sp_tx = swap_to_sp(
             sk,
@@ -1336,7 +1340,12 @@ fn test_scan_multiple_sp_outputs() {
     // Create scanner
     let updater = DummyUpdater::new();
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -1459,9 +1468,8 @@ fn test_incremental_scanning() {
     };
 
     // Create SP transaction
-    let recipient_pubkey0 =
-        generate_recipient_pubkey(sk0, outpoint0, &txout0, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey0 = generate_recipient_pubkey(sk0, outpoint0, &txout0, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx0 = swap_to_sp(
         sk0,
@@ -1488,7 +1496,12 @@ fn test_incremental_scanning() {
     // --- First scan: 1-110, should find 1 output ---
     let updater1 = DummyUpdater::new();
     let scan_backend1 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner1 = SpAccount::new(scan_backend1, sp_client.clone(), updater1);
+    let mut scanner1 = SpAccount::new(
+        scan_backend1,
+        sp_client.clone(),
+        updater1,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -1537,9 +1550,8 @@ fn test_incremental_scanning() {
     };
 
     // Create SP transaction
-    let recipient_pubkey1 =
-        generate_recipient_pubkey(sk1, outpoint1, &txout1, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey1 = generate_recipient_pubkey(sk1, outpoint1, &txout1, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx1 = swap_to_sp(
         sk1,
@@ -1738,7 +1750,7 @@ fn test_new_output_notification() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that captures found outputs (simulating NewOutput notifications)
     struct NotifyingUpdater {
@@ -1843,9 +1855,8 @@ fn test_new_output_notification() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -1872,7 +1883,12 @@ fn test_new_output_notification() {
         found_outpoints: found_outpoints.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -2442,9 +2458,8 @@ fn test_full_wallet_flow() {
         };
 
         // Create SP transaction
-        let recipient_pubkey =
-            generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-                .expect("generate recipient pubkey");
+        let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+            .expect("generate recipient pubkey");
 
         let sp_tx = swap_to_sp(
             sk,
@@ -2475,7 +2490,12 @@ fn test_full_wallet_flow() {
     let updater = DummyUpdater::new();
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
     let scan_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
-    let mut scanner = SpAccount::new(scan_backend, scan_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        scan_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -2861,9 +2881,8 @@ fn test_reorg_handling() {
 
     // 7. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -2887,7 +2906,12 @@ fn test_reorg_handling() {
     // 9. Scan and verify SP output is found
     let updater = DummyUpdater::new();
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -2981,7 +3005,12 @@ fn test_reorg_handling() {
     // 16. Rescan to verify scanner works after reorg
     let updater2 = DummyUpdater::new();
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client, updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client,
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let end2 = Height::from_consensus(new_height).unwrap();
     // Scanning should succeed after reorg (whether or not tx was re-mined depends on mempool behavior)
@@ -3351,7 +3380,12 @@ fn test_reorg_removes_orphaned_coins() {
     // 8. Scan and verify coin is found
     let updater = DummyUpdater::new();
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -3406,7 +3440,12 @@ fn test_reorg_removes_orphaned_coins() {
 
     // 12. Verify backend works after reorg and rescan succeeds
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client, DummyUpdater::new());
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client,
+        DummyUpdater::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Rescan should succeed after reorg
     scanner2
@@ -3514,7 +3553,12 @@ fn test_reorg_coin_reappears_in_new_chain() {
 
     // 8. Scan and verify coin is found
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), DummyUpdater::new());
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        DummyUpdater::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -3559,7 +3603,12 @@ fn test_reorg_coin_reappears_in_new_chain() {
 
     // 12. Rescan - coin should be found again
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client, DummyUpdater::new());
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client,
+        DummyUpdater::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     scanner2
         .scan_blocks(
@@ -3667,7 +3716,7 @@ fn test_reorg_spent_status_reset() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Updater that tracks outputs and spent status
     struct TrackingUpdater {
@@ -3759,7 +3808,7 @@ fn test_reorg_spent_status_reset() {
 
     let sp_address = sp_client.get_receiving_address();
     let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp).expect("pk");
+        generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
     let sp_tx = swap_to_sp(
         sk,
         outpoint,
@@ -3785,7 +3834,12 @@ fn test_reorg_spent_status_reset() {
         spent: spent.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -3821,7 +3875,7 @@ fn test_reorg_spent_status_reset() {
 
     let fee_rate = FeeRate::from_sat_per_vb(1.0);
     let recipient = Recipient {
-        address: RecipientAddress::SpAddress(sp_address.clone()),
+        address: RecipientAddress::SpAddress(sp_address),
         amount: bitcoin::Amount::from_sat(100_000),
     };
     let unsigned = sp_client
@@ -3850,7 +3904,12 @@ fn test_reorg_spent_status_reset() {
         spent: spent2.clone(),
     };
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     scanner2
         .scan_blocks(
@@ -3901,7 +3960,12 @@ fn test_reorg_spent_status_reset() {
         spent: spent3.clone(),
     };
     let scan_backend3 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner3 = SpAccount::new(scan_backend3, sp_client, updater3);
+    let mut scanner3 = SpAccount::new(
+        scan_backend3,
+        sp_client,
+        updater3,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     scanner3
         .scan_blocks(
@@ -3955,7 +4019,7 @@ fn test_double_spend_via_reorg() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct TrackingUpdater {
         outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
@@ -4044,7 +4108,7 @@ fn test_double_spend_via_reorg() {
 
     let sp_address = sp_client.get_receiving_address();
     let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp).expect("pk");
+        generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
     let sp_tx = swap_to_sp(
         sk,
         outpoint,
@@ -4067,7 +4131,12 @@ fn test_double_spend_via_reorg() {
         outputs: outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -4094,7 +4163,7 @@ fn test_double_spend_via_reorg() {
         .collect();
     let fee_rate = FeeRate::from_sat_per_vb(1.0);
     let recipient_a = Recipient {
-        address: RecipientAddress::SpAddress(sp_address.clone()),
+        address: RecipientAddress::SpAddress(sp_address),
         amount: bitcoin::Amount::from_sat(100_000),
     };
     let unsigned_a = sp_client
@@ -4121,7 +4190,12 @@ fn test_double_spend_via_reorg() {
         outputs: outputs_a.clone(),
     };
     let scan_backend_a = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner_a = SpAccount::new(scan_backend_a, sp_client.clone(), updater_a);
+    let mut scanner_a = SpAccount::new(
+        scan_backend_a,
+        sp_client.clone(),
+        updater_a,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
     scanner_a
         .scan_blocks(
             Height::from_consensus(1).unwrap(),
@@ -4145,7 +4219,7 @@ fn test_double_spend_via_reorg() {
     // Use higher fee rate to replace the original tx in mempool (RBF)
     let fee_rate_b = FeeRate::from_sat_per_vb(5.0); // Higher fee to replace
     let recipient_b = Recipient {
-        address: RecipientAddress::SpAddress(sp_address.clone()),
+        address: RecipientAddress::SpAddress(sp_address),
         amount: bitcoin::Amount::from_sat(200_000),
     };
     let unsigned_b = sp_client
@@ -4173,7 +4247,12 @@ fn test_double_spend_via_reorg() {
         outputs: outputs_b.clone(),
     };
     let scan_backend_b = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner_b = SpAccount::new(scan_backend_b, sp_client, updater_b);
+    let mut scanner_b = SpAccount::new(
+        scan_backend_b,
+        sp_client,
+        updater_b,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
     scanner_b
         .scan_blocks(
             Height::from_consensus(1).unwrap(),
@@ -4225,7 +4304,7 @@ fn test_double_spend_attempt_rejected() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct TrackingUpdater {
         outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
@@ -4316,7 +4395,7 @@ fn test_double_spend_attempt_rejected() {
 
     let sp_address = sp_client.get_receiving_address();
     let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp).expect("pk");
+        generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
     let sp_tx = swap_to_sp(
         sk,
         outpoint,
@@ -4341,7 +4420,12 @@ fn test_double_spend_attempt_rejected() {
         spent: spent.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -4377,7 +4461,7 @@ fn test_double_spend_attempt_rejected() {
 
     let fee_rate = FeeRate::from_sat_per_vb(1.0);
     let recipient = Recipient {
-        address: RecipientAddress::SpAddress(sp_address.clone()),
+        address: RecipientAddress::SpAddress(sp_address),
         amount: bitcoin::Amount::from_sat(100_000),
     };
     let unsigned = sp_client
@@ -4409,7 +4493,12 @@ fn test_double_spend_attempt_rejected() {
         spent: spent2.clone(),
     };
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     scanner2
         .scan_blocks(
@@ -4581,7 +4670,7 @@ fn test_concurrent_funding_during_scan() {
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct ConcurrentUpdater {
         outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
@@ -4709,7 +4798,12 @@ fn test_concurrent_funding_during_scan() {
             scan_complete: scan_complete_clone,
         };
         let scan_backend = BlindbitBackend::new(url_clone, UreqClient::new()).unwrap();
-        let mut scanner = SpAccount::new(scan_backend, sp_client_clone, updater);
+        let mut scanner = SpAccount::new(
+            scan_backend,
+            sp_client_clone,
+            updater,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
 
         // Scan a range (this takes some time)
         scanner
@@ -4742,7 +4836,12 @@ fn test_concurrent_funding_during_scan() {
         scan_complete: scan_complete2,
     };
     let scan_backend2 = BlindbitBackend::new(url, UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client, updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client,
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough2 = backend
         .info()
@@ -4791,7 +4890,7 @@ fn test_mempool_tx_not_counted_in_balance() {
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -4891,9 +4990,8 @@ fn test_mempool_tx_not_counted_in_balance() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -4920,7 +5018,12 @@ fn test_mempool_tx_not_counted_in_balance() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -4960,7 +5063,12 @@ fn test_mempool_tx_not_counted_in_balance() {
         found_outputs: found_outputs2.clone(),
     };
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let end2 = Height::from_consensus(sp_tx_height).unwrap();
     scanner2
@@ -5017,7 +5125,7 @@ fn test_notification_order_full_sequence() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Notification types we track
     #[derive(Debug, Clone, PartialEq)]
@@ -5141,9 +5249,8 @@ fn test_notification_order_full_sequence() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -5170,7 +5277,12 @@ fn test_notification_order_full_sequence() {
         notifications: notifications.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -5268,7 +5380,7 @@ fn test_notification_multiple_outputs_same_block() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that captures found outputs per block
     struct MultiOutputUpdater {
@@ -5391,9 +5503,8 @@ fn test_notification_multiple_outputs_same_block() {
         };
 
         // Create SP transaction
-        let recipient_pubkey =
-            generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-                .expect("generate recipient pubkey");
+        let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+            .expect("generate recipient pubkey");
 
         let sp_tx = swap_to_sp(
             sk,
@@ -5435,7 +5546,12 @@ fn test_notification_multiple_outputs_same_block() {
         block_output_counts: block_output_counts.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -5519,7 +5635,7 @@ fn test_create_transaction_with_real_utxos() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -5619,9 +5735,8 @@ fn test_create_transaction_with_real_utxos() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -5648,7 +5763,12 @@ fn test_create_transaction_with_real_utxos() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -5815,7 +5935,7 @@ fn test_create_drain_transaction() {
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
     use spdk_core::{FeeRate, OwnedOutput, RecipientAddress, SpClient, SpScanner, Updater};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -5923,9 +6043,8 @@ fn test_create_drain_transaction() {
         };
 
         // Create SP transaction
-        let recipient_pubkey =
-            generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-                .expect("generate recipient pubkey");
+        let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+            .expect("generate recipient pubkey");
 
         let sp_tx = swap_to_sp(
             sk,
@@ -5955,7 +6074,12 @@ fn test_create_drain_transaction() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -6051,7 +6175,7 @@ fn test_sign_transaction_full_flow() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -6151,9 +6275,8 @@ fn test_sign_transaction_full_flow() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -6180,7 +6303,12 @@ fn test_sign_transaction_full_flow() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -6293,7 +6421,7 @@ fn test_sign_and_broadcast_full_flow() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -6393,9 +6521,8 @@ fn test_sign_and_broadcast_full_flow() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -6422,7 +6549,12 @@ fn test_sign_and_broadcast_full_flow() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -6505,7 +6637,12 @@ fn test_sign_and_broadcast_full_flow() {
         found_outputs: found_outputs2.clone(),
     };
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Rescan from beginning to catch the new outputs
     let end2 = Height::from_consensus(spend_height).unwrap();
@@ -6571,7 +6708,7 @@ fn test_send_to_another_sp_wallet() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that collects found outputs
     struct OutputCollector {
@@ -6684,7 +6821,7 @@ fn test_send_to_another_sp_wallet() {
     };
 
     // 8. Create SP transaction TO account1
-    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_addr1.clone(), &secp)
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_addr1, &secp)
         .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
@@ -6712,7 +6849,12 @@ fn test_send_to_another_sp_wallet() {
         found_outputs: found_outputs1.clone(),
     };
     let scan_backend1 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner1 = SpAccount::new(scan_backend1, sp_client1.clone(), updater1);
+    let mut scanner1 = SpAccount::new(
+        scan_backend1,
+        sp_client1.clone(),
+        updater1,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -6736,7 +6878,7 @@ fn test_send_to_another_sp_wallet() {
 
     // 12. Create transaction FROM account1 TO account2
     let send_amount = Amount::from_sat(100_000); // 0.001 BTC
-    let recipient_addr2 = RecipientAddress::SpAddress(sp_addr2.clone());
+    let recipient_addr2 = RecipientAddress::SpAddress(sp_addr2);
     let recipients = vec![Recipient {
         address: recipient_addr2,
         amount: send_amount,
@@ -6780,7 +6922,12 @@ fn test_send_to_another_sp_wallet() {
         found_outputs: found_outputs2.clone(),
     };
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client2.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client2.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let end2 = Height::from_consensus(transfer_height).unwrap();
     scanner2
@@ -6905,7 +7052,7 @@ fn test_birthday_height_misses_earlier_outputs() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater to capture outputs
     struct BirthdayTestUpdater {
@@ -7010,9 +7157,8 @@ fn test_birthday_height_misses_earlier_outputs() {
 
     // 8. Create SP transaction - this will be mined around block 104-105
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -7051,7 +7197,12 @@ fn test_birthday_height_misses_earlier_outputs() {
         found_outpoints: found_outpoints.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -7104,7 +7255,7 @@ fn test_dust_limit_filters_small_outputs() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom swap_to_sp that creates SP output with change to avoid huge fee
     fn swap_to_sp_dust_test(
@@ -7286,9 +7437,8 @@ fn test_dust_limit_filters_small_outputs() {
 
     // 8. Create SP transaction with small output (600 sats - below 1000 dust_limit)
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     // Create SP output with 600 sats (above bitcoin dust relay 546, but below our 1000 dust_limit)
     let small_amount = bitcoin::Amount::from_sat(600);
@@ -7320,7 +7470,12 @@ fn test_dust_limit_filters_small_outputs() {
         found_outpoints: found_outpoints.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -7363,7 +7518,7 @@ fn test_dust_limit_zero_accepts_all() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom swap_to_sp that creates SP output with change to avoid huge fee
     fn swap_to_sp_small_output(
@@ -7545,9 +7700,8 @@ fn test_dust_limit_zero_accepts_all() {
 
     // 8. Create SP transaction with small output (330 sats - minimum dust)
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     // Create SP output with only 330 sats (smallest value that can be broadcast)
     let small_amount = bitcoin::Amount::from_sat(330);
@@ -7579,7 +7733,12 @@ fn test_dust_limit_zero_accepts_all() {
         found_outpoints: found_outpoints.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -7889,7 +8048,7 @@ fn test_receive_with_sp_label() {
 
     // 10. Create SP transaction to LABELED address
     let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, labeled_sp_address.clone(), &secp)
+        generate_recipient_pubkey(sk, outpoint, &txout, labeled_sp_address, &secp)
             .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
@@ -7915,7 +8074,7 @@ fn test_receive_with_sp_label() {
     use bitcoin::BlockHash;
     use spdk_core::{OwnedOutput, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     struct LabelCapturingUpdater {
         outputs: Arc<Mutex<Vec<(OutPoint, OwnedOutput)>>>,
@@ -7963,7 +8122,12 @@ fn test_receive_with_sp_label() {
         outputs: captured_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -8286,7 +8450,7 @@ fn test_persists_immediately_on_new_output() {
     use spdk_core::account::SpAccount;
     use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that tracks when save_to_persistent_storage is called
     struct PersistTrackingUpdater {
@@ -8399,9 +8563,8 @@ fn test_persists_immediately_on_new_output() {
 
     // 8. Create SP transaction
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -8432,7 +8595,12 @@ fn test_persists_immediately_on_new_output() {
         found_outputs: found_outputs.clone(),
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(scan_backend, sp_client, updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client,
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     // Get endpoint mode
     let with_cutthrough = backend
@@ -8578,7 +8746,7 @@ fn test_persists_on_spent_detection() {
     use spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // Custom updater that tracks both outputs and spent inputs
     struct SpentTrackingUpdater {
@@ -8681,9 +8849,8 @@ fn test_persists_on_spent_detection() {
 
     // 8. Create SP transaction to our account
     let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address.clone(), &secp)
-            .expect("generate recipient pubkey");
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
 
     let sp_tx = swap_to_sp(
         sk,
@@ -8714,7 +8881,12 @@ fn test_persists_on_spent_detection() {
     };
     let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
 
-    let mut scanner = SpAccount::new(scan_backend, sp_client.clone(), updater);
+    let mut scanner = SpAccount::new(
+        scan_backend,
+        sp_client.clone(),
+        updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let with_cutthrough = backend
         .info()
@@ -8819,7 +8991,12 @@ fn test_persists_on_spent_detection() {
     let mut owned_set_for_spent = HashSet::new();
     owned_set_for_spent.insert(expected_sp_outpoint);
 
-    let mut scanner2 = SpAccount::new(scan_backend2, sp_client.clone(), updater2);
+    let mut scanner2 = SpAccount::new(
+        scan_backend2,
+        sp_client.clone(),
+        updater2,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
 
     let end2 = Height::from_consensus(spend_height).unwrap();
     scanner2
