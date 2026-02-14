@@ -5850,7 +5850,8 @@ fn test_create_transaction_with_real_utxos() {
 #[test]
 fn test_create_transaction_insufficient_funds() {
     use bitcoin::Amount;
-    use spdk_core::{FeeRate, RecipientAddress};
+    use bwk_tx::Fees;
+    use spdk_core::RecipientAddress;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
@@ -5892,9 +5893,8 @@ fn test_create_transaction_insufficient_funds() {
     // 6. Try to create a transaction (should fail due to no spendable coins)
     let sp_address = account.sp_address();
     let recipient = RecipientAddress::SpAddress(sp_address);
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
 
-    let result = account.create_transaction(vec![(recipient, Amount::from_sat(100_000))], fee_rate);
+    let result = account.create_transaction(vec![(recipient, Amount::from_sat(100_000))], Fees::MilliSatsVb(1000));
 
     // 7. Verify it returns an error
     assert!(

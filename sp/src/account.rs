@@ -20,14 +20,50 @@ use silentpayments::SilentPaymentAddress;
 use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClient};
 use spdk_core::account::SpAccount;
 use spdk_core::{
-    bip39, FeeRate, OwnedOutput, Recipient, RecipientAddress, SilentPaymentUnsignedTransaction,
-    SpClient, SpScanner, Updater,
+    bip39, OwnedOutput, Recipient, RecipientAddress, SilentPaymentUnsignedTransaction, SpClient,
+    SpScanner, Updater,
 };
+
+use bwk_tx::coin_selection::CoinCandidate;
+use bwk_tx::Fees;
 
 use crate::{
     CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpLabelStore, SpTxEntry,
     SpTxStore,
 };
+
+//=============================================================================
+// Constants
+//=============================================================================
+
+/// Taproot keyspend satisfaction weight in WU (1 Schnorr signature = 66 WU)
+const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
+
+/// Taproot output weight in WU (8 value + 1 varint + 34 script_pubkey) * 4 = 172 WU
+const TR_OUTPUT_WEIGHT: u64 = 172;
+
+//=============================================================================
+// SpCoinCandidate
+//=============================================================================
+
+/// Lightweight coin type for bwk-tx coin selection.
+/// SP wallets only spend taproot keypath outputs.
+struct SpCoinCandidate {
+    outpoint: OutPoint,
+    value: u64,
+}
+
+impl CoinCandidate for SpCoinCandidate {
+    fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+    fn value_sat(&self) -> u64 {
+        self.value
+    }
+    fn satisfaction_weight(&self) -> u64 {
+        TR_KEYSPEND_SATISFACTION_WEIGHT
+    }
+}
 
 //=============================================================================
 // Type Aliases
@@ -1019,26 +1055,22 @@ impl Account {
 
     /// Create an unsigned transaction sending to the given recipients.
     ///
-    /// This method:
-    /// 1. Gets spendable coins from the coin store
-    /// 2. Uses coin selection to choose UTXOs
-    /// 3. Builds the unsigned transaction with silent payment outputs
+    /// Uses bwk-tx for coin selection and fee processing, then constructs
+    /// the SP-specific unsigned transaction.
     ///
     /// # Arguments
     /// * `recipients` - List of (address, amount) pairs to send to
-    /// * `fee_rate` - Fee rate in sat/vbyte
+    /// * `fees` - Fee specification: `Fees::MilliSatsVb(rate)` or `Fees::Sats(absolute)`
     ///
     /// # Errors
     /// * `AccountError::Transaction` if there are insufficient funds or other tx building errors
     pub fn create_transaction(
         &self,
         recipients: Vec<(RecipientAddress, Amount)>,
-        fee_rate: FeeRate,
+        fees: Fees,
     ) -> Result<SilentPaymentUnsignedTransaction, AccountError> {
-        // Get spendable coins from coin store
         let coin_state = self.coin_store.lock().expect("poisoned").spendable_coins();
 
-        // Convert to the format SpClient expects: Vec<(OutPoint, OwnedOutput)>
         let available_utxos: Vec<(OutPoint, OwnedOutput)> = coin_state
             .coins
             .into_iter()
@@ -1049,54 +1081,175 @@ impl Account {
             return Err(AccountError::Transaction("no spendable coins".to_string()));
         }
 
-        // Convert recipients to Recipient structs
-        let recipients: Vec<Recipient> = recipients
+        // Build coin candidates for bwk-tx coin selection
+        let candidates: Vec<SpCoinCandidate> = available_utxos
+            .iter()
+            .map(|(outpoint, output)| SpCoinCandidate {
+                outpoint: *outpoint,
+                value: output.amount.to_sat(),
+            })
+            .collect();
+
+        let output_total: u64 = recipients.iter().map(|(_, amt)| amt.to_sat()).sum();
+
+        // For coin selection: use feerate for rate-based, 0 for absolute (fee is in target)
+        let (feerate_msats_vb, base_fee_for_target) = match &fees {
+            Fees::MilliSatsVb(rate) => {
+                // Estimate base tx fee to add to coin selection target
+                let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT; recipients.len()];
+                let base_weight = bwk_tx::estimated_weight_raw(&[], &output_weights);
+                let base_fee = base_weight.to_vbytes_ceil() * rate / 1000;
+                (*rate, base_fee)
+            }
+            Fees::Sats(absolute) => {
+                // With feerate=0, coin selection just compares raw values
+                (0, *absolute)
+            }
+        };
+
+        let (selection, _) = bwk_tx::coin_selection::select(
+            candidates.iter().collect(),
+            output_total + base_fee_for_target,
+            feerate_msats_vb,
+            50_000,
+            5_000_000,
+            bwk_tx::DUST_AMOUNT,
+        );
+
+        let selection = selection
+            .ok_or_else(|| AccountError::Transaction("coin selection failed".to_string()))?;
+
+        // Map selected outpoints back to (OutPoint, OwnedOutput)
+        let selected_outpoints: HashSet<OutPoint> =
+            selection.outpoints.into_iter().collect();
+        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = available_utxos
+            .into_iter()
+            .filter(|(op, _)| selected_outpoints.contains(op))
+            .collect();
+
+        // Compute fee using bwk-tx
+        let inputs_total: u64 = selected_utxos.iter().map(|(_, o)| o.amount.to_sat()).sum();
+        let input_weights: Vec<u64> = vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
+        let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT; recipients.len()];
+        let weight_wo_change = bwk_tx::estimated_weight_raw(&input_weights, &output_weights);
+
+        let mut change_outputs = output_weights.clone();
+        change_outputs.push(TR_OUTPUT_WEIGHT);
+        let weight_with_change =
+            bwk_tx::estimated_weight_raw(&input_weights, &change_outputs);
+
+        let fee_result = bwk_tx::process_fees(
+            fees,
+            weight_wo_change,
+            weight_with_change,
+            inputs_total,
+            output_total,
+            bwk_tx::Drain::Change,
+        );
+
+        if let Some(ref err) = fee_result.error {
+            return Err(AccountError::Transaction(format!("{err:?}")));
+        }
+
+        // Build recipients
+        let mut sp_recipients: Vec<Recipient> = recipients
             .into_iter()
             .map(|(address, amount)| Recipient { address, amount })
             .collect();
 
-        // Create the transaction using SpClient
-        self.client
-            .create_new_transaction(available_utxos, recipients, fee_rate, self.config.network)
-            .map_err(|e| AccountError::Transaction(e.to_string()))
+        // Add change output if needed
+        if let Some(change_value) = fee_result.change {
+            let change_address = self.client.sp_receiver.get_change_address();
+            sp_recipients.push(Recipient {
+                address: RecipientAddress::SpAddress(change_address),
+                amount: Amount::from_sat(change_value),
+            });
+        }
+
+        // Compute partial secret for selected UTXOs
+        let partial_secret = self
+            .client
+            .get_partial_secret_for_selected_utxos(&selected_utxos)
+            .map_err(|e| AccountError::Transaction(e.to_string()))?;
+
+        Ok(SilentPaymentUnsignedTransaction {
+            selected_utxos,
+            recipients: sp_recipients,
+            partial_secret,
+            unsigned_tx: None,
+            network: self.config.network,
+        })
     }
 
     /// Create a drain transaction that spends ALL coins to a single recipient.
     ///
-    /// This method:
-    /// 1. Gets ALL spendable coins from the coin store
-    /// 2. Uses ALL of them as inputs (drains the wallet)
-    /// 3. Sends everything (minus fees) to the single recipient
+    /// Uses bwk-tx for fee processing.
     ///
     /// # Arguments
     /// * `recipient` - The address to send all funds to
-    /// * `fee_rate` - Fee rate in sat/vbyte
+    /// * `fees` - Fee specification: `Fees::MilliSatsVb(rate)` or `Fees::Sats(absolute)`
     ///
     /// # Errors
     /// * `AccountError::Transaction` if there are no spendable coins or other tx building errors
     pub fn create_drain_transaction(
         &self,
         recipient: RecipientAddress,
-        fee_rate: FeeRate,
+        fees: Fees,
     ) -> Result<SilentPaymentUnsignedTransaction, AccountError> {
-        // Get ALL spendable coins from coin store
         let coin_state = self.coin_store.lock().expect("poisoned").spendable_coins();
 
-        // Convert to the format SpClient expects: Vec<(OutPoint, OwnedOutput)>
-        let available_utxos: Vec<(OutPoint, OwnedOutput)> = coin_state
+        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = coin_state
             .coins
             .into_iter()
             .map(|(outpoint, entry)| (outpoint, entry.owned_output().clone()))
             .collect();
 
-        if available_utxos.is_empty() {
+        if selected_utxos.is_empty() {
             return Err(AccountError::Transaction("no spendable coins".to_string()));
         }
 
-        // Create the drain transaction using SpClient (uses ALL inputs)
-        self.client
-            .create_drain_transaction(available_utxos, recipient, fee_rate, self.config.network)
-            .map_err(|e| AccountError::Transaction(e.to_string()))
+        let inputs_total: u64 = selected_utxos.iter().map(|(_, o)| o.amount.to_sat()).sum();
+        let input_weights: Vec<u64> =
+            vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
+        let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT]; // single recipient
+
+        let weight_wo_change = bwk_tx::estimated_weight_raw(&input_weights, &output_weights);
+        // For drain, there's no "change" — the single output IS the drain.
+        // We use Max drain mode: fee is computed without change output.
+        let fee_result = bwk_tx::process_fees(
+            fees,
+            weight_wo_change,
+            weight_wo_change, // no change output for drain
+            inputs_total,
+            0, // no fixed output amount — the recipient gets everything minus fees
+            bwk_tx::Drain::Max,
+        );
+
+        if let Some(ref err) = fee_result.error {
+            return Err(AccountError::Transaction(format!("{err:?}")));
+        }
+
+        let drain_value = fee_result
+            .max
+            .ok_or_else(|| AccountError::Transaction("no funds for drain".to_string()))?;
+
+        let recipients = vec![Recipient {
+            address: recipient,
+            amount: Amount::from_sat(drain_value),
+        }];
+
+        let partial_secret = self
+            .client
+            .get_partial_secret_for_selected_utxos(&selected_utxos)
+            .map_err(|e| AccountError::Transaction(e.to_string()))?;
+
+        Ok(SilentPaymentUnsignedTransaction {
+            selected_utxos,
+            recipients,
+            partial_secret,
+            unsigned_tx: None,
+            network: self.config.network,
+        })
     }
 
     /// Finalize an unsigned transaction, preparing it for signing.

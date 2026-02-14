@@ -306,13 +306,15 @@ impl TxBuilder {
                                 txid,
                                 vout: pos as u32,
                             },
-                            coin_path: *origin,
                             height: Some(0),
                             sequence: Sequence::ZERO,
                             status: crate::CoinStatus::Confirmed,
                             label: recipient.label.clone(),
-                            descriptor: descriptor.clone(),
                             satisfaction_size: max_input_satisfaction_size(descriptor) as u64,
+                            spend_info: crate::CoinSpendInfo::Bip32 {
+                                coin_path: *origin,
+                                descriptor: descriptor.clone(),
+                            },
                         };
                         source.add_coin(coin);
                     }
@@ -321,7 +323,14 @@ impl TxBuilder {
         }
     }
     pub fn receive_coin(&mut self, coin: Coin) {
-        if coin.descriptor != self.derivator.descriptor() {
+        let matches = match &coin.spend_info {
+            crate::CoinSpendInfo::Bip32 { descriptor, .. } => {
+                *descriptor == self.derivator.descriptor()
+            }
+            #[cfg(feature = "sp")]
+            crate::CoinSpendInfo::Sp { .. } => false,
+        };
+        if !matches {
             return;
         }
         if let Some(source) = self.coin_source.as_mut() {
@@ -390,13 +399,15 @@ impl TxBuilder {
                 txid,
                 vout: vout as u32,
             },
-            coin_path: (KeyChain::Receive, index as u32),
             height: Some(height),
             sequence: Sequence::ZERO,
             status: crate::CoinStatus::Confirmed,
             label: None,
-            descriptor: self.derivator.descriptor(),
             satisfaction_size: satisfaction as u64,
+            spend_info: crate::CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, index as u32),
+                descriptor: self.derivator.descriptor(),
+            },
         };
         self.receive_coin(coin.clone());
         coin
@@ -408,7 +419,7 @@ pub mod test {
     use super::*;
     use crate::Amount;
     pub fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
+        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus};
 
         let spk = derivator.receive_at(index).script_pubkey();
         let txout = TxOut {
@@ -425,13 +436,15 @@ pub mod test {
         Coin {
             txout,
             outpoint,
-            coin_path: (KeyChain::Receive, index),
             height: None,
             sequence: Sequence::ZERO,
             status: CoinStatus::Unconfirmed,
             label: None,
-            descriptor,
             satisfaction_size: satisfaction as u64,
+            spend_info: CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, index),
+                descriptor,
+            },
         }
     }
 
@@ -541,7 +554,7 @@ pub mod test {
     }
 
     pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinStatus};
+        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus};
 
         let spk = derivator.receive_at(index).script_pubkey();
         let descriptor = derivator.descriptor();
@@ -559,13 +572,15 @@ pub mod test {
         Coin {
             txout,
             outpoint,
-            coin_path: (KeyChain::Receive, index),
             height: None,
             sequence: Sequence::ZERO,
             status: CoinStatus::Unconfirmed,
             label: None,
-            descriptor,
             satisfaction_size: satisfaction as u64,
+            spend_info: CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, index),
+                descriptor,
+            },
         }
     }
 

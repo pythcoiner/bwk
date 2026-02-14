@@ -34,7 +34,7 @@ pub enum AddrAccount {
     Change,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoinState {
     pub coins: BTreeMap<OutPoint, Coin>,
     pub confirmed_coins: usize,

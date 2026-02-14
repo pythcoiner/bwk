@@ -6,7 +6,7 @@ pub mod recipient;
 pub mod transaction;
 pub mod tx_builder;
 
-pub use coin::{Coin, CoinStatus};
+pub use coin::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
 pub use coin_selection::CoinCandidate;
 pub use descr_fingerprint::DescrFingerprint;
 pub use error::Error;

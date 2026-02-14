@@ -543,14 +543,16 @@ impl CoinStore {
                     let coin = Coin {
                         txout,
                         outpoint,
-                        coin_path: (addr.account(), addr.index()),
                         height,
                         // Sequence is overwritten at spend time anyway
                         sequence: Sequence::ZERO,
                         status,
                         label,
-                        descriptor: descriptor.clone(),
                         satisfaction_size: satisfaction as u64,
+                        spend_info: bwk_tx::CoinSpendInfo::Bip32 {
+                            coin_path: (addr.account(), addr.index()),
+                            descriptor: descriptor.clone(),
+                        },
                     };
                     let coin = CoinEntry {
                         coin,
@@ -735,7 +737,7 @@ impl CoinStore {
                 CoinStatus::Spent => None,
             })
             .collect();
-        coins.sort();
+        coins.sort_by(|a, b| a.coin.outpoint.cmp(&b.coin.outpoint));
         let mut state = CoinState {
             coins: Default::default(),
             confirmed_coins: 0,
@@ -853,7 +855,7 @@ impl Update {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 /// Represents a coin entry in the coin store.
 ///
 /// The `CoinEntry` struct contains information about the coin's height,
@@ -950,8 +952,13 @@ impl CoinEntry {
     ///
     /// # Returns
     /// A tuple containing the `AddrAccount` and the index of the coin's derivation path.
-    pub fn deriv(&self) -> (KeyChain, u32) {
-        self.coin.coin_path
+    /// Returns `None` for non-descriptor coins (e.g., Silent Payment coins).
+    pub fn deriv(&self) -> Option<(KeyChain, u32)> {
+        match &self.coin.spend_info {
+            bwk_tx::CoinSpendInfo::Bip32 { coin_path, .. } => Some(*coin_path),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
     }
     /// Returns a boxed version of the coin entry.
     ///
@@ -971,12 +978,18 @@ impl CoinEntry {
     ///
     /// # Returns
     /// A boxed AddressEntry representation of the coin's address.
+    /// Panics for non-descriptor coins.
     pub fn rust_address(&self) -> AddressEntry {
+        let (account, index) = match &self.coin.spend_info {
+            bwk_tx::CoinSpendInfo::Bip32 { coin_path, .. } => *coin_path,
+            #[allow(unreachable_patterns)]
+            _ => panic!("rust_address not supported for non-descriptor coins"),
+        };
         AddressEntry {
             status: AddressStatus::Unknown,
             address: self.address.clone(),
-            account: self.coin.coin_path.0,
-            index: self.coin.coin_path.1,
+            account,
+            index,
         }
     }
     /// Returns the script public key (SPK) associated with the coin.

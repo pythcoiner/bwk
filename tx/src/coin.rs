@@ -10,9 +10,12 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "sp")]
+use bitcoin::bip32::DerivationPath;
+
 use crate::Error;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyChain {
     Receive,
     Change,
@@ -49,17 +52,33 @@ pub enum CoinStatus {
 
 type Label = String;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+/// Signing-specific information for a coin.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CoinSpendInfo {
+    /// Descriptor-based coin (standard wallets)
+    Bip32 {
+        coin_path: (KeyChain, u32),
+        descriptor: Descriptor<DescriptorPublicKey>,
+    },
+    /// Silent Payment coin (BIP352)
+    #[cfg(feature = "sp")]
+    Sp {
+        derivation: DerivationPath,
+        tweak: [u8; 32],
+    },
+}
+
+/// A spendable coin (UTXO) with all information needed for transaction building and signing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Coin {
     pub txout: bitcoin::TxOut,
     pub outpoint: bitcoin::OutPoint,
-    pub coin_path: (KeyChain, u32 /* index */),
     pub height: Option<u64>,
     pub sequence: bitcoin::Sequence,
     pub status: CoinStatus,
     pub label: Option<Label>,
-    pub descriptor: Descriptor<DescriptorPublicKey>,
     pub satisfaction_size: u64,
+    pub spend_info: CoinSpendInfo,
 }
 
 impl From<Coin> for bitcoin::TxIn {
@@ -86,16 +105,43 @@ impl Coin {
         self.txout.script_pubkey.clone()
     }
 
+    pub fn value(&self) -> bitcoin::Amount {
+        self.txout.value
+    }
+
+    pub fn is_bip32(&self) -> bool {
+        matches!(self.spend_info, CoinSpendInfo::Bip32 { .. })
+    }
+
+    #[cfg(feature = "sp")]
+    pub fn is_sp(&self) -> bool {
+        matches!(self.spend_info, CoinSpendInfo::Sp { .. })
+    }
+
     pub fn to_psbt_input(&self) -> Result<psbt::Input, Error> {
+        match &self.spend_info {
+            CoinSpendInfo::Bip32 {
+                coin_path,
+                descriptor,
+            } => self.spk_to_psbt_input(*coin_path, descriptor),
+            #[cfg(feature = "sp")]
+            CoinSpendInfo::Sp { .. } => self.sp_to_psbt_input(),
+        }
+    }
+
+    fn spk_to_psbt_input(
+        &self,
+        coin_path: (KeyChain, u32),
+        descriptor: &Descriptor<DescriptorPublicKey>,
+    ) -> Result<psbt::Input, Error> {
         let inp = psbt::Input {
             witness_utxo: Some(self.txout.clone()),
             ..Default::default()
         };
 
-        let (kc, index) = self.coin_path;
+        let (kc, index) = coin_path;
 
-        let mut descriptors = self
-            .descriptor
+        let mut descriptors = descriptor
             .clone()
             .into_single_descriptors()
             .map_err(|_| Error::MultiDescriptor)?
@@ -134,6 +180,16 @@ impl Coin {
             .map_err(|_| Error::Update)?;
 
         Ok(dummy_psbt.inputs[0].clone())
+    }
+
+    #[cfg(feature = "sp")]
+    fn sp_to_psbt_input(&self) -> Result<psbt::Input, Error> {
+        // For SP coins, we create a basic PSBT input with witness_utxo
+        // The actual signing will be handled by the SP signer which uses the tweak
+        Ok(psbt::Input {
+            witness_utxo: Some(self.txout.clone()),
+            ..Default::default()
+        })
     }
 }
 

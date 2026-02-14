@@ -8,6 +8,9 @@ edition = "2021"
 spdk-core = { workspace = true, features = ["sync", "mnemonic", "bitcoin_32"] }
 backend-blindbit-native-non-async = { workspace = true }
 
+# bwk crates
+bwk-tx = { workspace = true, features = ["sp"] }
+
 # Bitcoin
 bitcoin = { workspace = true }
 silentpayments = { workspace = true }
