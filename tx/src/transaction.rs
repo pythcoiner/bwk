@@ -163,6 +163,40 @@ pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Weight {
     Weight::from_wu(size)
 }
 
+/// Estimate transaction weight from raw input/output weights.
+/// Does not require TxTemplate or descriptors.
+///
+/// * `input_satisfaction_weights` - satisfaction weight in WU for each input
+/// * `output_weights` - weight in WU for each output
+pub fn estimated_weight_raw(
+    input_satisfaction_weights: &[u64],
+    output_weights: &[u64],
+) -> Weight {
+    // Fixed overhead: version(4) + locktime(4) + input_count(1) + output_count(1) = 10 bytes
+    // In weight units (non-witness): 10 * 4 = 40 WU
+    // Plus segwit marker+flag: 2 WU
+    let mut weight = 40u64 + 2;
+
+    for &input_sat in input_satisfaction_weights {
+        // Each input has: prevout(36) + script_sig_length(1) + sequence(4) = 41 bytes = 164 WU
+        weight += 164 + input_sat;
+    }
+
+    for &output_w in output_weights {
+        weight += output_w;
+    }
+
+    // varint adjustment for input/output counts > 252
+    if input_satisfaction_weights.len() >= 253 {
+        weight += 2 * 4; // 2 extra bytes for varint, non-witness
+    }
+    if output_weights.len() >= 253 {
+        weight += 2 * 4;
+    }
+
+    Weight::from_wu(weight)
+}
+
 pub fn change_weight(descriptor: &Descriptor<DescriptorPublicKey>) -> Weight {
     let spk = descriptor
         .clone()
@@ -205,11 +239,11 @@ impl TransactionResult {
 }
 
 pub struct FeeResult {
-    fees: Option<u64>,
-    max: Option<u64>,
-    change: Option<u64>,
-    warnings: Vec<Warning>,
-    error: Option<Error>,
+    pub fees: Option<u64>,
+    pub max: Option<u64>,
+    pub change: Option<u64>,
+    pub warnings: Vec<Warning>,
+    pub error: Option<Error>,
 }
 
 pub enum Drain {
@@ -218,7 +252,7 @@ pub enum Drain {
     None,
 }
 
-fn process_fees(
+pub fn process_fees(
     fees: Fees,
     weight_wo_change: Weight,
     weight_with_change: Weight,

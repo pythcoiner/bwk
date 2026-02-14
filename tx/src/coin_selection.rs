@@ -5,6 +5,26 @@ use rand::random_range;
 
 use crate::Coin;
 
+/// Trait abstracting what coin selection needs from a spendable coin.
+/// Implement this for any coin type to use the generic selection algorithm.
+pub trait CoinCandidate {
+    fn outpoint(&self) -> bitcoin::OutPoint;
+    fn value_sat(&self) -> u64;
+    fn satisfaction_weight(&self) -> u64;
+}
+
+impl CoinCandidate for Coin {
+    fn outpoint(&self) -> bitcoin::OutPoint {
+        self.outpoint
+    }
+    fn value_sat(&self) -> u64 {
+        self.txout.value.to_sat()
+    }
+    fn satisfaction_weight(&self) -> u64 {
+        self.satisfaction_size
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Selection {
     pub spendable_amount: u64,
@@ -13,15 +33,16 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn new(coins: Vec<&Coin>, feerate: u64 /* msats/vb */) -> Self {
+    pub fn new<T: CoinCandidate>(coins: Vec<&T>, feerate: u64 /* msats/vb */) -> Self {
         let mut spendable_amount = 0;
         let mut fees = 0;
         let mut outpoints = vec![];
         for c in coins {
-            let fee = Weight::from_wu(c.satisfaction_size).to_vbytes_ceil() * feerate / 1000;
+            let fee =
+                Weight::from_wu(c.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000;
             fees += fee;
-            spendable_amount += c.txout.value.to_sat() - fee;
-            outpoints.push(c.outpoint);
+            spendable_amount += c.value_sat() - fee;
+            outpoints.push(c.outpoint());
         }
 
         Selection {
@@ -32,23 +53,26 @@ impl Selection {
     }
 }
 
-pub fn fees(coin: &Coin, feerate: u64 /* msats/vb */) -> u64 {
-    Weight::from_wu(coin.satisfaction_size).to_vbytes_ceil() * feerate / 1000
+pub fn fees<T: CoinCandidate>(coin: &T, feerate: u64 /* msats/vb */) -> u64 {
+    Weight::from_wu(coin.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000
 }
 
 // Sort out coins if fees >= spendable value
-pub fn discard_dust(coins: Vec<&Coin>, feerate: u64 /* msats/vb */) -> Vec<&Coin> {
+pub fn discard_dust<T: CoinCandidate>(
+    coins: Vec<&T>,
+    feerate: u64, /* msats/vb */
+) -> Vec<&T> {
     coins
         .into_iter()
         .filter(|c| {
-            let fee = fees(c, feerate);
-            fee * 2 < c.txout.value.to_sat()
+            let fee = fees(*c, feerate);
+            fee * 2 < c.value_sat()
         })
         .collect()
 }
 
-pub fn all_coins_combinations(
-    coins: Vec<&Coin>,
+pub fn all_coins_combinations<T: CoinCandidate>(
+    coins: Vec<&T>,
     feerate: u64, /* msats/vb*/
 ) -> Option<BTreeMap<u64, Selection>> {
     let coins = discard_dust(coins, feerate);
@@ -78,8 +102,8 @@ pub fn all_coins_combinations(
     Some(selections)
 }
 
-pub fn select(
-    coins: Vec<&Coin>,
+pub fn select<T: CoinCandidate>(
+    coins: Vec<&T>,
     target: u64,
     feerate: u64,
     min_change: u64,

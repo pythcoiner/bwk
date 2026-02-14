@@ -24,5 +24,6 @@ pub use tx_store::{SpTxEntry, SpTxStore, TxDirection, TxStoreError};
 
 // Re-export external types for convenience
 pub use bitcoin;
+pub use bwk_tx::Fees;
 pub use silentpayments;
 pub use spdk_core;

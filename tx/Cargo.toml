@@ -10,7 +10,7 @@ readme.workspace = true
 
 [dependencies]
 serde.workspace = true
-miniscript.workspace = true
+miniscript = { workspace = true, features = ["serde"] }
 bitcoin.workspace = true
 bitcoin.features = ["rand-std"]
 rand.workspace = true

@@ -7,9 +7,13 @@ pub mod transaction;
 pub mod tx_builder;
 
 pub use coin::{Coin, CoinStatus};
+pub use coin_selection::CoinCandidate;
 pub use descr_fingerprint::DescrFingerprint;
 pub use error::Error;
 pub use recipient::Recipient;
-pub use transaction::{Amount, Drain, FeeResult, Fees, TransactionResult, TxTemplate, Warning};
+pub use transaction::{
+    estimated_weight_raw, process_fees, Amount, Drain, FeeResult, Fees, TransactionResult,
+    TxTemplate, Warning,
+};
 
-const DUST_AMOUNT: u64 = 5_000;
+pub const DUST_AMOUNT: u64 = 5_000;
