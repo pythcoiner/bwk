@@ -1261,11 +1261,15 @@ impl Updater for AccountUpdater {
             state.persist();
         }
 
-        // Send progress notification
-        let _ = self.sender.send(Notification::ScanProgress {
-            current: current.to_consensus_u32(),
-            end: end.to_consensus_u32(),
-        });
+        // Send progress notification every 100 blocks, and always for the last block
+        let current_u32 = current.to_consensus_u32();
+        let end_u32 = end.to_consensus_u32();
+        if current_u32 % 100 == 0 || current_u32 == end_u32 {
+            let _ = self.sender.send(Notification::ScanProgress {
+                current: current_u32,
+                end: end_u32,
+            });
+        }
         Ok(())
     }
 
@@ -1599,4 +1603,81 @@ mod tests {
     // Note: Full Account creation tests require a working blindbit backend
     // which is not available in unit tests. Integration tests would test
     // the full flow.
+
+    #[test]
+    fn test_scan_progress_throttling() {
+        use bitcoin::absolute::Height;
+        use spdk_core::Updater;
+
+        let scan_state = Arc::new(Mutex::new(ScanState::new(0)));
+        let coin_store = Arc::new(Mutex::new(SpCoinStore::new()));
+        let tx_store = Arc::new(Mutex::new(SpTxStore::new()));
+        let (sender, receiver) = mpsc::channel();
+
+        let mut updater = AccountUpdater {
+            coin_store,
+            tx_store,
+            scan_state,
+            sender,
+        };
+
+        // Helper to collect all ScanProgress current values from the channel
+        let drain = |rx: &mpsc::Receiver<Notification>| -> Vec<u32> {
+            let mut v = Vec::new();
+            while let Ok(notif) = rx.try_recv() {
+                if let Notification::ScanProgress { current, .. } = notif {
+                    v.push(current);
+                }
+            }
+            v
+        };
+
+        // --- Range 1: blocks 0..=350 (end=350) ---
+        // Expected notifications: 0, 100, 200, 300, 350 (last block)
+        let end = Height::from_consensus(350).unwrap();
+        for h in 0..=350u32 {
+            let current = Height::from_consensus(h).unwrap();
+            updater
+                .record_scan_progress(Height::from_consensus(0).unwrap(), current, end)
+                .unwrap();
+        }
+        let notified = drain(&receiver);
+        assert_eq!(notified, vec![0, 100, 200, 300, 350]);
+
+        // --- Range 2: blocks 351..=400 (end=400) ---
+        // Expected: 400 (both %100 and last)
+        let end = Height::from_consensus(400).unwrap();
+        for h in 351..=400u32 {
+            let current = Height::from_consensus(h).unwrap();
+            updater
+                .record_scan_progress(Height::from_consensus(351).unwrap(), current, end)
+                .unwrap();
+        }
+        let notified = drain(&receiver);
+        assert_eq!(notified, vec![400]);
+
+        // --- Range 3: blocks 401..=410 (end=410, short range, no %100 hit) ---
+        // Expected: 410 (last block only)
+        let end = Height::from_consensus(410).unwrap();
+        for h in 401..=410u32 {
+            let current = Height::from_consensus(h).unwrap();
+            updater
+                .record_scan_progress(Height::from_consensus(401).unwrap(), current, end)
+                .unwrap();
+        }
+        let notified = drain(&receiver);
+        assert_eq!(notified, vec![410]);
+
+        // --- Range 4: blocks 411..=700 (end=700, end is %100) ---
+        // Expected: 500, 600, 700 (700 is both %100 and last — should appear once)
+        let end = Height::from_consensus(700).unwrap();
+        for h in 411..=700u32 {
+            let current = Height::from_consensus(h).unwrap();
+            updater
+                .record_scan_progress(Height::from_consensus(411).unwrap(), current, end)
+                .unwrap();
+        }
+        let notified = drain(&receiver);
+        assert_eq!(notified, vec![500, 600, 700]);
+    }
 }
