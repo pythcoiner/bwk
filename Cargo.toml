@@ -44,8 +44,8 @@ getrandom = "0.2"
 corepc-node = { version = "0.10.0", features = ["download", "29_0"] }
 
 # spdk dependencies
-spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "81d60d5", default-features = false }
-backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "81d60d5" }
+spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "28b6719", default-features = false }
+backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "28b6719" }
 silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
 

@@ -21,7 +21,9 @@ serde.workspace = true
 serde_json.workspace = true
 miniscript.workspace = true
 log.workspace = true
+spdk-core = { workspace = true, features = ["sync", "bitcoin_32"], optional = true }
 
 [features]
 default = []
 test = ["bwk-utils/test"]
+sp = ["dep:spdk-core"]

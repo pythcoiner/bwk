@@ -589,6 +589,31 @@ impl HotSigner {
     pub fn descriptors(&self) -> Vec<Descriptor<DescriptorPublicKey>> {
         self.descriptors.clone().into_iter().collect()
     }
+
+    /// Sign a Silent Payment input using tweak-based key derivation.
+    ///
+    /// The signing key is derived as: `signing_key = b_spend + tweak`
+    /// where `b_spend` is derived from the mnemonic using the provided derivation path.
+    ///
+    /// # Arguments
+    /// * `psbt` - The PSBT containing the transaction to sign
+    /// * `input_index` - The index of the input to sign
+    /// * `derivation` - The derivation path to derive b_spend from the master key
+    /// * `tweak` - The 32-byte tweak scalar for this specific output
+    /// * `aux_rand` - 32 bytes of auxiliary randomness for Schnorr signing
+    #[cfg(feature = "sp")]
+    pub fn sign_sp_input(
+        &self,
+        psbt: &mut Psbt,
+        input_index: usize,
+        derivation: &bip32::DerivationPath,
+        tweak: &[u8; 32],
+        aux_rand: &[u8; 32],
+    ) -> Result<(), Error> {
+        let b_spend = self.derivator.secret_key_at(derivation);
+        spdk_core::sign_sp_input(&b_spend, tweak, psbt, input_index, aux_rand)
+            .map_err(|_| Error::SpSigning)
+    }
 }
 
 /// Converts a tuple containing an account type and an index into a derivation path.

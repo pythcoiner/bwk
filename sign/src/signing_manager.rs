@@ -27,7 +27,7 @@ pub struct SigningManager {
     dir_name: &'static str,
     receiver: mpsc::Receiver<SignerNotif>,
     sender: mpsc::Sender<SignerNotif>,
-    hot_signers: BTreeMap<bip32::Fingerprint, HotSigner>,
+    bip32_signers: BTreeMap<bip32::Fingerprint, HotSigner>,
     #[allow(unused)]
     signers: BTreeMap<bip32::Fingerprint, ()>,
     persist: bool,
@@ -41,7 +41,7 @@ impl SigningManager {
             dir_name,
             receiver,
             sender,
-            hot_signers: Default::default(),
+            bip32_signers: Default::default(),
             signers: Default::default(),
             persist: true,
         }
@@ -60,7 +60,7 @@ impl SigningManager {
             let _ = file.read_to_string(&mut content);
             let json_signers: Result<Vec<JsonSigner>, _> = serde_json::from_str(&content);
             if let Ok(signers) = json_signers {
-                let hot_signers = signers
+                let bip32_signers = signers
                     .into_iter()
                     .map(|s| {
                         let signer = HotSigner::from_json(s);
@@ -68,9 +68,9 @@ impl SigningManager {
                     })
                     .collect();
                 let mut manager = SigningManager::new(data_dir, dir_name);
-                manager.hot_signers = hot_signers;
+                manager.bip32_signers = bip32_signers;
                 let sender = manager.sender.clone();
-                for signer in manager.hot_signers.values_mut() {
+                for signer in manager.bip32_signers.values_mut() {
                     signer.init(sender.clone());
                 }
                 manager
@@ -96,7 +96,7 @@ impl SigningManager {
         match File::create(Self::path(self.data_dir.clone(), self.dir_name)) {
             Ok(mut file) => {
                 let content: Vec<_> = self
-                    .hot_signers
+                    .bip32_signers
                     .clone()
                     .into_values()
                     .map(|s| s.to_json())
@@ -123,9 +123,9 @@ impl SigningManager {
     ///
     /// # Parameters
     /// - `network`: The network for which the hot signer is created.
-    pub fn new_hot_signer(&mut self, network: bitcoin::Network) {
+    pub fn new_bip32_signer(&mut self, network: bitcoin::Network) {
         let mnemomic = bip39::Mnemonic::generate(12).unwrap();
-        self.new_hot_signer_from_mnemonic(network, mnemomic.to_string());
+        self.new_bip32_signer_from_mnemonic(network, mnemomic.to_string());
     }
 
     /// Creates a new hot signer from a given mnemonic.
@@ -133,10 +133,10 @@ impl SigningManager {
     /// # Parameters
     /// - `network`: The network for which the hot signer is created.
     /// - `mnemonic`: The mnemonic used to create the hot signer.
-    pub fn new_hot_signer_from_mnemonic(&mut self, network: bitcoin::Network, mnemonic: String) {
+    pub fn new_bip32_signer_from_mnemonic(&mut self, network: bitcoin::Network, mnemonic: String) {
         let mut signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
         signer.init(self.sender.clone());
-        self.hot_signers.insert(signer.fingerprint(), signer);
+        self.bip32_signers.insert(signer.fingerprint(), signer);
     }
 
     pub fn sign(&self, network: bitcoin::Network, psbt: String) {
@@ -155,7 +155,7 @@ impl SigningManager {
         };
 
         let signer = self
-            .hot_signers
+            .bip32_signers
             .iter()
             .next()
             .expect("at least one signer")
@@ -181,10 +181,10 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
-    fn test_manager_hot_signer() {
+    fn test_manager_bip32_signer() {
         let mut manager = SigningManager::new(PathBuf::new(), ".bwk");
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
-        manager.new_hot_signer_from_mnemonic(bitcoin::Network::Regtest, mnemonic);
+        manager.new_bip32_signer_from_mnemonic(bitcoin::Network::Regtest, mnemonic);
         if let SignerNotif::Info(fg, _info) = manager.poll().unwrap() {
             assert_eq!(fg, Fingerprint::from_str("73c5da0a").unwrap());
         } else {

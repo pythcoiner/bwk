@@ -22,6 +22,8 @@ pub enum Error {
     InsanePrevouts,
     SigningInfo,
     InsaneTaptreeInfo,
+    #[cfg(feature = "sp")]
+    SpSigning,
 }
 
 impl Display for Error {
@@ -46,6 +48,8 @@ impl Display for Error {
             Error::InsanePrevouts => write!(f, "Insane prevouts for taproot sighash"),
             Error::SigningInfo => write!(f, "Missing signing informations"),
             Error::InsaneTaptreeInfo => write!(f, "Wrong signing informations for taptree"),
+            #[cfg(feature = "sp")]
+            Error::SpSigning => write!(f, "Failed to sign SP input"),
         }
     }
 }

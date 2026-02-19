@@ -255,7 +255,7 @@ impl CoinStore {
     /// Returns a reference to the derivator used for generating addresses.
     ///
     /// # Returns
-    /// A reference to a `WpkhHotSigner`.
+    /// A reference to a `SpkDerivator`.
     pub fn derivator_ref(&self) -> &SpkDerivator {
         &self.derivator
     }
