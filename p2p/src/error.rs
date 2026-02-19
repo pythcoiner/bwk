@@ -16,6 +16,8 @@ pub enum Error {
     NotConnected,
     #[error("client stopped unexpectedly")]
     Stopped,
+    #[error("connection timed out")]
+    Timeout,
     #[error("DNS lookup failed: {0}")]
     DnsLookup(String),
 }

@@ -14,7 +14,7 @@ use bitcoin::p2p::{
     message_blockdata::Inventory,
     Magic,
 };
-use bitcoin::{Block, BlockHash, Network};
+use bitcoin::{Block, BlockHash, Network, Transaction};
 
 use crate::connection::network_to_magic;
 use crate::Error;
@@ -62,7 +62,7 @@ impl Client {
     pub fn connect(mut self) -> Result<Self, Error> {
         self.stop.store(false, Ordering::Relaxed);
         let (stream, reader, _height) =
-            crate::connection::connect(&self.address.to_string(), self.network)?;
+            crate::connection::connect(&self.address.to_string(), self.network, self.timeout)?;
         let stream = Arc::new(Mutex::new(stream));
         self.stream = Some(stream.clone());
         self.start_listen(reader, stream)?;
@@ -116,6 +116,9 @@ impl Client {
                     }
                     NetworkMessage::Addr(a) => {
                         let _ = sender.send(NetworkMessage::Addr(a.clone()));
+                    }
+                    m @ NetworkMessage::GetData(_) => {
+                        let _ = sender.send(m);
                     }
                     _ => {}
                 },
@@ -232,6 +235,69 @@ impl Client {
             Err(Error::NotConnected)
         }
     }
+
+    /// Broadcast a transaction to the connected peer using the standard
+    /// `inv` → `getdata` → `tx` relay protocol.
+    ///
+    /// Returns `Ok(())` once the peer has requested and received the full
+    /// transaction. This is the strongest confirmation available over P2P —
+    /// Bitcoin Core will not serve a transaction back to the peer that sent
+    /// it, so mempool acceptance cannot be verified from the same connection.
+    pub fn broadcast_tx(&mut self, tx: Transaction) -> Result<(), Error> {
+        if !self.is_connected() {
+            return Err(Error::NotConnected);
+        }
+        let stream = if let Some(stream) = &self.stream {
+            stream.clone()
+        } else {
+            return Err(Error::NotConnected);
+        };
+        let receiver = self.receiver.as_mut().ok_or(Error::NotConnected)?;
+        let timeout = self.timeout;
+        let stop = &self.stop;
+
+        let txid = tx.compute_txid();
+        let magic = network_to_magic(self.network);
+
+        // Send inv announcing the txid
+        let inv_msg = NetworkMessage::Inv(vec![Inventory::Transaction(txid)]);
+        let raw = message::RawNetworkMessage::new(magic, inv_msg);
+        stream
+            .lock()
+            .expect("poisoned")
+            .write_all(encode::serialize(&raw).as_slice())?;
+
+        // Wait for GetData requesting our txid, then send the full tx
+        let mut back_off = bwk_backoff::Backoff::new_ms(20);
+        let start = SystemTime::now();
+        loop {
+            if let Ok(NetworkMessage::GetData(inv_list)) = receiver.try_recv() {
+                let found = inv_list.iter().any(|i| match i {
+                    Inventory::Transaction(id) | Inventory::WitnessTransaction(id) => {
+                        *id == txid
+                    }
+                    _ => false,
+                });
+                if found {
+                    let tx_msg = NetworkMessage::Tx(tx);
+                    let raw = message::RawNetworkMessage::new(magic, tx_msg);
+                    stream
+                        .lock()
+                        .expect("poisoned")
+                        .write_all(encode::serialize(&raw).as_slice())?;
+                    return Ok(());
+                }
+            }
+            let elapsed = SystemTime::now().duration_since(start).expect("valid time");
+            if elapsed > timeout {
+                return Err(Error::Timeout);
+            }
+            back_off.snooze();
+            if stop.load(Ordering::Relaxed) {
+                return Err(Error::Stopped);
+            }
+        }
+    }
 }
 
 impl Drop for Client {
@@ -330,5 +396,88 @@ mod tests {
         }
         let success = len - failed;
         println!("Success: {}/{}", success, len);
+    }
+
+    #[test]
+    fn test_broadcast_tx() {
+        use bitcoin::{psbt::Psbt, Amount};
+        use std::collections::BTreeMap;
+        let _ = env_logger::try_init();
+
+        // Node A: has wallet, creates the TX
+        let mut conf_a = Conf::default();
+        conf_a.p2p = P2P::Yes;
+        let mut node_a = corepc_node::Node::from_downloaded_with_conf(&conf_a).unwrap();
+
+        // Node B: connected to Node A, receives the broadcast
+        let mut conf_b = Conf::default();
+        conf_b.p2p = node_a.p2p_connect(true).unwrap();
+        let mut node_b = corepc_node::Node::from_downloaded_with_conf(&conf_b).unwrap();
+        let node_b_p2p = match node_b.p2p_connect(true).unwrap() {
+            P2P::Connect(addr, _) => SocketAddr::V4(addr),
+            _ => panic!(),
+        };
+
+        // Generate blocks on Node A
+        generate_blocks(&mut node_a.client, 101);
+
+        // Wait for Node B to sync
+        for _ in 0..50 {
+            if get_height(&mut node_b.client) >= 101 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(get_height(&mut node_b.client), 101, "Node B did not sync");
+
+        // Create and sign a TX on Node A (don't broadcast via RPC)
+        let addr = node_a.client.new_address().unwrap();
+        let mut outputs = BTreeMap::new();
+        outputs.insert(addr, Amount::from_sat(50_000));
+
+        let funded = node_a
+            .client
+            .wallet_create_funded_psbt(vec![], vec![outputs])
+            .unwrap();
+        let funded_psbt: Psbt = funded.psbt.parse().expect("valid psbt");
+
+        let signed = node_a.client.wallet_process_psbt(&funded_psbt).unwrap();
+        let signed_psbt: Psbt = signed.psbt.parse().expect("valid psbt");
+
+        let finalized = node_a.client.finalize_psbt(&signed_psbt).unwrap();
+        assert!(finalized.complete, "PSBT not complete");
+
+        let finalized_psbt: Psbt = finalized
+            .psbt
+            .expect("psbt present")
+            .parse()
+            .expect("valid psbt");
+        let tx = finalized_psbt.extract_tx().expect("extractable tx");
+        let broadcast_txid = tx.compute_txid();
+
+        // Verify TX is NOT yet in Node B's mempool
+        let mempool = node_b.client.get_raw_mempool().unwrap().0;
+        assert!(
+            mempool.is_empty(),
+            "Node B mempool should be empty before broadcast"
+        );
+
+        // Connect our P2P client to Node B and broadcast
+        let mut p2p_client = Client::new(node_b_p2p, Network::Regtest)
+            .timeout(Duration::from_millis(5000))
+            .connect()
+            .unwrap();
+
+        p2p_client.broadcast_tx(tx).unwrap();
+
+        // Double-check via RPC
+        let mempool = node_b.client.get_raw_mempool().unwrap().0;
+        let mempool_txids: Vec<bitcoin::Txid> =
+            mempool.iter().map(|s| s.parse().unwrap()).collect();
+        assert!(
+            mempool_txids.contains(&broadcast_txid),
+            "Transaction {} not found in Node B's mempool after confirmed P2P broadcast",
+            broadcast_txid
+        );
     }
 }
