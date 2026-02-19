@@ -1,0 +1,24 @@
+[package]
+name = "bwk-p2p"
+version = "0.0.1"
+description = "Bitcoin P2P protocol client"
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+doctest = false
+
+[dependencies]
+bitcoin = { workspace = true }
+bwk-backoff = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+dns-lookup = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+corepc-node = { workspace = true }
+env_logger = { workspace = true }

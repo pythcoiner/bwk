@@ -1,0 +1,104 @@
+use std::{
+    io::{BufReader, Write},
+    net::{SocketAddr, TcpStream},
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use bitcoin::p2p::{
+    address,
+    message::{self, NetworkMessage},
+    message_network::VersionMessage,
+    Magic, ServiceFlags,
+};
+use bitcoin::{
+    consensus::{encode, Decodable},
+    Network,
+};
+
+use crate::Error;
+
+const USER_AGENT: &str = "/bwk-p2p:0.0.1/";
+const PROTOCOL_VERSION: u32 = 60_002;
+
+pub fn network_to_magic(network: Network) -> Magic {
+    match network {
+        Network::Bitcoin => Magic::BITCOIN,
+        Network::Testnet => Magic::TESTNET3,
+        Network::Testnet4 => Magic::TESTNET4,
+        Network::Signet => Magic::SIGNET,
+        Network::Regtest => Magic::REGTEST,
+    }
+}
+
+pub(crate) fn connect(
+    addr: &str,
+    network: Network,
+) -> Result<(TcpStream, BufReader<TcpStream>, i32), Error> {
+    let address = SocketAddr::from_str(addr).map_err(|_| Error::InvalidAddress)?;
+    let magic = network_to_magic(network);
+
+    let mut stream = TcpStream::connect(address)?;
+    let own_ip = stream.local_addr().map_err(|_| Error::LocalAddress)?;
+
+    let version_message = version_msg(own_ip, address);
+    let version_message = message::RawNetworkMessage::new(magic, version_message);
+
+    let _ = stream.write_all(encode::serialize(&version_message).as_slice());
+
+    let mut reader = BufReader::new(stream.try_clone().map_err(|_| Error::StreamClone)?);
+
+    let mut verack = false;
+    let mut version = false;
+    let mut start_height = 0;
+
+    loop {
+        let reply =
+            message::RawNetworkMessage::consensus_decode(&mut reader).map_err(|_| Error::Decode)?;
+        match reply.payload() {
+            NetworkMessage::Version(v) => {
+                start_height = v.start_height;
+                version = true;
+            }
+            NetworkMessage::Verack => {
+                verack = true;
+            }
+            _ => {}
+        }
+        if version && verack {
+            let verack_msg = message::RawNetworkMessage::new(magic, NetworkMessage::Verack);
+            let _ = stream.write_all(encode::serialize(&verack_msg).as_slice());
+            break;
+        }
+    }
+
+    Ok((stream, reader, start_height))
+}
+
+fn version_msg(own_ip: SocketAddr, peer_ip: SocketAddr) -> NetworkMessage {
+    let services = ServiceFlags::NONE;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("Time error")
+        .as_secs();
+
+    let addr_recv = address::Address::new(&peer_ip, ServiceFlags::NONE);
+    let addr_from = address::Address::new(&own_ip, ServiceFlags::NONE);
+
+    let nonce: u64 = rand::random();
+    let start_height: i32 = 0;
+
+    let mut version = VersionMessage::new(
+        services,
+        timestamp as i64,
+        addr_recv,
+        addr_from,
+        nonce,
+        USER_AGENT.to_string(),
+        start_height,
+    );
+    version.version = PROTOCOL_VERSION;
+
+    NetworkMessage::Version(version)
+}

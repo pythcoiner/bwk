@@ -7,6 +7,7 @@ members = [
     "electrum",
     "backoff",
     "keys", "utils", "sign", "descriptor", "tx",
+    "p2p",
 ]
 
 [workspace.package]
@@ -42,6 +43,7 @@ thiserror = "2.0.0"
 ureq = { version = "2.10", default-features = false }
 getrandom = "0.2"
 corepc-node = { version = "0.10.0", features = ["download", "29_0"] }
+dns-lookup = "2.0"
 
 # spdk dependencies
 spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "28b6719", default-features = false }
@@ -57,6 +59,7 @@ bwk-tx = { path = "tx" }
 bwk-sign = { path = "sign" }
 bwk-descriptor = { path = "descriptor" }
 bwk-utils = { path = "utils" }
+bwk-p2p = { path = "p2p" }
 bwk = { path = "bwk" }
 
 
