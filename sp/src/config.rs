@@ -31,8 +31,6 @@ pub struct Config {
     // Backend
     /// Blindbit server URL for chain data
     pub blindbit_url: String,
-    /// URL for broadcasting transactions (optional)
-    pub broadcast_url: Option<String>,
 
     // Persistence
     /// Base directory for account data
@@ -71,7 +69,6 @@ impl Config {
             scan_sk: None,
             spend_key: None,
             blindbit_url,
-            broadcast_url: None,
             data_dir,
             persist: true,
             dust_limit: None,
@@ -124,7 +121,6 @@ impl Config {
             scan_sk: Some(scan_sk),
             spend_key: Some(spend_key),
             blindbit_url,
-            broadcast_url: None,
             data_dir,
             persist: true,
             dust_limit: None,
@@ -200,11 +196,6 @@ impl Config {
     /// Set the Blindbit server URL.
     pub fn set_blindbit_url(&mut self, url: String) {
         self.blindbit_url = url;
-    }
-
-    /// Set the broadcast URL.
-    pub fn set_broadcast_url(&mut self, url: Option<String>) {
-        self.broadcast_url = url;
     }
 
     /// Set the dust limit in satoshis.
@@ -346,7 +337,6 @@ mod tests {
         assert!(config.scan_sk.is_none());
         assert!(config.spend_key.is_none());
         assert_eq!(config.blindbit_url, "https://blindbit.example.com");
-        assert!(config.broadcast_url.is_none());
         assert_eq!(config.data_dir, PathBuf::from("/tmp/bwk-test"));
         assert!(config.persist); // Default is true
         assert!(config.dust_limit.is_none());
@@ -514,12 +504,6 @@ mod tests {
 
         config.set_blindbit_url("https://new-url.com".to_string());
         assert_eq!(config.blindbit_url(), "https://new-url.com");
-
-        config.set_broadcast_url(Some("https://broadcast.com".to_string()));
-        assert_eq!(
-            config.broadcast_url,
-            Some("https://broadcast.com".to_string())
-        );
 
         config.set_dust_limit(Some(546));
         assert_eq!(config.dust_limit, Some(546));

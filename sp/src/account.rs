@@ -96,12 +96,6 @@ pub enum AccountError {
     /// Signing requested but no keys available
     #[error("signing failed: no keys")]
     NoKeys,
-    /// Transaction broadcast failed
-    #[error("broadcast failed: {0}")]
-    Broadcast(String),
-    /// No broadcast URL configured
-    #[error("no broadcast url configured")]
-    NoBroadcastUrl,
     /// Scanner thread is already running
     #[error("scanner already running")]
     ScannerAlreadyRunning,
@@ -1309,63 +1303,6 @@ impl Account {
     }
 
     //-------------------------------------------------------------------------
-    // Broadcasting
-    //-------------------------------------------------------------------------
-
-    /// Broadcast a transaction to the network.
-    ///
-    /// Uses the configured broadcast_url to POST the transaction.
-    pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, AccountError> {
-        let broadcast_url = self
-            .config
-            .broadcast_url
-            .as_ref()
-            .ok_or(AccountError::NoBroadcastUrl)?;
-
-        // Serialize transaction to hex
-        let tx_hex = bitcoin::consensus::encode::serialize_hex(tx);
-
-        // POST the transaction
-        let response = ureq::post(broadcast_url)
-            .set("Content-Type", "text/plain")
-            .send_string(&tx_hex)
-            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
-
-        // Parse response for txid
-        let response_text = response
-            .into_string()
-            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
-
-        // Try to parse as txid
-        let txid: Txid = response_text
-            .trim()
-            .parse()
-            .map_err(|e| AccountError::Broadcast(format!("invalid txid in response: {}", e)))?;
-
-        Ok(txid)
-    }
-
-    /// Sign and broadcast in one step.
-    ///
-    /// This is a convenience method that combines `sign_transaction()` and `broadcast()`.
-    ///
-    /// # Arguments
-    /// * `unsigned_tx` - The finalized unsigned transaction to sign and broadcast
-    ///
-    /// # Errors
-    /// * `AccountError::NoKeys` if this account cannot sign (no spend secret key)
-    /// * `AccountError::Transaction` if signing fails
-    /// * `AccountError::NoBroadcastUrl` if no broadcast URL is configured
-    /// * `AccountError::Broadcast` if broadcast fails
-    pub fn sign_and_broadcast(
-        &self,
-        unsigned_tx: SilentPaymentUnsignedTransaction,
-    ) -> Result<Txid, AccountError> {
-        let signed_tx = self.sign_transaction(unsigned_tx)?;
-        self.broadcast(&signed_tx)
-    }
-
-    //-------------------------------------------------------------------------
     // Persistence
     //-------------------------------------------------------------------------
 
@@ -1563,12 +1500,6 @@ mod tests {
 
         let err = AccountError::NoKeys;
         assert!(err.to_string().contains("no keys"));
-
-        let err = AccountError::Broadcast("broadcast error".to_string());
-        assert!(err.to_string().contains("broadcast failed"));
-
-        let err = AccountError::NoBroadcastUrl;
-        assert!(err.to_string().contains("no broadcast url"));
 
         let err = AccountError::ScannerAlreadyRunning;
         assert!(err.to_string().contains("already running"));

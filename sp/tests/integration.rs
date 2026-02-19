@@ -132,14 +132,9 @@ fn test_config_with_all_options() {
     let dir = temp_dir();
 
     let mut config = test_config(&dir);
-    config.set_broadcast_url(Some("https://broadcast.example.com/tx".to_string()));
     config.set_dust_limit(Some(546));
     config.set_birthday_height(Some(850000));
 
-    assert_eq!(
-        config.broadcast_url,
-        Some("https://broadcast.example.com/tx".to_string())
-    );
     assert_eq!(config.dust_limit, Some(546));
     assert_eq!(config.birthday_height, Some(850000));
 
@@ -646,40 +641,6 @@ fn test_spent_coins_not_spendable() {
 }
 
 //-----------------------------------------------------------------------------
-// 10.3.10 Broadcast Tests
-//-----------------------------------------------------------------------------
-
-/// Test that broadcast requires a broadcast_url.
-/// We test config-level since Account needs backend.
-#[test]
-fn test_config_no_broadcast_url() {
-    let dir = temp_dir();
-
-    let config = test_config(&dir);
-
-    // Default config has no broadcast_url
-    assert!(config.broadcast_url.is_none());
-
-    cleanup_temp_dir(&dir);
-}
-
-/// Test setting broadcast_url on config.
-#[test]
-fn test_config_with_broadcast_url() {
-    let dir = temp_dir();
-
-    let mut config = test_config(&dir);
-    config.set_broadcast_url(Some("https://mempool.space/api/tx".to_string()));
-
-    assert_eq!(
-        config.broadcast_url,
-        Some("https://mempool.space/api/tx".to_string())
-    );
-
-    cleanup_temp_dir(&dir);
-}
-
-//-----------------------------------------------------------------------------
 // 10.3.11 Concurrency Tests
 //-----------------------------------------------------------------------------
 
@@ -837,12 +798,6 @@ fn test_account_error_display() {
 
     let err = AccountError::NoKeys;
     assert!(err.to_string().contains("no keys"));
-
-    let err = AccountError::Broadcast("test broadcast error".to_string());
-    assert!(err.to_string().contains("broadcast failed"));
-
-    let err = AccountError::NoBroadcastUrl;
-    assert!(err.to_string().contains("no broadcast url"));
 
     let err = AccountError::ScannerAlreadyRunning;
     assert!(err.to_string().contains("already running"));
@@ -3162,71 +3117,6 @@ fn test_scan_handles_network_error() {
     }
 
     cleanup_temp_dir(&dir);
-}
-
-/// Tests error when broadcasting with no broadcast URL configured.
-///
-/// Verifies that broadcast() returns NoBroadcastUrl error when
-/// no broadcast_url is configured.
-#[test]
-fn test_broadcast_without_url() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
-
-    // 4. Create Account without broadcast_url (default config has no broadcast_url)
-    let dir = temp_dir();
-    let config = Config::new(
-        "test-no-broadcast-url".to_string(),
-        bitcoin::Network::Regtest,
-        test_mnemonic().to_string(),
-        bbd.url(),
-        dir.clone(),
-    )
-    .enable_persist(false);
-
-    // Verify config has no broadcast_url
-    assert!(
-        config.broadcast_url.is_none(),
-        "Config should have no broadcast_url"
-    );
-
-    let account = bwk_sp::Account::new(config).unwrap();
-
-    // 5. Create a dummy transaction to broadcast
-    // We need any valid transaction structure for this test
-    let tx = bitcoin::Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![],
-    };
-
-    // 6. Attempt to broadcast without configured URL
-    let result = account.broadcast(&tx);
-
-    // 7. Verify NoBroadcastUrl error
-    assert!(result.is_err(), "broadcast should fail without URL");
-    match result {
-        Err(AccountError::NoBroadcastUrl) => {
-            // Expected error
-        }
-        Err(other) => panic!("Expected NoBroadcastUrl, got {:?}", other),
-        Ok(_) => panic!("Expected error, got Ok"),
-    }
-
-    // 8. Cleanup
-    cleanup_temp_dir(&dir);
-    drop(bbd);
 }
 
 //=============================================================================
