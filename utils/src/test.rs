@@ -2,6 +2,7 @@ use std::{str::FromStr, sync::Once};
 
 pub use corepc_node::{self, Client, Node};
 pub use miniscript;
+pub use temp_dir::TempDir;
 
 use miniscript::bitcoin::{
     self, hashes::serde_macros::serde_details::SerdeHash, key::rand::random, Address, Amount,
