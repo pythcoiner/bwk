@@ -4,10 +4,9 @@ use dns_lookup::lookup_host;
 
 use crate::Error;
 
-pub const DNS_SEED_SERVERS: [&str; 9] = [
+pub const DNS_SEED_SERVERS: [&str; 8] = [
     "seed.bitcoin.sipa.be",
     "dnsseed.bluematt.me.",
-    "dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us.",
     "seed.bitcoin.jonasschnelli.ch.",
     "seed.btc.petertodd.net.",
     "seed.bitcoin.sprovoost.nl.",

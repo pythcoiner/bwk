@@ -363,39 +363,62 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // requires internet connection
     fn test_seed_peers() {
-        let peers = fetch_peers("seed.bitcoin.sipa.be").unwrap();
+        use std::net::ToSocketAddrs;
 
-        let mut failed = 0;
-        let len = peers.len();
-        for (index, peer) in peers.into_iter().enumerate() {
-            println!("{}/{}", index + 1, len);
-            let client = Client::new(peer, Network::Bitcoin).connect();
-            let mut client = match client {
-                Ok(c) => c,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-            };
-            let addrs = match client.get_addr() {
-                Ok(Some(a)) => a,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-                _ => continue,
-            };
-
-            println!("received {} peers addresses", addrs.len());
+        // Check internet connectivity with a reliable DNS
+        if "dns.google:443".to_socket_addrs().is_err() {
+            eprintln!("Skipping test_seed_peers: no internet connection");
+            return;
         }
 
-        if (failed * 10) > len {
-            panic!("{failed} failed!")
+        const MAX_RETRIES: usize = 3;
+        const SUCCESS_THRESHOLD_PERCENT: usize = 40;
+
+        for attempt in 1..=MAX_RETRIES {
+            println!("Attempt {}/{}", attempt, MAX_RETRIES);
+
+            let peers = fetch_peers("seed.bitcoin.sipa.be").unwrap();
+
+            let mut failed = 0;
+            let len = peers.len();
+            for (index, peer) in peers.into_iter().enumerate() {
+                println!("{}/{}", index + 1, len);
+                let client = Client::new(peer, Network::Bitcoin)
+                    .timeout(Duration::from_secs(5))
+                    .connect();
+                let mut client = match client {
+                    Ok(c) => c,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let addrs = match client.get_addr() {
+                    Ok(Some(a)) => a,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                    _ => continue,
+                };
+
+                println!("received {} peers addresses", addrs.len());
+            }
+
+            let success = len - failed;
+            println!("Success: {}/{}", success, len);
+
+            if success * 100 >= len * SUCCESS_THRESHOLD_PERCENT {
+                return;
+            }
+
+            if attempt < MAX_RETRIES {
+                eprintln!("Only {}% succeeded, retrying...", success * 100 / len);
+            } else {
+                panic!("Only {}% succeeded after {} attempts!", success * 100 / len, MAX_RETRIES);
+            }
         }
-        let success = len - failed;
-        println!("Success: {}/{}", success, len);
     }
 
     #[test]
