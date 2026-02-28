@@ -590,6 +590,94 @@ impl HotSigner {
         self.descriptors.clone().into_iter().collect()
     }
 
+    /// Get the taproot receive address and secret key at a given derivation index.
+    ///
+    /// This is a convenience method for tests that need to fund a taproot address
+    /// and later sign transactions with the corresponding key.
+    ///
+    /// # Arguments
+    /// * `index` - The derivation index (0, 1, 2, ...)
+    ///
+    /// # Returns
+    /// A tuple of (Address, SecretKey) for the receive address at the given index.
+    ///
+    /// # Panics
+    /// Panics if no taproot descriptor is registered or if derivation fails.
+    #[cfg(feature = "test")]
+    pub fn taproot_receive_address_and_key(
+        &self,
+        index: u32,
+    ) -> (bitcoin::Address, secp256k1::SecretKey) {
+        use bwk_descriptor::derivator::SpkDerivator;
+
+        // Find a taproot descriptor
+        let descriptor = self
+            .descriptors
+            .iter()
+            .find(|d| matches!(d, Descriptor::Tr(_)))
+            .expect("no taproot descriptor registered");
+        let derivator = SpkDerivator::new(descriptor.clone(), self.network)
+            .expect("failed to create derivator");
+
+        // Build the derivation path for the receive address
+        let base_path = tr_path(
+            self.network,
+            ChildNumber::from_hardened_idx(0).expect("child number"),
+        )
+        .expect("tr_path");
+        let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
+        let path = base_path.child(ChildNumber::from_normal_idx(index).expect("child number"));
+
+        let address = derivator.receive_at(index);
+        let secret_key = self.private_key_at(&path);
+
+        (address, secret_key)
+    }
+
+    /// Get the native SegWit (P2WPKH) receive address and secret key at a given derivation index.
+    ///
+    /// This is a convenience method for tests that need to fund a P2WPKH address
+    /// and later sign transactions with the corresponding key.
+    ///
+    /// # Arguments
+    /// * `index` - The derivation index (0, 1, 2, ...)
+    ///
+    /// # Returns
+    /// A tuple of (Address, SecretKey) for the receive address at the given index.
+    ///
+    /// # Panics
+    /// Panics if no P2WPKH descriptor is registered or if derivation fails.
+    #[cfg(feature = "test")]
+    pub fn wpkh_receive_address_and_key(
+        &self,
+        index: u32,
+    ) -> (bitcoin::Address, secp256k1::SecretKey) {
+        use bwk_descriptor::derivator::SpkDerivator;
+
+        // Find a wpkh descriptor
+        let descriptor = self
+            .descriptors
+            .iter()
+            .find(|d| matches!(d, Descriptor::Wpkh(_)))
+            .expect("no wpkh descriptor registered");
+        let derivator = SpkDerivator::new(descriptor.clone(), self.network)
+            .expect("failed to create derivator");
+
+        // Build the derivation path for the receive address (BIP84)
+        let base_path = wpkh_path(
+            self.network,
+            ChildNumber::from_hardened_idx(0).expect("child number"),
+        )
+        .expect("wpkh_path");
+        let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
+        let path = base_path.child(ChildNumber::from_normal_idx(index).expect("child number"));
+
+        let address = derivator.receive_at(index);
+        let secret_key = self.private_key_at(&path);
+
+        (address, secret_key)
+    }
+
     /// Sign a Silent Payment input using tweak-based key derivation.
     ///
     /// The signing key is derived as: `signing_key = b_spend + tweak`
