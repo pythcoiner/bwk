@@ -20,9 +20,7 @@ use spdk_core::ChainBackend;
 use bwk_sp::Config;
 use spdk_core::{OutputSpendStatus, OwnedOutput};
 
-//=============================================================================
 // MockBackendError
-//=============================================================================
 
 /// Errors that can occur in MockBackend operations.
 #[derive(Debug, thiserror::Error)]
@@ -36,9 +34,7 @@ pub enum MockBackendError {
     BlockNotFound(u32),
 }
 
-//=============================================================================
 // MockBlock
-//=============================================================================
 
 /// A mock block for testing.
 #[derive(Debug, Clone)]
@@ -80,9 +76,7 @@ impl MockBlock {
     }
 }
 
-//=============================================================================
 // MockBackend
-//=============================================================================
 
 /// A mock backend for testing scanner logic without real network.
 ///
@@ -102,9 +96,7 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new MockBackend with specified tip height.
     pub fn new(tip_height: u32) -> Self {
@@ -127,9 +119,7 @@ impl MockBackend {
         }
     }
 
-    //-------------------------------------------------------------------------
     // Configuration (builder pattern)
-    //-------------------------------------------------------------------------
 
     /// Configure the backend to fail after N calls.
     pub fn fail_after(mut self, n: u32) -> Self {
@@ -154,9 +144,7 @@ impl MockBackend {
         self
     }
 
-    //-------------------------------------------------------------------------
     // Getters
-    //-------------------------------------------------------------------------
 
     /// Returns the current call count.
     pub fn call_count(&self) -> u32 {
@@ -168,9 +156,7 @@ impl MockBackend {
         self.call_count.store(0, Ordering::Relaxed);
     }
 
-    //-------------------------------------------------------------------------
     // Mock API methods
-    //-------------------------------------------------------------------------
 
     /// Get the current block height (simulates backend.block_height()).
     ///
@@ -224,9 +210,7 @@ impl MockBackend {
     }
 }
 
-//=============================================================================
 // Test Fixtures
-//=============================================================================
 
 /// Returns a fixed 12-word test mnemonic.
 ///
@@ -234,6 +218,13 @@ impl MockBackend {
 /// WARNING: Never use this mnemonic for real funds!
 pub fn test_mnemonic() -> &'static str {
     "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+}
+
+/// Returns a second test mnemonic (different from test_mnemonic).
+/// WARNING: Never use this mnemonic for real funds!
+#[allow(dead_code)]
+pub fn test_mnemonic_2() -> &'static str {
+    "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
 }
 
 /// Returns a valid test Config pointing to a temporary directory.
@@ -253,6 +244,63 @@ pub fn test_config(temp_dir: &std::path::Path) -> Config {
         temp_dir.to_path_buf(),
     )
     .enable_persist(false)
+}
+
+/// Creates a test Account with BlindbitD backend (no persistence).
+#[allow(dead_code)]
+pub fn test_account(url: &str) -> bwk_sp::Account {
+    let config = Config::new(
+        "test".to_string(),
+        bitcoin::Network::Regtest,
+        test_mnemonic().to_string(),
+        url.to_string(),
+        std::path::PathBuf::from("/unused"),
+    )
+    .enable_persist(false);
+    bwk_sp::Account::new(config).expect("create test account")
+}
+
+/// Creates a test Account with custom name (no persistence).
+#[allow(dead_code)]
+pub fn test_account_named(name: &str, url: &str) -> bwk_sp::Account {
+    test_account_with_mnemonic(name, test_mnemonic(), url)
+}
+
+/// Creates a test Account with custom name and mnemonic (no persistence).
+#[allow(dead_code)]
+pub fn test_account_with_mnemonic(name: &str, mnemonic: &str, url: &str) -> bwk_sp::Account {
+    let config = Config::new(
+        name.to_string(),
+        bitcoin::Network::Regtest,
+        mnemonic.to_string(),
+        url.to_string(),
+        std::path::PathBuf::from("/unused"),
+    )
+    .enable_persist(false);
+    bwk_sp::Account::new(config).expect("create test account")
+}
+
+/// Creates a test Account with persistence enabled.
+/// Returns (Account, Config, TempDir) - keep TempDir alive for persistence to work.
+#[allow(dead_code)]
+pub fn test_account_persistent(url: &str) -> (bwk_sp::Account, Config, TempDir) {
+    test_account_persistent_named("test", url)
+}
+
+/// Creates a test Account with persistence enabled and custom name.
+#[allow(dead_code)]
+pub fn test_account_persistent_named(name: &str, url: &str) -> (bwk_sp::Account, Config, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let config = Config::new(
+        name.to_string(),
+        bitcoin::Network::Regtest,
+        test_mnemonic().to_string(),
+        url.to_string(),
+        dir.path().to_path_buf(),
+    )
+    .enable_persist(true);
+    let account = bwk_sp::Account::new(config.clone()).expect("create test account");
+    (account, config, dir)
 }
 
 /// Returns a test OutPoint with a deterministic txid.
@@ -315,9 +363,7 @@ pub fn test_spent_output(height: u32, amount: u64) -> OwnedOutput {
 
 pub use bwk_utils::test::TempDir;
 
-//=============================================================================
 // Blindbitd Helpers (Phase 10.4)
-//=============================================================================
 
 /// Dust threshold for Silent Payment outputs.
 #[allow(dead_code)]
@@ -513,9 +559,7 @@ pub fn swap_to_sp(
     Some(tx)
 }
 
-//=============================================================================
 // Tests for test utilities
-//=============================================================================
 
 #[cfg(test)]
 mod tests {
