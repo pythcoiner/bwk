@@ -24,9 +24,6 @@ thiserror = { workspace = true }
 log = { workspace = true }
 hex = { workspace = true }
 
-# HTTP client for broadcasting
-ureq = { workspace = true }
-
 # Random number generation
 getrandom = { workspace = true }
 

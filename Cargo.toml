@@ -40,14 +40,13 @@ serde_json = "1.0.128"
 env_logger = "0.11.6"
 temp-dir = "0.1.16"
 thiserror = "2.0.0"
-ureq = { version = "2.10", default-features = false }
 getrandom = "0.2"
 corepc-node = { version = "0.10.0", features = ["download", "29_0"] }
 dns-lookup = "2.0"
 
 # spdk dependencies
-spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "28b6719", default-features = false }
-backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "28b6719" }
+spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "9197d0f", default-features = false }
+backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "9197d0f" }
 silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
 
