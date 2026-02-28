@@ -419,7 +419,9 @@ pub mod test {
     use super::*;
     use crate::Amount;
     pub fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus};
+        use crate::{
+            coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus,
+        };
 
         let spk = derivator.receive_at(index).script_pubkey();
         let txout = TxOut {
@@ -554,7 +556,9 @@ pub mod test {
     }
 
     pub fn funding_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
-        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus};
+        use crate::{
+            coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus,
+        };
 
         let spk = derivator.receive_at(index).script_pubkey();
         let descriptor = derivator.descriptor();

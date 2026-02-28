@@ -67,7 +67,6 @@ fn test_create_transaction_insufficient_funds() {
         "Error should indicate no spendable coins, got: {}",
         error_msg
     );
-
 }
 
 /// Tests drain transaction uses all UTXOs.
@@ -212,7 +211,6 @@ fn test_create_drain_transaction() {
         1,
         "Drain transaction should have exactly 1 recipient"
     );
-
 }
 
 /// Tests full flow: create SP output, scan, create tx, sign, broadcast, mine, rescan.
@@ -416,7 +414,6 @@ fn test_sign_and_broadcast_full_flow() {
         new_total,
         original_balance
     );
-
 }
 
 /// Tests sending to another SP wallet.
@@ -582,5 +579,4 @@ fn test_send_to_another_sp_wallet() {
         "Account2 should have received at least {} sats",
         send_amount.to_sat()
     );
-
 }

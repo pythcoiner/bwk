@@ -9,8 +9,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use common::{
-    test_config, test_mnemonic, test_outpoint, test_owned_output, test_spent_output,
-    MockBackend, TempDir,
+    test_config, test_mnemonic, test_outpoint, test_owned_output, test_spent_output, MockBackend,
+    TempDir,
 };
 
 use bwk_sp::{Account, AccountError, Config, Notification, SpCoinStore, SpLabelStore, SpTxStore};

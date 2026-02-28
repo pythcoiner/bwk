@@ -40,7 +40,6 @@ use bwk_sp::{Config, Notification, SpLabelStore};
 // The test implementations below are complete and ready to use once dependencies
 // are resolved. Each test documents exactly what it verifies.
 
-
 /// Test 10.4.1.1: Account connects to BlindbitD and reports online.
 ///
 /// This test verifies:
@@ -75,7 +74,6 @@ fn test_account_connects_to_blindbitd() {
     assert!(account.backend_online());
     let height = account.block_height().unwrap();
     assert!(height >= 100, "Expected height >= 100, got {}", height);
-
 }
 
 /// Test 10.4.1.2: Account reports correct block height as chain grows.
@@ -113,9 +111,7 @@ fn test_account_block_height_growth() {
     let height2 = account.block_height().unwrap();
     assert!(height2 >= 100, "Expected height >= 100, got {}", height2);
     assert!(height2 > height1, "Height should have grown");
-
 }
-
 
 /// Test 10.4.2.1: Scan blocks with no matching SP outputs.
 ///
@@ -151,7 +147,6 @@ fn test_scan_no_matches() {
         "Balance should be 0 with no SP outputs"
     );
     assert!(account.coins().is_empty(), "Coins should be empty");
-
 }
 
 /// Test 10.4.2.2: Scan and detect a single SP output.
@@ -285,7 +280,6 @@ fn test_scan_single_sp_output() {
         sp_txid,
         scanner.outpoints()
     );
-
 }
 
 /// Test 10.4.2.3: Scan and detect multiple SP outputs in different blocks.
@@ -421,9 +415,7 @@ fn test_scan_multiple_sp_outputs() {
             scanner.outpoints()
         );
     }
-
 }
-
 
 /// Test 10.4.3.1: Incremental scanning in multiple passes.
 ///
@@ -613,7 +605,6 @@ fn test_incremental_scanning() {
         scanner1.outpoints().contains(&expected_op1),
         "Should find second output"
     );
-
 }
 
 /// Test 10.4.3.2: Rescanning same range is idempotent.
@@ -658,9 +649,7 @@ fn test_rescan_idempotent() {
         balance_after_first, balance_after_second,
         "Balance should remain the same after rescan"
     );
-
 }
-
 
 /// Test 10.4.4.1: Notifications are sent during scanning.
 ///
@@ -713,7 +702,6 @@ fn test_scan_notifications() {
         saw_completed,
         "Should have received ScanCompleted notification"
     );
-
 }
 
 /// Test 10.4.4.2: NewOutput notification when SP output found.
@@ -889,9 +877,7 @@ fn test_new_output_notification() {
         notifications[0], expected_op,
         "Notification should contain correct outpoint"
     );
-
 }
-
 
 /// Test 10.4.5.1: Account data persists across reload.
 ///
@@ -950,9 +936,7 @@ fn test_persistence_after_scan() {
         0,
         "Balance should be 0 after reload"
     );
-
 }
-
 
 /// Test 10.4.6.1: Background scanner starts and stops correctly.
 ///
@@ -1010,7 +994,6 @@ fn test_background_scanner_start_stop() {
         !account.scanner_running(),
         "Scanner should not be running after stop"
     );
-
 }
 
 /// Test 10.4.6.3: Dropping account stops the scanner.
@@ -1047,14 +1030,13 @@ fn test_drop_stops_scanner() {
         assert!(account.scanner_running(), "Scanner should be running");
 
         // Account dropped here - scanner should auto-stop
-        }
+    }
 
     // 5. If we reach here without hanging, the test passes
     // The scanner thread should have stopped when account was dropped
 
     // Small sleep to let any background threads finish
     thread::sleep(Duration::from_millis(100));
-
 }
 
 /// Test 10.4.6.2: Background scanner detects new blocks.
@@ -1144,9 +1126,7 @@ fn test_background_scanner_detects_new_blocks() {
         received_progress,
         "Should have received scan progress or completion notification"
     );
-
 }
-
 
 /// Phase 10.4.7.1 - Label coin persists
 /// Tests that coin labels survive persistence/reload
@@ -1185,7 +1165,6 @@ fn test_label_coin_persists() {
         Some("rent payment".to_string()),
         "Label should persist across reload"
     );
-
 }
 
 /// Phase 10.4.7.2 - Label transaction
@@ -1219,7 +1198,10 @@ fn test_label_transaction() {
 
     // 6. Verify label persists by checking the label file directly
     let labels_path = config.labels_path();
-    assert!(labels_path.exists(), "Labels file should exist after persist");
+    assert!(
+        labels_path.exists(),
+        "Labels file should exist after persist"
+    );
 
     let label_store = SpLabelStore::from_file(labels_path).expect("load labels");
     assert_eq!(
@@ -1227,9 +1209,7 @@ fn test_label_transaction() {
         Some(&"groceries".to_string()),
         "Transaction label should persist"
     );
-
 }
-
 
 /// Test 10.4.8.1: Complete wallet flow - create, scan, check balance.
 ///
@@ -1402,7 +1382,6 @@ fn test_full_wallet_flow() {
             scanner.outpoints()
         );
     }
-
 }
 
 /// Test 10.4.8.2: Full wallet lifecycle - create, scan, persist, reload, verify.
@@ -1434,7 +1413,6 @@ fn test_full_wallet_lifecycle() {
 
     // 5. Phase 1: Scan, add labels, persist
     {
-
         // Scan blocks
         account
             .scan_blocks(Some(1), Some(100))
@@ -1509,7 +1487,6 @@ fn test_full_wallet_lifecycle() {
             "SP address should work after reload"
         );
     }
-
 }
 
 /// Test 10.4.8.3: Watch-only mode - scan without spending capability.
@@ -1568,7 +1545,6 @@ fn test_watch_only_mode() {
         "SP address should start with 'sp' or 'tsp', got: {}",
         addr_str
     );
-
 }
 
 /// Test 10.4.8.5: SP address generation is correct.
@@ -1607,6 +1583,4 @@ fn test_sp_address_generation() {
         "SP address should start with 'sp' or 'tsp', got: {}",
         addr_str
     );
-
 }
-

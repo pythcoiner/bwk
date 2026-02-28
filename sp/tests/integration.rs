@@ -34,11 +34,13 @@ fn test_stores_independent_persistence() {
 
     // Create and populate stores
     {
-        let mut coin_store = SpCoinStore::with_path(dir.path().join("coins.json")).enable_persist(true);
+        let mut coin_store =
+            SpCoinStore::with_path(dir.path().join("coins.json")).enable_persist(true);
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
-        let mut label_store = SpLabelStore::with_path(dir.path().join("labels.json")).enable_persist(true);
+        let mut label_store =
+            SpLabelStore::with_path(dir.path().join("labels.json")).enable_persist(true);
         label_store.set_outpoint(test_outpoint(), "test label".to_string());
         label_store.persist();
 
@@ -62,7 +64,8 @@ fn test_stores_independent_persistence() {
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_store = SpLabelStore::from_file(dir.path().join("labels.json")).expect("load labels");
+        let label_store =
+            SpLabelStore::from_file(dir.path().join("labels.json")).expect("load labels");
         assert_eq!(
             label_store.outpoint(&test_outpoint()),
             Some(&"test label".to_string())
@@ -71,7 +74,6 @@ fn test_stores_independent_persistence() {
         let tx_store = SpTxStore::from_file(dir.path().join("txs.json")).expect("load txs");
         assert_eq!(tx_store.transactions().len(), 1);
     }
-
 }
 
 // MockBackend Tests
@@ -130,7 +132,6 @@ fn test_config_with_all_options() {
 
     assert_eq!(config.dust_limit, Some(546));
     assert_eq!(config.birthday_height, Some(850000));
-
 }
 
 /// Test config persistence and reload.
@@ -156,7 +157,6 @@ fn test_config_persistence_roundtrip() {
     assert_eq!(loaded.network, config.network);
     assert_eq!(loaded.mnemonic, config.mnemonic);
     assert_eq!(loaded.blindbit_url, config.blindbit_url);
-
 }
 
 // Placeholder for future network-dependent tests
@@ -196,7 +196,6 @@ fn test_real_backend_connection() {
         "Block height should be at least 100, got {}",
         height
     );
-
 }
 
 /// This test verifies scanning with a real Blindbit backend.
@@ -245,7 +244,6 @@ fn test_real_backend_scan() {
     // 8. Verify state is consistent
     assert!(account.backend_online(), "Backend should still be online");
     assert_eq!(account.balance(), 0, "Balance should still be 0");
-
 }
 
 //
@@ -473,7 +471,6 @@ fn test_reorg_handling() {
     scanner2
         .scan_blocks(start, end2, None, with_cutthrough)
         .expect("rescan after reorg");
-
 }
 
 // 10.4.8+ Additional Flow Integration Tests
@@ -504,7 +501,8 @@ fn test_full_receive_flow() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist enabled
-    let (mut account, _config, _dir) = test_account_persistent_named("full-receive-test", &bbd.url());
+    let (mut account, _config, _dir) =
+        test_account_persistent_named("full-receive-test", &bbd.url());
 
     // 5. Get SP address (would be used to receive)
     let sp_address = account.sp_address();
@@ -546,7 +544,6 @@ fn test_full_receive_flow() {
         account.can_sign(),
         "Mnemonic-based account should be able to sign"
     );
-
 }
 
 // 10.4.9 Error Handling Integration Tests
@@ -598,7 +595,6 @@ fn test_scan_handles_network_error() {
             let _ = format!("{:?}", e); // Should not panic
         }
     }
-
 }
 
 // 10.4.10 Reorg Tests
@@ -872,7 +868,6 @@ fn test_double_spend_via_reorg() {
             .any(|op| op.txid == spend_a_txid),
         "Should NOT find outputs from Chain A's (orphaned) spend tx"
     );
-
 }
 
 /// Tests that attempting to create a transaction with already-spent outputs fails.
@@ -1130,7 +1125,8 @@ fn test_scan_state_consistent_after_crash() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true and scan some blocks
-    let (mut account, config, _dir) = test_account_persistent_named("test-crash-recovery", &bbd.url());
+    let (mut account, config, _dir) =
+        test_account_persistent_named("test-crash-recovery", &bbd.url());
     let state_path = config.state_path();
 
     // 5. Scan and persist
@@ -1206,7 +1202,6 @@ fn test_scan_state_consistent_after_crash() {
             }
         }
     }
-
 }
 
 /// Tests receiving funds while scan is running concurrently.
@@ -1412,7 +1407,6 @@ fn test_concurrent_funding_during_scan() {
         scanner2.outpoints().contains(&expected_op),
         "Should find SP output after concurrent funding"
     );
-
 }
 
 /// Tests unconfirmed transactions not counted in balance.
@@ -1439,7 +1433,10 @@ fn test_mempool_tx_not_counted_in_balance() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 101);
+    wait_for_sync_and_index(
+        &BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(),
+        101,
+    );
 
     // 4. Create Account with temp directory
     let dir = TempDir::new().unwrap();
@@ -1461,7 +1458,10 @@ fn test_mempool_tx_not_counted_in_balance() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 103);
+    wait_for_sync_and_index(
+        &BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(),
+        103,
+    );
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -1512,7 +1512,10 @@ fn test_mempool_tx_not_counted_in_balance() {
     // 12. Now mine the block containing the SP transaction
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), sp_tx_height);
+    wait_for_sync_and_index(
+        &BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(),
+        sp_tx_height,
+    );
 
     // 13. Scan again - now the output should be found
     account
@@ -1534,8 +1537,10 @@ fn test_mempool_tx_not_counted_in_balance() {
         "Should find output at {}:0",
         sp_txid
     );
-    assert!(account.balance() > 0, "Balance should be positive after mining");
-
+    assert!(
+        account.balance() > 0,
+        "Balance should be positive after mining"
+    );
 }
 
 // 10.4.13 Notification Integration Tests
@@ -1772,7 +1777,6 @@ fn test_notification_order_full_sequence() {
             "OutputFound notification should contain correct outpoint"
         );
     }
-
 }
 
 /// Tests multiple NewOutput notifications from one block.
@@ -1998,7 +2002,6 @@ fn test_notification_multiple_outputs_same_block() {
         "Should have 2 outputs recorded for block {}, got {}",
         sp_tx_height, total_outputs_in_target_block
     );
-
 }
 
 // 10.4.15 Transaction Building & Signing Integration Tests
@@ -2073,7 +2076,6 @@ fn test_birthday_height_skips_old_blocks() {
 
     // Scan completes without error, proving birthday_height is being used
     assert_eq!(account.balance(), 0, "Balance should still be 0");
-
 }
 
 /// Tests outputs before birthday are missed.
@@ -2201,7 +2203,6 @@ fn test_birthday_height_misses_earlier_outputs() {
         birthday_height,
         coins.len()
     );
-
 }
 
 /// Tests dust outputs are filtered.
@@ -2449,7 +2450,6 @@ fn test_dust_limit_filters_small_outputs() {
 
     // The key assertion is that scanning with dust_limit completes successfully
     // and the endpoint supports the feature (validated via info.validate_mode above)
-
 }
 
 /// Tests dust_limit=None accepts all outputs including tiny ones.
@@ -2706,7 +2706,6 @@ fn test_dust_limit_zero_accepts_all() {
         "Found output should match SP transaction"
     );
     assert_eq!(*found_amount, 330, "Found output should have 330 sats");
-
 }
 
 // 10.4.17 SP Address & Label Tests
@@ -2747,7 +2746,6 @@ fn test_sp_address_format_valid() {
         "SP address should start with 'sp' or 'tsp', got: {}",
         addr_str
     );
-
 }
 
 /// Tests same mnemonic produces same address.
@@ -2802,7 +2800,6 @@ fn test_sp_address_deterministic() {
         addr1, addr2,
         "SP addresses from same mnemonic should be identical"
     );
-
 }
 
 /// Tests different mnemonics produce different addresses.
@@ -2860,7 +2857,6 @@ fn test_sp_address_different_per_mnemonic() {
         addr1, addr2,
         "SP addresses from different mnemonics should be different"
     );
-
 }
 
 /// Tests receiving with labeled SP address.
@@ -3066,7 +3062,6 @@ fn test_receive_with_sp_label() {
         "Output should have the correct label (index {})",
         label_index
     );
-
 }
 
 // 10.4.18 Concurrency Integration Tests
@@ -3133,7 +3128,6 @@ fn test_concurrent_scan_and_read() {
 
     // 8. Join the thread (should not panic)
     let _account = read_handle.join().expect("read thread should not panic");
-
 }
 
 /// Tests concurrent label updates from multiple threads.
@@ -3286,7 +3280,6 @@ fn test_scanner_with_concurrent_api_calls() {
     let _account = read_handle
         .join()
         .expect("API call thread should not panic");
-
 }
 
 // 10.4.19 Persistence Timing Tests
@@ -3478,7 +3471,6 @@ fn test_persists_immediately_on_new_output() {
         outputs[0], expected_op,
         "Found output should match SP transaction"
     );
-
 }
 
 /// Tests no persist when no coins found.
@@ -3501,7 +3493,8 @@ fn test_no_persist_on_empty_scan() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let (mut account, config, _dir) = test_account_persistent_named("test-no-persist-empty", &bbd.url());
+    let (mut account, config, _dir) =
+        test_account_persistent_named("test-no-persist-empty", &bbd.url());
     let coins_path = config.coins_path();
 
     // 5. Scan empty blocks
@@ -3531,7 +3524,6 @@ fn test_no_persist_on_empty_scan() {
         );
         assert_eq!(account.balance(), 0, "Reloaded balance should be 0");
     }
-
 }
 
 /// Tests persist when output marked spent.

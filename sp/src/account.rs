@@ -1114,8 +1114,7 @@ impl Account {
             .ok_or_else(|| AccountError::Transaction("coin selection failed".to_string()))?;
 
         // Map selected outpoints back to (OutPoint, OwnedOutput)
-        let selected_outpoints: HashSet<OutPoint> =
-            selection.outpoints.into_iter().collect();
+        let selected_outpoints: HashSet<OutPoint> = selection.outpoints.into_iter().collect();
         let selected_utxos: Vec<(OutPoint, OwnedOutput)> = available_utxos
             .into_iter()
             .filter(|(op, _)| selected_outpoints.contains(op))
@@ -1129,8 +1128,7 @@ impl Account {
 
         let mut change_outputs = output_weights.clone();
         change_outputs.push(TR_OUTPUT_WEIGHT);
-        let weight_with_change =
-            bwk_tx::estimated_weight_raw(&input_weights, &change_outputs);
+        let weight_with_change = bwk_tx::estimated_weight_raw(&input_weights, &change_outputs);
 
         let fee_result = bwk_tx::process_fees(
             fees,
@@ -1203,8 +1201,7 @@ impl Account {
         }
 
         let inputs_total: u64 = selected_utxos.iter().map(|(_, o)| o.amount.to_sat()).sum();
-        let input_weights: Vec<u64> =
-            vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
+        let input_weights: Vec<u64> = vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
         let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT]; // single recipient
 
         let weight_wo_change = bwk_tx::estimated_weight_raw(&input_weights, &output_weights);

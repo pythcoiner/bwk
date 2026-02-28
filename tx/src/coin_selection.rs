@@ -38,8 +38,7 @@ impl Selection {
         let mut fees = 0;
         let mut outpoints = vec![];
         for c in coins {
-            let fee =
-                Weight::from_wu(c.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000;
+            let fee = Weight::from_wu(c.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000;
             fees += fee;
             spendable_amount += c.value_sat() - fee;
             outpoints.push(c.outpoint());
@@ -58,10 +57,7 @@ pub fn fees<T: CoinCandidate>(coin: &T, feerate: u64 /* msats/vb */) -> u64 {
 }
 
 // Sort out coins if fees >= spendable value
-pub fn discard_dust<T: CoinCandidate>(
-    coins: Vec<&T>,
-    feerate: u64, /* msats/vb */
-) -> Vec<&T> {
+pub fn discard_dust<T: CoinCandidate>(coins: Vec<&T>, feerate: u64 /* msats/vb */) -> Vec<&T> {
     coins
         .into_iter()
         .filter(|c| {

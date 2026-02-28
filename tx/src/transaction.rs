@@ -168,10 +168,7 @@ pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Weight {
 ///
 /// * `input_satisfaction_weights` - satisfaction weight in WU for each input
 /// * `output_weights` - weight in WU for each output
-pub fn estimated_weight_raw(
-    input_satisfaction_weights: &[u64],
-    output_weights: &[u64],
-) -> Weight {
+pub fn estimated_weight_raw(input_satisfaction_weights: &[u64], output_weights: &[u64]) -> Weight {
     // Fixed overhead: version(4) + locktime(4) + input_count(1) + output_count(1) = 10 bytes
     // In weight units (non-witness): 10 * 4 = 40 WU
     // Plus segwit marker+flag: 2 WU

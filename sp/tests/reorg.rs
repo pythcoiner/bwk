@@ -11,7 +11,6 @@ use bwk_utils::test as bwk_test;
 
 use common::{test_mnemonic, wait_for_sync_and_index};
 
-
 /// Tests detection of reorg via block hash mismatch.
 ///
 /// This test verifies that after a reorg, block hashes change at
@@ -62,7 +61,6 @@ fn test_reorg_detection_block_hash_mismatch() {
     // 9. Verify backend sees correct height
     let backend_height = backend.block_height().unwrap().to_consensus_u32();
     assert_eq!(backend_height, 24, "Backend should see new chain height");
-
 }
 
 /// Tests that coins from orphaned blocks are removed after rescan.
@@ -221,7 +219,6 @@ fn test_reorg_removes_orphaned_coins() {
             with_cutthrough,
         )
         .expect("rescan after reorg");
-
 }
 
 /// Tests coin reappears if re-included in new chain after reorg.
@@ -379,7 +376,6 @@ fn test_reorg_coin_reappears_in_new_chain() {
         scanner2.outpoints().contains(&expected_op),
         "Should find same SP output in new chain"
     );
-
 }
 
 /// Tests handling of deep (multi-block) reorganization.
@@ -438,7 +434,6 @@ fn test_reorg_deep_reorganization() {
     // 8. Verify backend sees new chain
     let backend_height = backend.block_height().unwrap().to_consensus_u32();
     assert_eq!(backend_height, 119, "Backend should see new chain at 119");
-
 }
 
 /// Tests spent status reset after reorg orphans spending tx.
@@ -726,4 +721,3 @@ fn test_reorg_spent_status_reset() {
     // - Whether the backend supports spent detection
     // This test verifies the wallet handles the reorg gracefully
 }
-

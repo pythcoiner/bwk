@@ -273,9 +273,7 @@ impl Client {
         loop {
             if let Ok(NetworkMessage::GetData(inv_list)) = receiver.try_recv() {
                 let found = inv_list.iter().any(|i| match i {
-                    Inventory::Transaction(id) | Inventory::WitnessTransaction(id) => {
-                        *id == txid
-                    }
+                    Inventory::Transaction(id) | Inventory::WitnessTransaction(id) => *id == txid,
                     _ => false,
                 });
                 if found {
@@ -416,7 +414,11 @@ mod tests {
             if attempt < MAX_RETRIES {
                 eprintln!("Only {}% succeeded, retrying...", success * 100 / len);
             } else {
-                panic!("Only {}% succeeded after {} attempts!", success * 100 / len, MAX_RETRIES);
+                panic!(
+                    "Only {}% succeeded after {} attempts!",
+                    success * 100 / len,
+                    MAX_RETRIES
+                );
             }
         }
     }
