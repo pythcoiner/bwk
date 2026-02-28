@@ -6,7 +6,6 @@
 //! - Temporary directory helpers for persistence tests
 //! - Blindbitd helpers for integration tests (Phase 10.4)
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{thread, time::Duration};
 
@@ -314,31 +313,7 @@ pub fn test_spent_output(height: u32, amount: u64) -> OwnedOutput {
     }
 }
 
-/// Creates a unique temporary directory for tests.
-///
-/// The directory is created under the system temp directory with a unique name
-/// based on the current timestamp and a random suffix.
-///
-/// Note: The caller is responsible for cleaning up the directory after the test.
-pub fn temp_dir() -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let dir = std::env::temp_dir().join(format!("bwk-sp-test-{}", timestamp));
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
-/// Cleanup helper for temporary directories.
-///
-/// Removes the directory and all its contents. Ignores errors.
-pub fn cleanup_temp_dir(path: &std::path::Path) {
-    let _ = std::fs::remove_dir_all(path);
-}
+pub use bwk_utils::test::TempDir;
 
 //=============================================================================
 // Blindbitd Helpers (Phase 10.4)
@@ -639,15 +614,13 @@ mod tests {
 
     #[test]
     fn test_test_config() {
-        let dir = temp_dir();
-        let config = test_config(&dir);
+        let dir = TempDir::new().unwrap();
+        let config = test_config(dir.path());
 
         assert_eq!(config.account_name, "test-account");
         assert_eq!(config.network, bitcoin::Network::Signet);
         assert!(!config.persist);
         assert!(config.mnemonic.is_some());
-
-        cleanup_temp_dir(&dir);
     }
 
     #[test]
@@ -687,11 +660,9 @@ mod tests {
 
     #[test]
     fn test_temp_dir_creation() {
-        let dir = temp_dir();
-        assert!(dir.exists());
-        assert!(dir.is_dir());
-
-        cleanup_temp_dir(&dir);
-        assert!(!dir.exists());
+        let dir = TempDir::new().unwrap();
+        assert!(dir.path().exists());
+        assert!(dir.path().is_dir());
+        // TempDir auto-cleans on Drop
     }
 }

@@ -19,8 +19,8 @@ use blindbitd::BlindbitD;
 use bwk_utils::test as bwk_test;
 
 use common::{
-    cleanup_temp_dir, temp_dir, test_config, test_mnemonic, test_outpoint, test_owned_output,
-    wait_for_sync_and_index, MockBackend, MockBlock,
+    test_config, test_mnemonic, test_outpoint, test_owned_output, wait_for_sync_and_index,
+    MockBackend, MockBlock, TempDir,
 };
 
 use bwk_sp::{Config, Notification, SpCoinStore, SpLabelStore, SpTxStore};
@@ -32,19 +32,19 @@ use bwk_sp::{Config, Notification, SpCoinStore, SpLabelStore, SpTxStore};
 /// Test that multiple stores can coexist and persist independently.
 #[test]
 fn test_stores_independent_persistence() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Create and populate stores
     {
-        let mut coin_store = SpCoinStore::with_path(dir.join("coins.json")).enable_persist(true);
+        let mut coin_store = SpCoinStore::with_path(dir.path().join("coins.json")).enable_persist(true);
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
-        let mut label_store = SpLabelStore::with_path(dir.join("labels.json")).enable_persist(true);
+        let mut label_store = SpLabelStore::with_path(dir.path().join("labels.json")).enable_persist(true);
         label_store.set_outpoint(test_outpoint(), "test label".to_string());
         label_store.persist();
 
-        let mut tx_store = SpTxStore::with_path(dir.join("txs.json")).enable_persist(true);
+        let mut tx_store = SpTxStore::with_path(dir.path().join("txs.json")).enable_persist(true);
         tx_store.insert(bwk_sp::SpTxEntry {
             txid: test_outpoint().txid,
             tx: None,
@@ -60,21 +60,20 @@ fn test_stores_independent_persistence() {
 
     // Load and verify stores
     {
-        let coin_store = SpCoinStore::from_file(dir.join("coins.json")).expect("load coins");
+        let coin_store = SpCoinStore::from_file(dir.path().join("coins.json")).expect("load coins");
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_store = SpLabelStore::from_file(dir.join("labels.json")).expect("load labels");
+        let label_store = SpLabelStore::from_file(dir.path().join("labels.json")).expect("load labels");
         assert_eq!(
             label_store.outpoint(&test_outpoint()),
             Some(&"test label".to_string())
         );
 
-        let tx_store = SpTxStore::from_file(dir.join("txs.json")).expect("load txs");
+        let tx_store = SpTxStore::from_file(dir.path().join("txs.json")).expect("load txs");
         assert_eq!(tx_store.transactions().len(), 1);
     }
 
-    cleanup_temp_dir(&dir);
 }
 
 //=============================================================================
@@ -129,29 +128,28 @@ fn test_mock_backend_retry_simulation() {
 /// Test config with all fields set.
 #[test]
 fn test_config_with_all_options() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
-    let mut config = test_config(&dir);
+    let mut config = test_config(dir.path());
     config.set_dust_limit(Some(546));
     config.set_birthday_height(Some(850000));
 
     assert_eq!(config.dust_limit, Some(546));
     assert_eq!(config.birthday_height, Some(850000));
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test config persistence and reload.
 #[test]
 fn test_config_persistence_roundtrip() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     let config = Config::new(
         "persistence-test".to_string(),
         bitcoin::Network::Signet,
         test_mnemonic().to_string(),
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     );
 
     // Enable persist and save
@@ -165,7 +163,6 @@ fn test_config_persistence_roundtrip() {
     assert_eq!(loaded.mnemonic, config.mnemonic);
     assert_eq!(loaded.blindbit_url, config.blindbit_url);
 
-    cleanup_temp_dir(&dir);
 }
 
 //=============================================================================
@@ -195,13 +192,13 @@ fn test_real_backend_connection() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account pointing to real backend
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-real-backend".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -219,7 +216,6 @@ fn test_real_backend_connection() {
     );
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -246,13 +242,13 @@ fn test_real_backend_scan() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account pointing to real backend
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-real-scan".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -281,7 +277,6 @@ fn test_real_backend_scan() {
     assert_eq!(account.balance(), 0, "Balance should still be 0");
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -337,7 +332,7 @@ use bwk_sp::{Account, AccountError};
 /// Test that Account::new fails when neither mnemonic nor scan_sk is provided.
 #[test]
 fn test_account_new_invalid_no_keys() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Create config with no mnemonic and no scan_sk
     let mut config = Config::new(
@@ -345,7 +340,7 @@ fn test_account_new_invalid_no_keys() {
         bitcoin::Network::Signet,
         test_mnemonic().to_string(),
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -363,20 +358,19 @@ fn test_account_new_invalid_no_keys() {
         Ok(_) => panic!("expected error, got Ok"),
     }
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test that Account::new fails with an invalid mnemonic.
 #[test]
 fn test_account_new_invalid_bad_mnemonic() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     let config = Config::new(
         "bad-mnemonic".to_string(),
         bitcoin::Network::Signet,
         "invalid mnemonic words that are not valid".to_string(),
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -390,13 +384,12 @@ fn test_account_new_invalid_bad_mnemonic() {
         Ok(_) => panic!("expected error, got Ok"),
     }
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test that Account::new fails with invalid hex scan_sk.
 #[test]
 fn test_account_new_invalid_bad_hex_key() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Use Config::from_keys with invalid hex
     let result = Config::from_keys(
@@ -405,26 +398,25 @@ fn test_account_new_invalid_bad_hex_key() {
         "not_valid_hex_at_all_should_fail_validation".to_string(),
         "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     );
 
     // Config::from_keys should fail with invalid hex
     assert!(result.is_err());
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test that Account::new fails with an empty blindbit_url.
 #[test]
 fn test_account_new_invalid_empty_url() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     let config = Config::new(
         "empty-url".to_string(),
         bitcoin::Network::Signet,
         test_mnemonic().to_string(),
         String::new(), // Empty URL
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -438,7 +430,6 @@ fn test_account_new_invalid_empty_url() {
         Ok(_) => panic!("expected error, got Ok"),
     }
 
-    cleanup_temp_dir(&dir);
 }
 
 //-----------------------------------------------------------------------------
@@ -545,9 +536,9 @@ fn test_notification_output_events() {
 /// Since Account construction requires network, we test the config structure.
 #[test]
 fn test_config_for_hot_key_signing() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
-    let config = test_config(&dir);
+    let config = test_config(dir.path());
 
     // A config with mnemonic should enable signing
     assert!(config.mnemonic.is_some());
@@ -556,14 +547,13 @@ fn test_config_for_hot_key_signing() {
     // The mnemonic is valid, so Account would have can_sign() == true
     // (We can't create the Account without a real backend)
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test that Config with scan_sk and public spend_key would NOT enable signing.
 /// This represents a watch-only wallet.
 #[test]
 fn test_config_for_signing_device_watch_only() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Create config with scan_sk and a PUBLIC spend_key (66 hex chars = 33 bytes)
     let config = Config::from_keys(
@@ -572,7 +562,7 @@ fn test_config_for_signing_device_watch_only() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         "02fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(), // pubkey
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .expect("valid config");
 
@@ -583,13 +573,12 @@ fn test_config_for_signing_device_watch_only() {
 
     // spend_key is 66 chars = public key, so Account.can_sign() would be false
 
-    cleanup_temp_dir(&dir);
 }
 
 /// Test that Config with scan_sk and secret spend_key WOULD enable signing.
 #[test]
 fn test_config_for_signing_device_hot() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Create config with scan_sk and a SECRET spend_key (64 hex chars = 32 bytes)
     let config = Config::from_keys(
@@ -598,7 +587,7 @@ fn test_config_for_signing_device_hot() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
         "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(), // secret
         "https://blindbit.example.com".to_string(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .expect("valid config");
 
@@ -608,7 +597,6 @@ fn test_config_for_signing_device_hot() {
     assert!(config.spend_key.is_some());
     assert_eq!(config.spend_key.as_ref().unwrap().len(), 64);
 
-    cleanup_temp_dir(&dir);
 }
 
 //-----------------------------------------------------------------------------
@@ -904,13 +892,13 @@ fn test_account_connects_to_blindbitd() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let account = bwk_sp::Account::new(config).unwrap();
@@ -921,7 +909,6 @@ fn test_account_connects_to_blindbitd() {
     assert!(height >= 100, "Expected height >= 100, got {}", height);
 
     // 6. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -946,13 +933,13 @@ fn test_account_block_height_growth() {
     wait_for_sync_and_index(&backend, 50);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let account = bwk_sp::Account::new(config).unwrap();
@@ -971,7 +958,6 @@ fn test_account_block_height_growth() {
     assert!(height2 > height1, "Height should have grown");
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -1001,13 +987,13 @@ fn test_scan_no_matches() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let mut account = bwk_sp::Account::new(config).unwrap();
@@ -1024,7 +1010,6 @@ fn test_scan_no_matches() {
     assert!(account.coins().is_empty(), "Coins should be empty");
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -1047,9 +1032,7 @@ fn test_scan_no_matches() {
 #[test]
 fn test_scan_single_sp_output() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -1079,24 +1062,7 @@ fn test_scan_single_sp_output() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -1191,9 +1157,7 @@ fn test_scan_single_sp_output() {
 #[test]
 fn test_scan_multiple_sp_outputs() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -1223,21 +1187,6 @@ fn test_scan_multiple_sp_outputs() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation paths for indices 0, 1, 2
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
 
     let sp_address = sp_client.get_receiving_address();
     let mut sp_txids = Vec::new();
@@ -1245,9 +1194,7 @@ fn test_scan_multiple_sp_outputs() {
 
     // Create 3 SP outputs in separate blocks
     for i in 0..3 {
-        let path = base_path.child(ChildNumber::from_normal_idx(i).expect("child number"));
-        let taproot_addr = tr_derivator.receive_at(i);
-        let sk = tr_signer.private_key_at(&path);
+        let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address
         let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -1351,9 +1298,7 @@ fn test_scan_multiple_sp_outputs() {
 #[test]
 fn test_incremental_scanning() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -1383,28 +1328,11 @@ fn test_incremental_scanning() {
     // 5. Create taproot signer from the SAME mnemonic
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path base
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
 
     let sp_address = sp_client.get_receiving_address();
 
     // --- First SP output in block ~106 ---
-    let path0 = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr0 = tr_derivator.receive_at(0);
-    let sk0 = tr_signer.private_key_at(&path0);
+    let (taproot_addr0, sk0) = tr_signer.taproot_receive_address_and_key(0);
 
     // Fund the taproot address
     let fund_txid0 = bwk_test::send(bitcoind, taproot_addr0.clone(), 0.1).expect("fund taproot");
@@ -1484,9 +1412,7 @@ fn test_incremental_scanning() {
     );
 
     // --- Second SP output in block ~116 ---
-    let path1 = base_path.child(ChildNumber::from_normal_idx(1).expect("child number"));
-    let taproot_addr1 = tr_derivator.receive_at(1);
-    let sk1 = tr_signer.private_key_at(&path1);
+    let (taproot_addr1, sk1) = tr_signer.taproot_receive_address_and_key(1);
 
     // Fund the taproot address
     let fund_txid1 = bwk_test::send(bitcoind, taproot_addr1.clone(), 0.1).expect("fund taproot");
@@ -1576,13 +1502,13 @@ fn test_rescan_idempotent() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let mut account = bwk_sp::Account::new(config).unwrap();
@@ -1608,7 +1534,6 @@ fn test_rescan_idempotent() {
     );
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -1637,13 +1562,13 @@ fn test_scan_notifications() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let mut account = bwk_sp::Account::new(config).unwrap();
@@ -1678,7 +1603,6 @@ fn test_scan_notifications() {
     );
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -1696,10 +1620,8 @@ fn test_new_output_notification() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -1773,24 +1695,7 @@ fn test_new_output_notification() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -1907,13 +1812,13 @@ fn test_persistence_after_scan() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -1955,7 +1860,6 @@ fn test_persistence_after_scan() {
     );
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -1987,13 +1891,13 @@ fn test_background_scanner_start_stop() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     let mut account = bwk_sp::Account::new(config).unwrap();
@@ -2030,7 +1934,6 @@ fn test_background_scanner_start_stop() {
     );
 
     // 11. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2056,13 +1959,13 @@ fn test_drop_stops_scanner() {
 
     // 4. Create Account and start scanner in a scope
     {
-        let dir = temp_dir();
+        let dir = TempDir::new().unwrap();
         let config = Config::new(
             "test-drop-scanner".to_string(),
             bitcoin::Network::Regtest,
             test_mnemonic().to_string(),
             bbd.url(),
-            dir.clone(),
+            dir.path().to_path_buf(),
         )
         .enable_persist(false);
 
@@ -2079,8 +1982,7 @@ fn test_drop_stops_scanner() {
 
         // Account dropped here - scanner should auto-stop
         // This tests that Drop implementation handles scanner cleanup
-        cleanup_temp_dir(&dir);
-    }
+        }
 
     // 5. If we reach here without hanging, the test passes
     // The scanner thread should have stopped when account was dropped
@@ -2119,14 +2021,14 @@ fn test_background_scanner_detects_new_blocks() {
     wait_for_sync_and_index(&backend, 101);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let mnemonic_str = test_mnemonic();
     let config = Config::new(
         "test-bg-scanner-new-blocks".to_string(),
         bitcoin::Network::Regtest,
         mnemonic_str.to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -2181,7 +2083,6 @@ fn test_background_scanner_detects_new_blocks() {
     );
 
     // 12. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2211,13 +2112,13 @@ fn test_label_coin_persists() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-label-coin".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -2245,7 +2146,6 @@ fn test_label_coin_persists() {
     }
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2271,13 +2171,13 @@ fn test_label_transaction() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-label-tx".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -2309,7 +2209,6 @@ fn test_label_transaction() {
     );
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2330,9 +2229,7 @@ fn test_label_transaction() {
 #[test]
 fn test_full_wallet_flow() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -2362,21 +2259,6 @@ fn test_full_wallet_flow() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build base path
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
 
     let sp_address = sp_client.get_receiving_address();
     let mut sp_txids = Vec::new();
@@ -2390,9 +2272,7 @@ fn test_full_wallet_flow() {
 
     for (i, amount) in amounts.iter().enumerate() {
         let i = i as u32;
-        let path = base_path.child(ChildNumber::from_normal_idx(i).expect("child number"));
-        let taproot_addr = tr_derivator.receive_at(i);
-        let sk = tr_signer.private_key_at(&path);
+        let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address
         let fund_txid =
@@ -2473,13 +2353,13 @@ fn test_full_wallet_flow() {
     );
 
     // 7. Create Account and manually populate coin store with scanned outputs
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-full-wallet-flow".to_string(),
         network,
         mnemonic_str.to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -2509,7 +2389,6 @@ fn test_full_wallet_flow() {
     }
 
     // 11. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2536,13 +2415,13 @@ fn test_full_wallet_lifecycle() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "lifecycle-test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -2629,7 +2508,6 @@ fn test_full_wallet_lifecycle() {
     }
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2656,14 +2534,14 @@ fn test_watch_only_mode() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create watch-only config with scan_sk and PUBLIC spend_key (66 hex chars = 33 bytes)
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::from_keys(
         "watch-only-test".to_string(),
         bitcoin::Network::Regtest,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), // scan_sk (secret)
         "02fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(), // public spend key (66 chars)
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .expect("valid config");
 
@@ -2691,7 +2569,6 @@ fn test_watch_only_mode() {
     );
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2716,13 +2593,13 @@ fn test_sp_address_generation() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-sp-address-gen".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -2743,7 +2620,6 @@ fn test_sp_address_generation() {
     );
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -2767,9 +2643,7 @@ fn test_sp_address_generation() {
 #[test]
 fn test_reorg_handling() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
@@ -2800,23 +2674,7 @@ fn test_reorg_handling() {
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -3006,13 +2864,13 @@ fn test_full_receive_flow() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist enabled
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "full-receive-test".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -3060,7 +2918,6 @@ fn test_full_receive_flow() {
     );
 
     // 10. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -3075,7 +2932,7 @@ fn test_full_receive_flow() {
 /// - Error handling is graceful (no panics)
 #[test]
 fn test_scan_handles_network_error() {
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
 
     // Create config with invalid URL that will fail to connect
     let config = Config::new(
@@ -3083,7 +2940,7 @@ fn test_scan_handles_network_error() {
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         "http://invalid.local:12345".to_string(), // Invalid URL - will fail
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -3116,7 +2973,6 @@ fn test_scan_handles_network_error() {
         }
     }
 
-    cleanup_temp_dir(&dir);
 }
 
 //=============================================================================
@@ -3186,9 +3042,7 @@ fn test_reorg_detection_block_hash_mismatch() {
 #[test]
 fn test_reorg_removes_orphaned_coins() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
@@ -3218,18 +3072,7 @@ fn test_reorg_removes_orphaned_coins() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
@@ -3360,9 +3203,7 @@ fn test_reorg_removes_orphaned_coins() {
 #[test]
 fn test_reorg_coin_reappears_in_new_chain() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
@@ -3392,18 +3233,7 @@ fn test_reorg_coin_reappears_in_new_chain() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
@@ -3595,10 +3425,8 @@ fn test_reorg_spent_status_reset() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
@@ -3667,18 +3495,7 @@ fn test_reorg_spent_status_reset() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund");
@@ -3898,10 +3715,8 @@ fn test_double_spend_via_reorg() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
@@ -3967,18 +3782,7 @@ fn test_double_spend_via_reorg() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund");
@@ -4184,10 +3988,8 @@ fn test_double_spend_attempt_rejected() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -4254,18 +4056,7 @@ fn test_double_spend_attempt_rejected() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund");
@@ -4443,13 +4234,13 @@ fn test_scan_state_consistent_after_crash() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true and scan some blocks
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-crash-recovery".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -4536,7 +4327,6 @@ fn test_scan_state_consistent_after_crash() {
     }
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -4549,10 +4339,8 @@ fn test_scan_state_consistent_after_crash() {
 #[test]
 fn test_concurrent_funding_during_scan() {
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -4621,18 +4409,7 @@ fn test_concurrent_funding_during_scan() {
     let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("desc")
-        .spk_derivator(network)
-        .expect("derivator");
-    let base_path = tr_path(network, ChildNumber::from_hardened_idx(0).expect("cn")).expect("path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("cn"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 5. Fund taproot address and create SP output
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
@@ -4762,70 +4539,21 @@ fn test_concurrent_funding_during_scan() {
 
 /// Tests unconfirmed transactions not counted in balance.
 ///
-/// This test verifies:
+/// This test verifies using bwk_sp::Account:
 /// - SP output in mempool (unconfirmed) is not detected by scanning blocks
 /// - Balance remains 0 until the transaction is mined
 /// - After mining, the output is detected and balance is updated
 #[test]
 fn test_mempool_tx_not_counted_in_balance() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
+    use bwk_sp::{Account, Config};
+    use common::{generate_recipient_pubkey, swap_to_sp, TempDir};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -4833,39 +4561,29 @@ fn test_mempool_tx_not_counted_in_balance() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 101);
 
-    // 4. Setup SP client and taproot signer with the same mnemonic
+    // 4. Create Account with temp directory
+    let dir = TempDir::new().unwrap();
     let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let config = Config::new(
+        "test-mempool".to_string(),
+        network,
+        mnemonic_str.to_string(),
+        bbd.url(),
+        dir.path().to_path_buf(),
+    );
+    let mut account = Account::new(config).expect("create account");
 
-    // 5. Create taproot signer
+    // 5. Create taproot signer for funding
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -4879,7 +4597,7 @@ fn test_mempool_tx_not_counted_in_balance() {
     };
 
     // 8. Create SP transaction
-    let sp_address = sp_client.get_receiving_address();
+    let sp_address = account.sp_address();
     let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
         .expect("generate recipient pubkey");
 
@@ -4903,71 +4621,29 @@ fn test_mempool_tx_not_counted_in_balance() {
     thread::sleep(Duration::from_secs(2));
 
     // 10. Scan BLOCKS (not mempool) - should NOT find the output
-    let found_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let updater = OutputCollector {
-        found_outputs: found_outputs.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan all blocks so far
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(103).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
+    account.scan_blocks(Some(1), Some(103)).expect("scan");
 
     // 11. Verify mempool tx is NOT in balance
     assert_eq!(
-        scanner.outpoints().len(),
+        account.coins().len(),
         0,
         "Mempool tx should NOT be found when scanning blocks"
     );
-    {
-        let outputs = found_outputs.lock().expect("poisoned");
-        assert!(
-            outputs.is_empty(),
-            "No outputs should be found from mempool tx"
-        );
-    }
+    assert_eq!(account.balance(), 0, "Balance should be 0 with mempool tx");
 
     // 12. Now mine the block containing the SP transaction
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), sp_tx_height);
 
     // 13. Scan again - now the output should be found
-    let found_outputs2 = Arc::new(Mutex::new(HashMap::new()));
-    let updater2 = OutputCollector {
-        found_outputs: found_outputs2.clone(),
-    };
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client.clone(),
-        updater2,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    let end2 = Height::from_consensus(sp_tx_height).unwrap();
-    scanner2
-        .scan_blocks(start, end2, None, with_cutthrough)
+    account
+        .scan_blocks(Some(104), Some(sp_tx_height))
         .expect("scan after mine");
 
     // 14. Verify the output is now found
     assert_eq!(
-        scanner2.outpoints().len(),
+        account.coins().len(),
         1,
         "After mining, the SP output should be found"
     );
@@ -4976,18 +4652,11 @@ fn test_mempool_tx_not_counted_in_balance() {
         vout: 0,
     };
     assert!(
-        scanner2.outpoints().contains(&expected_op),
+        account.coins().contains_key(&expected_op),
         "Should find output at {}:0",
         sp_txid
     );
-    {
-        let outputs = found_outputs2.lock().expect("poisoned");
-        assert_eq!(
-            outputs.len(),
-            1,
-            "Should have exactly 1 output after mining"
-        );
-    }
+    assert!(account.balance() > 0, "Balance should be positive after mining");
 
     // 15. Cleanup
     drop(bbd);
@@ -5006,10 +4675,8 @@ fn test_notification_order_full_sequence() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -5102,24 +4769,7 @@ fn test_notification_order_full_sequence() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -5261,10 +4911,8 @@ fn test_notification_multiple_outputs_same_block() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -5344,21 +4992,6 @@ fn test_notification_multiple_outputs_same_block() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation paths for indices 0, 1
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
 
     let sp_address = sp_client.get_receiving_address();
     let mut sp_txids = Vec::new();
@@ -5366,9 +4999,7 @@ fn test_notification_multiple_outputs_same_block() {
     // First, fund ALL taproot addresses and mine them
     let mut funding_data = Vec::new();
     for i in 0..2u32 {
-        let path = base_path.child(ChildNumber::from_normal_idx(i).expect("child number"));
-        let taproot_addr = tr_derivator.receive_at(i);
-        let sk = tr_signer.private_key_at(&path);
+        let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address (don't mine yet)
         let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -5502,237 +5133,6 @@ fn test_notification_multiple_outputs_same_block() {
 // 10.4.15 Transaction Building & Signing Integration Tests
 //=============================================================================
 
-/// Tests transaction creation with real scanned UTXOs.
-///
-/// This test verifies:
-/// - SpScanner can scan and detect SP outputs
-/// - SpClient.create_new_transaction works with valid recipient and amount
-/// - Returns unsigned transaction with correct inputs/outputs
-#[test]
-fn test_create_transaction_with_real_utxos() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::Amount;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
-    use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
-
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let network = bitcoin::Network::Regtest;
-
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
-
-    // 4. Setup SP client and taproot signer with the same mnemonic
-    let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
-
-    // 5. Create taproot signer
-    let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
-        .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build base path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
-
-    // 6. Fund the taproot address with 0.5 BTC
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
-
-    // 7. Get the funded UTXO
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
-    let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
-        .into_iter()
-        .next()
-        .expect("find txout");
-    let outpoint = OutPoint {
-        txid: fund_txid,
-        vout: index as u32,
-    };
-
-    // 8. Create SP transaction
-    let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
-        .expect("generate recipient pubkey");
-
-    let sp_tx = swap_to_sp(
-        sk,
-        outpoint,
-        txout,
-        recipient_pubkey,
-        bitcoin::Amount::from_sat(1000),
-        &secp,
-    )
-    .expect("create sp tx");
-
-    // 9. Broadcast and mine
-    let sp_txid = sp_tx.compute_txid();
-    bitcoind
-        .send_raw_transaction(&sp_tx)
-        .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
-
-    // 10. Create scanner with output collector
-    let found_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let updater = OutputCollector {
-        found_outputs: found_outputs.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
-
-    // 11. Verify we found the coin
-    assert_eq!(scanner.outpoints().len(), 1, "Should have 1 coin");
-    let expected_op = OutPoint {
-        txid: sp_txid,
-        vout: 0,
-    };
-    assert!(
-        scanner.outpoints().contains(&expected_op),
-        "Should find output at {}:0",
-        sp_txid
-    );
-
-    // 12. Get the owned outputs from collector
-    let owned_outputs = found_outputs.lock().expect("poisoned");
-    assert_eq!(owned_outputs.len(), 1, "Should have 1 owned output");
-
-    // Convert to available UTXOs format
-    let available_utxos: Vec<_> = owned_outputs
-        .iter()
-        .map(|(op, o)| (*op, o.clone()))
-        .collect();
-
-    // 13. Create a transaction to send some funds to another SP address
-    let send_amount = Amount::from_sat(100_000); // 0.001 BTC
-    let recipient_addr = RecipientAddress::SpAddress(sp_client.get_receiving_address());
-    let recipients = vec![Recipient {
-        address: recipient_addr,
-        amount: send_amount,
-    }];
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
-
-    let unsigned_tx = sp_client
-        .create_new_transaction(available_utxos, recipients, fee_rate, network)
-        .expect("create transaction");
-
-    // 14. Verify the unsigned transaction structure
-    assert!(
-        !unsigned_tx.selected_utxos.is_empty(),
-        "Transaction should have at least 1 input"
-    );
-
-    // Verify our SP output is used as input
-    assert!(
-        unsigned_tx
-            .selected_utxos
-            .iter()
-            .any(|(op, _)| *op == expected_op),
-        "Transaction should use our SP output as input"
-    );
-
-    // Verify recipients (should have at least the send recipient, possibly change)
-    assert!(
-        !unsigned_tx.recipients.is_empty(),
-        "Transaction should have at least 1 recipient"
-    );
-
-    // 15. Cleanup
-    drop(bbd);
-}
-
 /// Tests error on insufficient funds for transaction.
 ///
 /// This test verifies that create_transaction returns an error when
@@ -5757,13 +5157,13 @@ fn test_create_transaction_insufficient_funds() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with no coins (fresh account)
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-insufficient-funds".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -5800,77 +5200,29 @@ fn test_create_transaction_insufficient_funds() {
     );
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
 /// Tests drain transaction uses all UTXOs.
 ///
 /// This test verifies:
-/// - SpScanner detects multiple SP outputs
-/// - SpClient.create_drain_transaction uses ALL available UTXOs
+/// - Account detects multiple SP outputs
+/// - Account.create_drain_transaction uses ALL available UTXOs
 /// - The resulting transaction has a single output (drain target)
 /// - All coins are used as inputs
 #[test]
 fn test_create_drain_transaction() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{FeeRate, OwnedOutput, RecipientAddress, SpClient, SpScanner, Updater};
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
+    use bwk_sp::{Account, Config};
+    use bwk_tx::Fees;
+    use common::{generate_recipient_pubkey, swap_to_sp, TempDir};
+    use spdk_core::RecipientAddress;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -5878,48 +5230,38 @@ fn test_create_drain_transaction() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 101);
 
-    // 4. Setup SP client and taproot signer with the same mnemonic
+    // 4. Create Account with temp directory
+    let dir = TempDir::new().unwrap();
     let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let config = Config::new(
+        "test-drain".to_string(),
+        network,
+        mnemonic_str.to_string(),
+        bbd.url(),
+        dir.path().to_path_buf(),
+    );
+    let mut account = Account::new(config).expect("create account");
 
-    // 5. Create taproot signer
+    // 5. Create taproot signer for funding
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
 
-    // Build base path
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-
-    let sp_address = sp_client.get_receiving_address();
+    let sp_address = account.sp_address();
     let mut sp_txids = Vec::new();
     let mut final_height = 101u32;
 
     // Create 2 SP outputs
     for i in 0..2 {
         let i = i as u32;
-        let path = base_path.child(ChildNumber::from_normal_idx(i).expect("child number"));
-        let taproot_addr = tr_derivator.receive_at(i);
-        let sk = tr_signer.private_key_at(&path);
+        let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address
         let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
         bwk_test::generate_blocks(bitcoind, 2);
         let current_height = 101 + (i + 1) * 2;
-        wait_until_sync_at_height(&backend, current_height);
+        wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), current_height);
 
         // Get the funded UTXO
         let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -5953,56 +5295,23 @@ fn test_create_drain_transaction() {
             .expect("broadcast sp tx");
         bwk_test::generate_blocks(bitcoind, 1);
         final_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-        wait_for_sync_and_index(&backend, final_height);
+        wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), final_height);
 
         sp_txids.push(sp_txid);
     }
 
-    // 6. Use SpScanner with output collector to scan
-    let found_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let updater = OutputCollector {
-        found_outputs: found_outputs.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(final_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
+    // 6. Scan to detect SP outputs
+    account.scan_blocks(Some(1), Some(final_height)).expect("scan");
 
     // 7. Verify we have 2 coins
-    assert_eq!(scanner.outpoints().len(), 2, "Should have 2 coins");
+    assert_eq!(account.coins().len(), 2, "Should have 2 coins");
 
-    // Get the owned outputs from collector
-    let owned_outputs = found_outputs.lock().expect("poisoned");
-    assert_eq!(owned_outputs.len(), 2, "Should have 2 owned outputs");
+    // 8. Create a drain transaction to ourselves
+    let drain_recipient = RecipientAddress::SpAddress(account.sp_address());
+    let fees = Fees::MilliSatsVb(1000);
 
-    // Convert to available UTXOs format
-    let available_utxos: Vec<_> = owned_outputs
-        .iter()
-        .map(|(op, o)| (*op, o.clone()))
-        .collect();
-
-    // 8. Create a drain transaction to a new SP address (ourselves)
-    let drain_recipient = RecipientAddress::SpAddress(sp_client.get_receiving_address());
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
-
-    let unsigned_tx = sp_client
-        .create_drain_transaction(available_utxos, drain_recipient, fee_rate, network)
+    let unsigned_tx = account
+        .create_drain_transaction(drain_recipient, fees)
         .expect("create drain transaction");
 
     // 9. Verify drain transaction uses ALL 2 inputs
@@ -6039,78 +5348,28 @@ fn test_create_drain_transaction() {
     drop(bbd);
 }
 
-/// Tests full sign flow with real keys.
+/// Tests full flow: create SP output, scan, create tx, sign, broadcast, mine, rescan.
 ///
-/// This test verifies:
-/// - Create SP output to account
-/// - Scan to detect it
-/// - Create transaction using SpClient.create_new_transaction()
-/// - Finalize transaction using SpClient.finalize_transaction()
-/// - Sign transaction using SpClient.sign_transaction()
-/// - Verify signed transaction has valid witness data
+/// This test verifies the complete send flow using bwk_sp::Account:
+/// 1. Create SP output and scan to detect it
+/// 2. Create, finalize, and sign a transaction spending the output
+/// 3. Broadcast the signed transaction via bitcoind
+/// 4. Mine a block to confirm the transaction
+/// 5. Rescan and verify new outputs are received (change from the transaction)
 #[test]
-fn test_sign_transaction_full_flow() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
+fn test_sign_and_broadcast_full_flow() {
     use bitcoin::Amount;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
+    use bwk_sp::{Account, Config};
+    use bwk_tx::Fees;
+    use common::{generate_recipient_pubkey, swap_to_sp, TempDir};
+    use spdk_core::RecipientAddress;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -6118,39 +5377,29 @@ fn test_sign_transaction_full_flow() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 101);
 
-    // 4. Setup SP client and taproot signer with the same mnemonic
+    // 4. Create Account with temp directory
+    let dir = TempDir::new().unwrap();
     let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let config = Config::new(
+        "test-sign-broadcast".to_string(),
+        network,
+        mnemonic_str.to_string(),
+        bbd.url(),
+        dir.path().to_path_buf(),
+    );
+    let mut account = Account::new(config).expect("create account");
 
-    // 5. Create taproot signer
+    // 5. Create taproot signer for funding
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address with 0.5 BTC
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -6163,8 +5412,8 @@ fn test_sign_transaction_full_flow() {
         vout: index as u32,
     };
 
-    // 8. Create SP transaction
-    let sp_address = sp_client.get_receiving_address();
+    // 8. Create SP transaction to fund the account
+    let sp_address = account.sp_address();
     let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
         .expect("generate recipient pubkey");
 
@@ -6185,77 +5434,58 @@ fn test_sign_transaction_full_flow() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), sp_tx_height);
 
-    // 10. Create scanner and scan to detect the SP output
-    let found_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let updater = OutputCollector {
-        found_outputs: found_outputs.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
+    // 10. Scan to detect the SP output
+    account
+        .scan_blocks(Some(1), Some(sp_tx_height))
         .expect("scan");
 
     // 11. Verify we found the coin
-    assert_eq!(scanner.outpoints().len(), 1, "Should have 1 coin");
+    assert_eq!(account.coins().len(), 1, "Should have 1 coin");
+    let original_balance = account.balance();
+    assert!(original_balance > 0, "Should have positive balance");
 
-    // 12. Get the owned outputs and prepare for transaction creation
-    let owned_outputs = found_outputs.lock().expect("poisoned");
-    assert_eq!(owned_outputs.len(), 1, "Should have 1 owned output");
-    let available_utxos: Vec<_> = owned_outputs
-        .iter()
-        .map(|(op, o)| (*op, o.clone()))
-        .collect();
-    drop(owned_outputs); // Release lock
-
-    // 13. Create a transaction using SpClient.create_new_transaction()
+    // 12. Create a transaction sending to ourselves (creates change)
     let send_amount = Amount::from_sat(100_000); // 0.001 BTC
-    let recipient_addr = RecipientAddress::SpAddress(sp_client.get_receiving_address());
-    let recipients = vec![Recipient {
-        address: recipient_addr,
-        amount: send_amount,
-    }];
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
+    let recipient_addr = RecipientAddress::SpAddress(account.sp_address());
+    let recipients = vec![(recipient_addr, send_amount)];
+    let fees = Fees::MilliSatsVb(1000); // 1 sat/vB
 
-    let unsigned_tx = sp_client
-        .create_new_transaction(available_utxos, recipients, fee_rate, network)
+    let unsigned_tx = account
+        .create_transaction(recipients, fees)
         .expect("create transaction");
 
-    // 14. Finalize transaction using SpClient.finalize_transaction()
-    let finalized_tx = SpClient::finalize_transaction(unsigned_tx).expect("finalize transaction");
-
-    // Verify the finalized transaction has an unsigned_tx
+    // Verify the unsigned transaction structure
     assert!(
-        finalized_tx.unsigned_tx.is_some(),
-        "Finalized transaction should have unsigned_tx"
+        !unsigned_tx.selected_utxos.is_empty(),
+        "Transaction should have at least 1 input"
+    );
+    let expected_input_op = OutPoint {
+        txid: sp_txid,
+        vout: 0,
+    };
+    assert!(
+        unsigned_tx
+            .selected_utxos
+            .iter()
+            .any(|(op, _)| *op == expected_input_op),
+        "Transaction should use our SP output as input"
+    );
+    assert!(
+        !unsigned_tx.recipients.is_empty(),
+        "Transaction should have at least 1 recipient"
     );
 
-    // 15. Sign transaction using SpClient.sign_transaction()
-    let mut aux_rand = [0u8; 32];
-    getrandom::getrandom(&mut aux_rand).expect("generate random bytes");
+    // 13. Finalize transaction
+    let finalized_tx = account.finalize_transaction(unsigned_tx).expect("finalize transaction");
 
-    let signed_tx = sp_client
-        .sign_transaction(finalized_tx, &aux_rand)
+    // 14. Sign transaction
+    let signed_tx = account
+        .sign_transaction(finalized_tx)
         .expect("sign transaction");
 
-    // 16. Verify the signed transaction has witness data
+    // Verify the signed transaction has witness data
     assert!(
         !signed_tx.input.is_empty(),
         "Signed transaction should have at least one input"
@@ -6276,299 +5506,46 @@ fn test_sign_transaction_full_flow() {
         );
     }
 
-    // 17. Verify the signed transaction has outputs
-    assert!(
-        !signed_tx.output.is_empty(),
-        "Signed transaction should have at least one output"
-    );
-
-    // 18. Cleanup
-    drop(bbd);
-}
-
-/// Tests full flow: create SP output, scan, create tx, sign, broadcast, mine, rescan.
-///
-/// This test verifies the complete send flow:
-/// 1. Create SP output and scan to detect it
-/// 2. Create, finalize, and sign a transaction spending the output
-/// 3. Broadcast the signed transaction via bitcoind
-/// 4. Mine a block to confirm the transaction
-/// 5. Rescan and verify new outputs are received (change from the transaction)
-#[test]
-fn test_sign_and_broadcast_full_flow() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::Amount;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
-    use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
-
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let network = bitcoin::Network::Regtest;
-
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
-
-    // 4. Setup SP client and taproot signer with the same mnemonic
-    let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
-
-    // 5. Create taproot signer
-    let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
-        .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
-
-    // 6. Fund the taproot address with 0.5 BTC
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
-
-    // 7. Get the funded UTXO
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
-    let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
-        .into_iter()
-        .next()
-        .expect("find txout");
-    let outpoint = OutPoint {
-        txid: fund_txid,
-        vout: index as u32,
-    };
-
-    // 8. Create SP transaction
-    let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
-        .expect("generate recipient pubkey");
-
-    let sp_tx = swap_to_sp(
-        sk,
-        outpoint,
-        txout,
-        recipient_pubkey,
-        bitcoin::Amount::from_sat(1000),
-        &secp,
-    )
-    .expect("create sp tx");
-
-    // 9. Broadcast and mine
-    let sp_txid = sp_tx.compute_txid();
-    bitcoind
-        .send_raw_transaction(&sp_tx)
-        .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
-
-    // 10. Create scanner and scan to detect the SP output
-    let found_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let updater = OutputCollector {
-        found_outputs: found_outputs.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
-
-    // 11. Verify we found the coin
-    assert_eq!(scanner.outpoints().len(), 1, "Should have 1 coin");
-
-    // 12. Get the owned outputs and prepare for transaction creation
-    let owned_outputs = found_outputs.lock().expect("poisoned");
-    assert_eq!(owned_outputs.len(), 1, "Should have 1 owned output");
-    let available_utxos: Vec<_> = owned_outputs
-        .iter()
-        .map(|(op, o)| (*op, o.clone()))
-        .collect();
-    let original_amount = available_utxos[0].1.amount;
-    drop(owned_outputs);
-
-    // 13. Create a transaction sending to ourselves (creates change)
-    let send_amount = Amount::from_sat(100_000); // 0.001 BTC
-    let recipient_addr = RecipientAddress::SpAddress(sp_client.get_receiving_address());
-    let recipients = vec![Recipient {
-        address: recipient_addr,
-        amount: send_amount,
-    }];
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
-
-    let unsigned_tx = sp_client
-        .create_new_transaction(available_utxos, recipients, fee_rate, network)
-        .expect("create transaction");
-
-    // 14. Finalize transaction
-    let finalized_tx = SpClient::finalize_transaction(unsigned_tx).expect("finalize transaction");
-
-    // 15. Sign transaction
-    let mut aux_rand = [0u8; 32];
-    getrandom::getrandom(&mut aux_rand).expect("generate random bytes");
-
-    let signed_tx = sp_client
-        .sign_transaction(finalized_tx, &aux_rand)
-        .expect("sign transaction");
-
-    // Verify the signed transaction has witness data
-    assert!(
-        !signed_tx.input.is_empty(),
-        "Signed transaction should have at least one input"
-    );
-    for (i, input) in signed_tx.input.iter().enumerate() {
-        assert!(
-            !input.witness.is_empty(),
-            "Input {} should have witness data after signing",
-            i
-        );
-    }
-
-    // 16. Broadcast the signed transaction using bitcoind
+    // 15. Broadcast the signed transaction using bitcoind
     let spend_txid = signed_tx.compute_txid();
     bitcoind
         .send_raw_transaction(&signed_tx)
         .expect("broadcast signed tx");
 
-    // 17. Mine a block to confirm
+    // 16. Mine a block to confirm
     bwk_test::generate_blocks(bitcoind, 1);
     let spend_height =
         bwk_test::get_tx_height(bitcoind, spend_txid).expect("get spend tx height") as u32;
-    wait_for_sync_and_index(&backend, spend_height);
+    wait_for_sync_and_index(&BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(), spend_height);
 
-    // 18. Rescan to detect the new outputs from the spend transaction
-    let found_outputs2 = Arc::new(Mutex::new(HashMap::new()));
-    let updater2 = OutputCollector {
-        found_outputs: found_outputs2.clone(),
-    };
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client.clone(),
-        updater2,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Rescan from beginning to catch the new outputs
-    let end2 = Height::from_consensus(spend_height).unwrap();
-    scanner2
-        .scan_blocks(start, end2, None, with_cutthrough)
+    // 17. Rescan to detect the new outputs from the spend transaction
+    account
+        .scan_blocks(Some(sp_tx_height + 1), Some(spend_height))
         .expect("rescan");
 
-    // 19. Verify we received new outputs (the send-to-self and possibly change)
-    let new_outputs = found_outputs2.lock().expect("poisoned");
-    // We should have outputs: the original SP output + outputs from the spend transaction
-    // The new outputs should include the send amount and possibly change
-    let new_output_count = new_outputs
+    // 18. Verify we received new outputs (the send-to-self and change)
+    let coins = account.coins();
+    let new_outputs: Vec<_> = coins
         .iter()
         .filter(|(op, _)| op.txid == spend_txid)
-        .count();
+        .collect();
     assert!(
-        new_output_count >= 1,
-        "Should have at least 1 new output from the spend transaction, found {}",
-        new_output_count
+        !new_outputs.is_empty(),
+        "Should have at least 1 new output from the spend transaction"
     );
 
-    // Verify total amounts make sense (outputs from spend_tx should equal original minus fees)
-    let new_total: u64 = new_outputs
-        .iter()
-        .filter(|(op, _)| op.txid == spend_txid)
-        .map(|(_, o)| o.amount.to_sat())
-        .sum();
+    // Verify the new outputs have value (send amount + change)
+    let new_total: u64 = new_outputs.iter().map(|(_, e)| e.amount_sat()).sum();
     assert!(new_total > 0, "New outputs should have value");
+    // New total should be original minus fees
     assert!(
-        new_total < original_amount.to_sat(),
+        new_total < original_balance,
         "New outputs total ({}) should be less than original ({}) due to fees",
         new_total,
-        original_amount.to_sat()
+        original_balance
     );
 
-    // 20. Cleanup
+    // 19. Cleanup
     drop(bbd);
 }
 
@@ -6583,59 +5560,12 @@ fn test_sign_and_broadcast_full_flow() {
 /// - Scan account2 to verify it received the output
 #[test]
 fn test_send_to_another_sp_wallet() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::Amount;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
-    use std::sync::Mutex;
-
-    // Custom updater that collects found outputs
-    struct OutputCollector {
-        found_outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-    }
-
-    impl Updater for OutputCollector {
-        fn record_scan_progress(
-            &mut self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outputs.lock().expect("poisoned");
-            guard.extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &mut self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
+    use bwk_sp::{Account, Config};
+    use bwk_tx::Fees;
+    use common::{generate_recipient_pubkey, swap_to_sp, TempDir};
+    use spdk_core::RecipientAddress;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -6653,51 +5583,52 @@ fn test_send_to_another_sp_wallet() {
     bwk_test::generate_blocks(bitcoind, 101);
     wait_for_sync_and_index(&backend, 101);
 
-    // 4. Create TWO SP clients with DIFFERENT mnemonics
+    // 4. Create TWO Accounts with DIFFERENT mnemonics
     let mnemonic1_str = test_mnemonic(); // "abandon abandon ... about"
-    let mnemonic1 = bip39::Mnemonic::parse(mnemonic1_str).expect("valid mnemonic1");
-    let sp_client1 = SpClient::new_from_mnemonic(mnemonic1.clone(), network).expect("sp_client1");
-
-    // Second mnemonic - different from test_mnemonic
     let mnemonic2_str = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
-    let mnemonic2 = bip39::Mnemonic::parse(mnemonic2_str).expect("valid mnemonic2");
-    let sp_client2 = SpClient::new_from_mnemonic(mnemonic2.clone(), network).expect("sp_client2");
 
-    // Verify the two clients have different SP addresses
-    let sp_addr1 = sp_client1.get_receiving_address();
-    let sp_addr2 = sp_client2.get_receiving_address();
+    // Create Account 1
+    let dir1 = TempDir::new().unwrap();
+    let config1 = Config::new(
+        "account1".to_string(),
+        network,
+        mnemonic1_str.to_string(),
+        bbd.url(),
+        dir1.path().to_path_buf(),
+    )
+    .enable_persist(false);
+    let mut account1 = Account::new(config1).expect("create account1");
+
+    // Create Account 2
+    let dir2 = TempDir::new().unwrap();
+    let config2 = Config::new(
+        "account2".to_string(),
+        network,
+        mnemonic2_str.to_string(),
+        bbd.url(),
+        dir2.path().to_path_buf(),
+    )
+    .enable_persist(false);
+    let mut account2 = Account::new(config2).expect("create account2");
+
+    // Verify the two accounts have different SP addresses
+    let sp_addr1 = account1.sp_address();
+    let sp_addr2 = account2.sp_address();
     assert_ne!(
         sp_addr1.to_string(),
         sp_addr2.to_string(),
-        "Two clients with different mnemonics should have different SP addresses"
+        "Two accounts with different mnemonics should have different SP addresses"
     );
 
     // 5. Create taproot signer from mnemonic1 to fund the first account
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic1_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address with 0.5 BTC
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_for_sync_and_index(&backend, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -6734,60 +5665,33 @@ fn test_send_to_another_sp_wallet() {
     wait_for_sync_and_index(&backend, sp_tx_height);
 
     // 10. Scan account1 to detect the SP output
-    let found_outputs1 = Arc::new(Mutex::new(HashMap::new()));
-    let updater1 = OutputCollector {
-        found_outputs: found_outputs1.clone(),
-    };
-    let scan_backend1 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner1 = SpAccount::new(
-        scan_backend1,
-        sp_client1.clone(),
-        updater1,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner1
-        .scan_blocks(start, end, None, with_cutthrough)
+    account1
+        .scan_blocks(Some(1), Some(sp_tx_height))
         .expect("scan account1");
 
     // 11. Verify account1 found the output
-    assert_eq!(scanner1.outpoints().len(), 1, "Account1 should have 1 coin");
-    let account1_outputs = found_outputs1.lock().expect("poisoned");
-    let available_utxos: Vec<_> = account1_outputs
-        .iter()
-        .map(|(op, o)| (*op, o.clone()))
-        .collect();
-    drop(account1_outputs);
+    let coins1 = account1.coins();
+    assert_eq!(coins1.len(), 1, "Account1 should have 1 coin");
+    let account1_balance = account1.balance();
+    assert!(account1_balance > 0, "Account1 should have positive balance");
 
     // 12. Create transaction FROM account1 TO account2
     let send_amount = Amount::from_sat(100_000); // 0.001 BTC
     let recipient_addr2 = RecipientAddress::SpAddress(sp_addr2);
-    let recipients = vec![Recipient {
-        address: recipient_addr2,
-        amount: send_amount,
-    }];
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
+    let recipients = vec![(recipient_addr2, send_amount)];
 
-    let unsigned_tx = sp_client1
-        .create_new_transaction(available_utxos, recipients, fee_rate, network)
+    let unsigned_tx = account1
+        .create_transaction(recipients, Fees::MilliSatsVb(1000))
         .expect("create transaction from account1 to account2");
 
     // 13. Finalize transaction
-    let finalized_tx = SpClient::finalize_transaction(unsigned_tx).expect("finalize transaction");
+    let finalized_tx = account1
+        .finalize_transaction(unsigned_tx)
+        .expect("finalize transaction");
 
     // 14. Sign transaction with account1's keys
-    let mut aux_rand = [0u8; 32];
-    getrandom::getrandom(&mut aux_rand).expect("generate random bytes");
-
-    let signed_tx = sp_client1
-        .sign_transaction(finalized_tx, &aux_rand)
+    let signed_tx = account1
+        .sign_transaction(finalized_tx)
         .expect("sign transaction");
 
     // Verify signature
@@ -6807,32 +5711,19 @@ fn test_send_to_another_sp_wallet() {
     wait_for_sync_and_index(&backend, transfer_height);
 
     // 16. Scan account2 to verify it received the output
-    let found_outputs2 = Arc::new(Mutex::new(HashMap::new()));
-    let updater2 = OutputCollector {
-        found_outputs: found_outputs2.clone(),
-    };
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client2.clone(),
-        updater2,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    let end2 = Height::from_consensus(transfer_height).unwrap();
-    scanner2
-        .scan_blocks(start, end2, None, with_cutthrough)
+    account2
+        .scan_blocks(Some(1), Some(transfer_height))
         .expect("scan account2");
 
     // 17. Verify account2 found the output from account1
+    let coins2 = account2.coins();
     assert!(
-        !scanner2.outpoints().is_empty(),
+        !coins2.is_empty(),
         "Account2 should have received coins from account1"
     );
 
     // Verify the amount received by account2
-    let account2_outputs = found_outputs2.lock().expect("poisoned");
-    let total_received: u64 = account2_outputs.values().map(|o| o.amount.to_sat()).sum();
+    let total_received = account2.balance();
     assert!(
         total_received >= send_amount.to_sat(),
         "Account2 should have received at least {} sats, got {}",
@@ -6870,13 +5761,13 @@ fn test_birthday_height_skips_old_blocks() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with birthday_height=50
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let mut config = Config::new(
         "test-birthday".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
     config.set_birthday_height(Some(50));
@@ -6920,7 +5811,6 @@ fn test_birthday_height_skips_old_blocks() {
     assert_eq!(account.balance(), 0, "Balance should still be 0");
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -6930,61 +5820,9 @@ fn test_birthday_height_skips_old_blocks() {
 /// Run with: `cargo test --test integration -- --ignored`
 #[test]
 fn test_birthday_height_misses_earlier_outputs() {
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
-    use bitcoin::BlockHash;
-    use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    // Custom updater to capture outputs
-    struct BirthdayTestUpdater {
-        found_outpoints: Arc<Mutex<Vec<OutPoint>>>,
-    }
-
-    impl Updater for BirthdayTestUpdater {
-        fn record_scan_progress(
-            &mut self,
-            _start: Height,
-            _current: Height,
-            _end: Height,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-
-        fn record_block_outputs(
-            &mut self,
-            _height: Height,
-            _block_hash: BlockHash,
-            found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
-            let mut guard = self.found_outpoints.lock().expect("poisoned");
-            for (outpoint, _) in found_outputs {
-                guard.push(outpoint);
-            }
-            Ok(())
-        }
-
-        fn record_block_inputs(
-            &mut self,
-            _height: Height,
-            _block_hash: BlockHash,
-            _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
-            Ok(())
-        }
-    }
+    use bwk_sp::{Account, Config};
+    use common::{generate_recipient_pubkey, swap_to_sp, TempDir};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -7002,37 +5840,18 @@ fn test_birthday_height_misses_earlier_outputs() {
     bwk_test::generate_blocks(bitcoind, 101);
     wait_for_sync_and_index(&backend, 101);
 
-    // 4. Setup SP client and taproot signer with the same mnemonic
+    // 4. Setup taproot signer with test mnemonic
     let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
 
-    // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
+    // 5. Create taproot signer from the mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_for_sync_and_index(&backend, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -7045,8 +5864,21 @@ fn test_birthday_height_misses_earlier_outputs() {
         vout: index as u32,
     };
 
-    // 8. Create SP transaction - this will be mined around block 104-105
-    let sp_address = sp_client.get_receiving_address();
+    // 8. Create Account to get SP address (we need this before creating the SP tx)
+    let dir = TempDir::new().unwrap();
+    let config = Config::new(
+        "test-birthday-miss".to_string(),
+        network,
+        mnemonic_str.to_string(),
+        bbd.url(),
+        dir.path().to_path_buf(),
+    )
+    .enable_persist(false);
+    let temp_account = Account::new(config).expect("create temp account");
+    let sp_address = temp_account.sp_address();
+    drop(temp_account);
+
+    // 9. Create SP transaction - this will be mined around block 104-105
     let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
         .expect("generate recipient pubkey");
 
@@ -7060,7 +5892,7 @@ fn test_birthday_height_misses_earlier_outputs() {
     )
     .expect("create sp tx");
 
-    // 9. Broadcast and mine - SP output will be at block ~104
+    // 10. Broadcast and mine - SP output will be at block ~104
     let sp_txid = sp_tx.compute_txid();
     bitcoind
         .send_raw_transaction(&sp_tx)
@@ -7080,45 +5912,35 @@ fn test_birthday_height_misses_earlier_outputs() {
         sp_tx_height
     );
 
-    // 10. Create scanner that starts from birthday_height = 110
+    // 11. Create Account with birthday_height = 110 (AFTER the SP output)
     // This should MISS the SP output which is at ~104
-    let found_outpoints = Arc::new(Mutex::new(Vec::new()));
-    let updater = BirthdayTestUpdater {
-        found_outpoints: found_outpoints.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client,
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // 11. Scan starting from birthday_height = 110 (AFTER the SP output)
     let birthday_height = 110u32;
-    let start = Height::from_consensus(birthday_height).unwrap();
-    let end = Height::from_consensus(final_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
+    let mut config = Config::new(
+        "test-birthday-miss".to_string(),
+        network,
+        mnemonic_str.to_string(),
+        bbd.url(),
+        dir.path().to_path_buf(),
+    )
+    .enable_persist(false);
+    config.set_birthday_height(Some(birthday_height));
 
-    // 12. Verify the SP output was NOT found (it was before birthday)
-    let outputs = found_outpoints.lock().expect("poisoned");
+    let mut account = Account::new(config).expect("create account");
+
+    // 12. Scan - should use birthday_height as start
+    account.scan_blocks(None, Some(final_height)).expect("scan");
+
+    // 13. Verify the SP output was NOT found (it was before birthday)
+    let coins = account.coins();
     assert!(
-        outputs.is_empty(),
-        "SP output at block {} should NOT be found when scanning from birthday_height={}, but found {} outputs: {:?}",
+        coins.is_empty(),
+        "SP output at block {} should NOT be found when scanning from birthday_height={}, but found {} outputs",
         sp_tx_height,
         birthday_height,
-        outputs.len(),
-        outputs
+        coins.len()
     );
 
+    // 14. Cleanup
     drop(bbd);
 }
 
@@ -7136,10 +5958,8 @@ fn test_dust_limit_filters_small_outputs() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -7290,24 +6110,7 @@ fn test_dust_limit_filters_small_outputs() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -7399,10 +6202,8 @@ fn test_dust_limit_zero_accepts_all() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -7553,24 +6354,7 @@ fn test_dust_limit_zero_accepts_all() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -7691,13 +6475,13 @@ fn test_sp_address_format_valid() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-sp-address".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -7719,7 +6503,6 @@ fn test_sp_address_format_valid() {
     );
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -7743,13 +6526,13 @@ fn test_sp_address_deterministic() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create first Account with test mnemonic
-    let dir1 = temp_dir();
+    let dir1 = TempDir::new().unwrap();
     let config1 = Config::new(
         "test-sp-addr-1".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir1.clone(),
+        dir1.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -7757,13 +6540,13 @@ fn test_sp_address_deterministic() {
     let addr1 = account1.sp_address().to_string();
 
     // 5. Create second Account with same mnemonic
-    let dir2 = temp_dir();
+    let dir2 = TempDir::new().unwrap();
     let config2 = Config::new(
         "test-sp-addr-2".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir2.clone(),
+        dir2.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -7777,8 +6560,6 @@ fn test_sp_address_deterministic() {
     );
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir1);
-    cleanup_temp_dir(&dir2);
     drop(bbd);
 }
 
@@ -7802,13 +6583,13 @@ fn test_sp_address_different_per_mnemonic() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create first Account with test mnemonic
-    let dir1 = temp_dir();
+    let dir1 = TempDir::new().unwrap();
     let config1 = Config::new(
         "test-mnemonic-1".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(), // "abandon abandon ... about"
         bbd.url(),
-        dir1.clone(),
+        dir1.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -7819,13 +6600,13 @@ fn test_sp_address_different_per_mnemonic() {
     // Use a different valid BIP39 mnemonic
     let different_mnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
 
-    let dir2 = temp_dir();
+    let dir2 = TempDir::new().unwrap();
     let config2 = Config::new(
         "test-mnemonic-2".to_string(),
         bitcoin::Network::Regtest,
         different_mnemonic.to_string(),
         bbd.url(),
-        dir2.clone(),
+        dir2.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -7839,8 +6620,6 @@ fn test_sp_address_different_per_mnemonic() {
     );
 
     // 7. Cleanup
-    cleanup_temp_dir(&dir1);
-    cleanup_temp_dir(&dir2);
     drop(bbd);
 }
 
@@ -7855,9 +6634,7 @@ fn test_receive_with_sp_label() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -7901,24 +6678,7 @@ fn test_receive_with_sp_label() {
     // 7. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 8. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -8096,13 +6856,13 @@ fn test_concurrent_scan_and_read() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-concurrent".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -8148,7 +6908,6 @@ fn test_concurrent_scan_and_read() {
     let _account = read_handle.join().expect("read thread should not panic");
 
     // 9. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -8252,13 +7011,13 @@ fn test_scanner_with_concurrent_api_calls() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-concurrent-api".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
@@ -8314,7 +7073,6 @@ fn test_scanner_with_concurrent_api_calls() {
         .expect("API call thread should not panic");
 
     // 10. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -8331,10 +7089,8 @@ fn test_persists_immediately_on_new_output() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -8416,24 +7172,7 @@ fn test_persists_immediately_on_new_output() {
     // 5. Create taproot signer from the SAME mnemonic to generate funding addresses
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-    let taproot_addr = tr_derivator.receive_at(0);
-
-    // Build derivation path for index 0
-    let path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
@@ -8552,13 +7291,13 @@ fn test_no_persist_on_empty_scan() {
     wait_for_sync_and_index(&backend, 100);
 
     // 4. Create Account with persist=true
-    let dir = temp_dir();
+    let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-no-persist-empty".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
         bbd.url(),
-        dir.clone(),
+        dir.path().to_path_buf(),
     )
     .enable_persist(true);
 
@@ -8601,7 +7340,6 @@ fn test_no_persist_on_empty_scan() {
     }
 
     // 8. Cleanup
-    cleanup_temp_dir(&dir);
     drop(bbd);
 }
 
@@ -8625,11 +7363,9 @@ fn test_persists_on_spent_detection() {
     use std::collections::HashSet;
 
     use bitcoin::absolute::Height;
-    use bitcoin::bip32::ChildNumber;
     use bitcoin::Amount;
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
-    use bwk_sign::bwk_descriptor::{descriptor::DescriptorDerivator, tr_path};
     use bwk_sign::HotSigner;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use spdk_core::account::SpAccount;
@@ -8702,24 +7438,7 @@ fn test_persists_on_spent_detection() {
     // 5. Create taproot signer
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
         .expect("create taproot signer");
-    let tr_derivator = tr_signer
-        .descriptors()
-        .into_iter()
-        .next()
-        .expect("descriptor")
-        .spk_derivator(network)
-        .expect("derivator");
-
-    // Build derivation path for index 0
-    let base_path = tr_path(
-        network,
-        ChildNumber::from_hardened_idx(0).expect("child number"),
-    )
-    .expect("tr_path");
-    let base_path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let path = base_path.child(ChildNumber::from_normal_idx(0).expect("child number"));
-    let taproot_addr = tr_derivator.receive_at(0);
-    let sk = tr_signer.private_key_at(&path);
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address with 0.5 BTC
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
