@@ -21,9 +21,7 @@ bwk-sign.workspace = true
 bwk-sign.optional = true
 bwk-utils.workspace = true
 bwk-utils.optional = true
-spdk-core = { workspace = true, features = ["sync", "bitcoin_32"], optional = true }
 
 [features]
 default = []
-test = ["dep:bwk-sign", "dep:bwk-utils"]
-sp = ["dep:spdk-core"]
+test = ["dep:bwk-sign", "dep:bwk-utils", "bwk-utils/test"]

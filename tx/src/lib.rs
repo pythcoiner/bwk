@@ -10,10 +10,13 @@ pub use coin::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
 pub use coin_selection::CoinCandidate;
 pub use descr_fingerprint::DescrFingerprint;
 pub use error::Error;
-pub use recipient::Recipient;
+pub use recipient::{
+    FinalizationContext, PsbtOutputInfo, Recipient, RecipientProvider, SpPartialSecretProvider,
+};
 pub use transaction::{
     estimated_weight_raw, process_fees, Amount, Drain, FeeResult, Fees, TransactionResult,
     TxTemplate, Warning,
 };
+pub use tx_builder::ChangeTip;
 
 pub const DUST_AMOUNT: u64 = 5_000;

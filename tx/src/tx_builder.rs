@@ -1,18 +1,17 @@
 use crate::{
     coin_selection,
-    transaction::{finalize_transaction, process_transaction, tx_estimated_weight, Error},
-    Coin, Fees, Recipient, TransactionResult, TxTemplate,
+    transaction::{process_transaction, tx_estimated_weight, Amount, Error},
+    Coin, Fees, Recipient, RecipientProvider, TransactionResult, TxTemplate,
 };
 use bitcoin::Psbt;
-use bwk_descriptor::SpkDerivator;
-use miniscript::{Descriptor, DescriptorPublicKey};
 use std::collections::BTreeMap;
 
 #[cfg(feature = "test")]
 use {
-    crate::Warning,
-    bitcoin::{bip32::ChildNumber, Network},
-    bwk_descriptor::{tr_path, wpkh_path},
+    crate::{coin::KeyChain, FinalizationContext, PsbtOutputInfo, Warning},
+    bitcoin::bip32::ChildNumber,
+    bitcoin::Network,
+    bwk_descriptor::{tr_path, wpkh_path, SpkDerivator},
     bwk_sign::HotSigner,
     bwk_sign::Signer,
     bwk_utils::test::{
@@ -23,8 +22,12 @@ use {
         key::rand::{self, random, Rng},
         OutPoint, ScriptBuf, Sequence, TxOut,
     },
+    miniscript::{Descriptor, DescriptorPublicKey},
 };
 
+/// Trait for managing change address index tip.
+/// Implemented by wallet types that need to track the next change index.
+/// Called by RecipientProvider implementations when deriving new change addresses.
 pub trait ChangeTip {
     fn next_index(&mut self) -> u32;
 }
@@ -52,78 +55,67 @@ impl CoinSource for BTreeMap<OutPoint, Coin> {
     }
 }
 
-pub enum ChangeTipHandle {
-    Internal(u32),
-    External(Box<dyn ChangeTip>),
-    None,
-}
-
 pub struct TxBuilder {
-    derivator: SpkDerivator,
-    change_tip: ChangeTipHandle,
+    change_provider: Box<dyn RecipientProvider>,
     pub tx_template: TxTemplate,
     coin_source: Option<Box<dyn CoinSource>>,
+    max_fee_percent: u8,
+    max_fee_amount: u64,
+    #[cfg(feature = "test")]
+    derivator: Option<SpkDerivator>,
 }
 
 impl TxBuilder {
-    pub fn new(
-        descriptor: Descriptor<DescriptorPublicKey>,
-        tip_handle: Box<dyn ChangeTip>,
-        network: bitcoin::Network,
-    ) -> Result<Self, Error> {
-        Ok(TxBuilder {
-            derivator: SpkDerivator::new(descriptor.clone(), network)
-                .map_err(|_| Error::Derivator)?,
-            change_tip: ChangeTipHandle::External(tip_handle),
+    pub fn new(change_provider: Box<dyn RecipientProvider>) -> Self {
+        TxBuilder {
+            change_provider,
             tx_template: TxTemplate {
                 inputs: vec![],
                 outputs: vec![],
                 fees: crate::Fees::MilliSatsVb(1_000),
-                change_descriptor: descriptor.clone(),
             },
-            #[cfg(not(feature = "test"))]
             coin_source: None,
+            max_fee_percent: 10,
+            max_fee_amount: 2_000_000,
             #[cfg(feature = "test")]
-            coin_source: Some(Box::new(BTreeMap::new())),
-        })
+            derivator: None,
+        }
     }
-    pub fn new_standalone(
-        descriptor: Descriptor<DescriptorPublicKey>,
-        network: bitcoin::Network,
-    ) -> Result<Self, Error> {
-        Self::new_standalone_with_tip(descriptor, network, 0)
-    }
-    pub fn new_standalone_with_tip(
-        descriptor: Descriptor<DescriptorPublicKey>,
-        network: bitcoin::Network,
-        tip: u32,
-    ) -> Result<Self, Error> {
-        Ok(TxBuilder {
-            derivator: SpkDerivator::new(descriptor.clone(), network)
-                .map_err(|_| Error::Descriptor)?,
-            change_tip: ChangeTipHandle::Internal(tip),
+
+    #[cfg(feature = "test")]
+    pub fn new_with_derivator(
+        change_provider: Box<dyn RecipientProvider>,
+        derivator: SpkDerivator,
+    ) -> Self {
+        TxBuilder {
+            change_provider,
             tx_template: TxTemplate {
                 inputs: vec![],
                 outputs: vec![],
                 fees: crate::Fees::MilliSatsVb(1_000),
-                change_descriptor: descriptor.clone(),
             },
-            #[cfg(not(feature = "test"))]
-            coin_source: None,
-            #[cfg(feature = "test")]
             coin_source: Some(Box::new(BTreeMap::new())),
-        })
+            max_fee_percent: 10,
+            max_fee_amount: 2_000_000,
+            derivator: Some(derivator),
+        }
     }
     pub fn coin_source(mut self, coin_source: Box<dyn CoinSource>) -> Self {
         self.coin_source = Some(coin_source);
         self
     }
-    /// Set an absolute fee value
+    pub fn max_fee_percent(mut self, pct: u8) -> Self {
+        self.max_fee_percent = pct;
+        self
+    }
+    pub fn max_fee_amount(mut self, sats: u64) -> Self {
+        self.max_fee_amount = sats;
+        self
+    }
     pub fn fee(mut self, fee: u64) -> Self {
         self.tx_template.fees = Fees::Sats(fee);
         self
     }
-    /// Set a feerate in millisats/vb
     pub fn feerate(mut self, feerate: u64) -> Self {
         self.tx_template.fees = Fees::MilliSatsVb(feerate);
         self
@@ -140,15 +132,13 @@ impl TxBuilder {
         }
     }
     /// Replace current template outputs by new set of outputs
-    pub fn outputs(mut self, recipients: Vec<Recipient>) -> Self {
+    pub fn outputs(mut self, recipients: Vec<Box<dyn RecipientProvider>>) -> Self {
         self.tx_template.outputs = recipients;
         self
     }
     /// Add output to the set of outputs
-    pub fn add_output(&mut self, recipient: Recipient) {
-        if !self.tx_template.outputs.contains(&recipient) {
-            self.tx_template.outputs.push(recipient);
-        }
+    pub fn add_output(&mut self, recipient: Box<dyn RecipientProvider>) {
+        self.tx_template.outputs.push(recipient);
     }
     /// Initialise a new template
     pub fn new_template(&mut self) {
@@ -156,7 +146,6 @@ impl TxBuilder {
             inputs: vec![],
             outputs: vec![],
             fees: crate::Fees::MilliSatsVb(1_000),
-            change_descriptor: self.tx_template.change_descriptor.clone(),
         };
     }
     /// Send <amount> to <address>
@@ -168,7 +157,7 @@ impl TxBuilder {
             origin: None,
             descriptor: None,
         };
-        self.tx_template.outputs.push(recipient);
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     /// Send <amount> to <address> w/ <label>
     pub fn send_to_with_label<T>(&mut self, address: bitcoin::Address, amount: u64, label: T)
@@ -183,28 +172,45 @@ impl TxBuilder {
             origin: None,
             descriptor: None,
         };
-        self.tx_template.outputs.push(recipient);
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     /// Try to craft a transaction from the current TxTemplate and output a TransactionResult
     pub fn simulate(&self) -> TransactionResult {
-        process_transaction(self.tx_template.clone(), &self.derivator.descriptor())
+        process_transaction(
+            self.tx_template.clone(),
+            Some(self.change_provider.as_ref()),
+        )
     }
-    /// Increment and return a new change index
-    pub fn new_change_index(&mut self) -> u32 {
-        match &mut self.change_tip {
-            ChangeTipHandle::Internal(v) => {
-                *v += 1;
-                *v
-            }
-            ChangeTipHandle::External(tip) => tip.next_index(),
-            ChangeTipHandle::None => unreachable!(),
-        }
-    }
+
     /// Generate a signable PSBT from the current TxTemplate
     pub fn generate(&mut self) -> Result<Psbt, Error> {
-        let descriptor = self.derivator.descriptor();
-        let res = process_transaction(self.tx_template.clone(), &descriptor);
-        finalize_transaction(res, &mut (|| self.new_change_index()), descriptor, true)
+        let res = process_transaction(
+            self.tx_template.clone(),
+            Some(self.change_provider.as_ref()),
+        );
+
+        if let Some(error) = res.error {
+            return Err(error);
+        }
+
+        let change_recip: Option<Box<dyn RecipientProvider>> =
+            if let Some(change_value) = res.change {
+                let mut change = self.change_provider.clone_box();
+                change.set_amount(Amount::Value(change_value.to_sat()));
+                Some(change)
+            } else {
+                None
+            };
+
+        res.tx_template.finalize(
+            change_recip,
+            true,
+            None,
+            self.change_provider.network(),
+            self.max_fee_percent,
+            self.max_fee_amount,
+            false,
+        )
     }
     pub fn select_coins(&self, target: u64, feerate: u64 /* msats/vb */) -> Vec<Coin> {
         // NOTE: target must contains fees for base tx + outputs
@@ -250,7 +256,7 @@ impl TxBuilder {
             origin: None,
             descriptor: None,
         };
-        self.add_output(recipient);
+        self.add_output(Box::new(recipient));
         let base_fee = tx_estimated_weight(&self.tx_template).to_vbytes_ceil() * feerate / 1000;
         let coins = self.select_coins(amount + base_fee, feerate);
         if coins.is_empty() {
@@ -285,8 +291,16 @@ impl TxBuilder {
 
 #[cfg(feature = "test")]
 impl TxBuilder {
+    fn derivator(&self) -> &SpkDerivator {
+        self.derivator
+            .as_ref()
+            .expect("derivator required for this test method")
+    }
+
     pub fn mark_tx_mined(&mut self) {
         use crate::transaction::max_input_satisfaction_size;
+
+        let this_descriptor = self.derivator().descriptor();
 
         if let Some(source) = self.coin_source.as_mut() {
             for coin in &self.tx_template.inputs {
@@ -296,12 +310,25 @@ impl TxBuilder {
         if let Some(source) = self.coin_source.as_mut() {
             let txid = self.tx_template.tx().compute_txid();
             for (pos, recipient) in self.tx_template.outputs.iter().enumerate() {
-                if let (Some(origin), Some(descriptor)) = (&recipient.origin, &recipient.descriptor)
-                {
-                    let this_descriptor = self.derivator.descriptor();
-                    if descriptor == &this_descriptor {
+                // Check if this output is a BIP32 change output belonging to this wallet
+                if let PsbtOutputInfo::Bip32 { origin, descriptor } = recipient.psbt_output_info() {
+                    if descriptor == this_descriptor {
+                        // Create TxOut from recipient
+                        let value = match recipient.amount() {
+                            crate::Amount::Value(v) => bitcoin::Amount::from_sat(v),
+                            crate::Amount::Max(Some(v)) => bitcoin::Amount::from_sat(v),
+                            crate::Amount::Max(None) | crate::Amount::Anchor => continue,
+                        };
+                        let txout = bitcoin::TxOut {
+                            value,
+                            script_pubkey: recipient.create_script(&FinalizationContext {
+                                inputs: &self.tx_template.inputs,
+                                partial_secret: None,
+                                network: bitcoin::Network::Bitcoin,
+                            }),
+                        };
                         let coin = Coin {
-                            txout: recipient.into(),
+                            txout,
                             outpoint: OutPoint {
                                 txid,
                                 vout: pos as u32,
@@ -309,11 +336,11 @@ impl TxBuilder {
                             height: Some(0),
                             sequence: Sequence::ZERO,
                             status: crate::CoinStatus::Confirmed,
-                            label: recipient.label.clone(),
-                            satisfaction_size: max_input_satisfaction_size(descriptor) as u64,
+                            label: None,
+                            satisfaction_size: max_input_satisfaction_size(&descriptor) as u64,
                             spend_info: crate::CoinSpendInfo::Bip32 {
-                                coin_path: *origin,
-                                descriptor: descriptor.clone(),
+                                coin_path: origin,
+                                descriptor,
                             },
                         };
                         source.add_coin(coin);
@@ -323,11 +350,9 @@ impl TxBuilder {
         }
     }
     pub fn receive_coin(&mut self, coin: Coin) {
+        let this_descriptor = self.derivator().descriptor();
         let matches = match &coin.spend_info {
-            crate::CoinSpendInfo::Bip32 { descriptor, .. } => {
-                *descriptor == self.derivator.descriptor()
-            }
-            #[cfg(feature = "sp")]
+            crate::CoinSpendInfo::Bip32 { descriptor, .. } => *descriptor == this_descriptor,
             crate::CoinSpendInfo::Sp { .. } => false,
         };
         if !matches {
@@ -339,39 +364,38 @@ impl TxBuilder {
     }
     pub fn funding_input(&mut self, amount: u64) {
         let index: u8 = random();
-        let coin = test::receive_coin(amount, &self.derivator, index as u32);
+        let coin = test::receive_coin(amount, self.derivator(), index as u32);
         self.tx_template.inputs.push(coin);
     }
     pub fn self_recipient(&mut self, amount: u64) -> Recipient {
         let index: u8 = random();
-        test::self_recipient(amount, &self.derivator, index as u32)
+        test::self_recipient(amount, self.derivator(), index as u32)
     }
     pub fn dummy_external_output(&mut self, amount: u64) {
         let recipient = test::external_recipient(amount);
-        self.tx_template.outputs.push(recipient);
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     pub fn dummy_external_output_max(&mut self) {
         let recipient = test::external_recipient_max();
-        self.tx_template.outputs.push(recipient);
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     pub fn self_output(&mut self, amount: u64) {
-        use crate::coin::KeyChain;
         let index: u8 = random();
-        let addr = self.derivator.receive_at(index as u32);
+        let addr = self.derivator().receive_at(index as u32);
         let recipient = Recipient {
             address: addr.as_unchecked().clone(),
             amount: crate::Amount::Value(amount),
             label: None,
             origin: Some((KeyChain::Receive, index as u32)),
-            descriptor: Some(self.derivator.descriptor()),
+            descriptor: Some(self.derivator().descriptor()),
         };
-        self.tx_template.outputs.push(recipient);
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     pub fn receive_address_at(&self, index: u32) -> bitcoin::Address {
-        self.derivator.receive_at(index)
+        self.derivator().receive_at(index)
     }
     pub fn fund_with_bitcoind(&mut self, bitcoind: &mut corepc_node::Client, amount: u64) -> Coin {
-        use crate::{coin::KeyChain, transaction::max_input_satisfaction_size};
+        use crate::transaction::max_input_satisfaction_size;
 
         let index: u8 = random();
         let addr = self.receive_address_at(index as u32);
@@ -391,7 +415,7 @@ impl TxBuilder {
             }
         }
         let (vout, txout) = vout.unwrap();
-        let descriptor = self.derivator.descriptor();
+        let descriptor = self.derivator().descriptor();
         let satisfaction = max_input_satisfaction_size(&descriptor);
         let coin = Coin {
             txout,
@@ -406,7 +430,7 @@ impl TxBuilder {
             satisfaction_size: satisfaction as u64,
             spend_info: crate::CoinSpendInfo::Bip32 {
                 coin_path: (KeyChain::Receive, index as u32),
-                descriptor: self.derivator.descriptor(),
+                descriptor: self.derivator().descriptor(),
             },
         };
         self.receive_coin(coin.clone());
@@ -418,6 +442,48 @@ impl TxBuilder {
 pub mod test {
     use super::*;
     use crate::Amount;
+
+    /// Create a TxBuilder from a derivator (for tests)
+    pub fn builder_from_derivator(derivator: SpkDerivator) -> TxBuilder {
+        let descriptor = derivator.descriptor();
+        let network = {
+            use miniscript::ForEachKey;
+            let is_mainnet = descriptor
+                .clone()
+                .into_single_descriptors()
+                .expect("multipath")
+                .get(1)
+                .expect("multipath")
+                .for_any_key(|k| match k {
+                    DescriptorPublicKey::XPub(k) => k.xkey.network.is_mainnet(),
+                    _ => false,
+                });
+            if is_mainnet {
+                Network::Bitcoin
+            } else {
+                Network::Regtest
+            }
+        };
+        let address = descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("multipath")
+            .at_derivation_index(0)
+            .expect("derivation")
+            .address(network)
+            .expect("address");
+        let change_provider = Box::new(Recipient {
+            address: address.as_unchecked().clone(),
+            amount: Amount::Value(0),
+            label: None,
+            origin: Some((KeyChain::Change, 0)),
+            descriptor: Some(descriptor),
+        });
+        TxBuilder::new_with_derivator(change_provider, derivator)
+    }
+
     pub fn receive_coin(amount: u64, derivator: &SpkDerivator, index: u32) -> Coin {
         use crate::{
             coin::KeyChain, transaction::max_input_satisfaction_size, CoinSpendInfo, CoinStatus,
@@ -664,8 +730,7 @@ mod tests {
     #[test]
     fn test_segwit_offline() {
         let (_signer, derivator) = wpkh_signer();
-        let mut builder =
-            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+        let mut builder = test::builder_from_derivator(derivator);
 
         builder.funding_input(30_000);
         builder.funding_input(50_000);
@@ -687,8 +752,7 @@ mod tests {
         let mut node = bitcoind_with_txindex();
         let bitcoind = &mut node.client;
         let (signer, derivator) = wpkh_signer();
-        let mut builder =
-            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+        let mut builder = test::builder_from_derivator(derivator);
 
         // 2 owned input + external input + change
         let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
@@ -770,8 +834,7 @@ mod tests {
         let mut node = bitcoind_with_txindex();
         let bitcoind = &mut node.client;
         let (signer, derivator) = tr_signer();
-        let mut builder =
-            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+        let mut builder = test::builder_from_derivator(derivator);
 
         // 2 owned input + external input + change
         let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
@@ -853,8 +916,7 @@ mod tests {
         let mut node = bitcoind_with_txindex();
         let bitcoind = &mut node.client;
         let (signer, derivator) = taptree_signer();
-        let mut builder =
-            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+        let mut builder = test::builder_from_derivator(derivator);
 
         // 2 owned input + external input + change
         let c1 = builder.fund_with_bitcoind(bitcoind, 30_000);
@@ -937,10 +999,8 @@ mod tests {
         let bitcoind = &mut node.client;
         let (signer_a, derivator_a) = tr_signer();
         let (signer_b, derivator_b) = taptree_signer();
-        let mut builder_a =
-            TxBuilder::new_standalone(derivator_a.descriptor(), Network::Regtest).unwrap();
-        let mut builder_b =
-            TxBuilder::new_standalone(derivator_b.descriptor(), Network::Regtest).unwrap();
+        let mut builder_a = test::builder_from_derivator(derivator_a);
+        let mut builder_b = test::builder_from_derivator(derivator_b);
 
         let c1 = builder_a.fund_with_bitcoind(bitcoind, 30_000);
         let c2 = builder_b.fund_with_bitcoind(bitcoind, 30_000);
@@ -950,8 +1010,8 @@ mod tests {
 
         builder_a.add_input(c1);
         builder_a.add_input(c2);
-        builder_a.add_output(r1);
-        builder_a.add_output(r2);
+        builder_a.add_output(Box::new(r1));
+        builder_a.add_output(Box::new(r2));
 
         let res = builder_a.simulate();
         assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(300)));
@@ -972,8 +1032,7 @@ mod tests {
         let mut node = bitcoind_with_txindex();
         let bitcoind = &mut node.client;
         let (signer, derivator) = tr_signer();
-        let mut builder =
-            TxBuilder::new_standalone(derivator.descriptor(), Network::Regtest).unwrap();
+        let mut builder = test::builder_from_derivator(derivator);
 
         // receive few coins
         builder.fund_with_bitcoind(bitcoind, 1_000_000);
