@@ -1,4 +1,80 @@
 # Bitcoin Wallet Kit
 
-This library is still in experimental stage, do not use in production or with real coins.
-The API will break, likely often.
+**Experimental — do not use in production or with real coins. API will break.**
+
+Modular Rust workspace for building Bitcoin wallets. Provides account management,
+UTXO tracking, transaction building, and signing — with backends for both
+standard descriptor wallets (via Electrum) and Silent Payments (BIP352 via
+Blindbit).
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Application                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+        │                                    │
+        ▼                                    ▼
+┌───────────────────┐              ┌───────────────────┐
+│       bwk         │              │      bwk-sp       │
+│ (descriptor-based │              │ (silent payments) │
+│     account)      │              │     account)      │
+└───────────────────┘              └───────────────────┘
+        │                                    │
+        ├────────────┬───────────────────────┤
+        ▼            ▼                       ▼
+┌─────────────┐ ┌─────────────┐      ┌─────────────┐
+│ bwk-electrum│ │  bwk-sign   │      │   spdk +    │
+│  (chain)    │ │  (signing)  │      │  blindbit   │
+└─────────────┘ └─────────────┘      └─────────────┘
+        │            │                       │
+        └────────────┴───────────────────────┘
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+│bwk-descriptor│ │  bwk-keys   │ │   bwk-tx    │
+│ (derivation)│ │ (key mgmt)  │ │  (building) │
+└─────────────┘ └─────────────┘ └─────────────┘
+```
+
+## Crates
+
+```
++----------------+-------------------------------------------------------+
+| Crate          | Purpose                                               |
++----------------+-------------------------------------------------------+
+| bwk            | Account for descriptor wallets (Electrum backend)     |
+| bwk-sp         | Silent Payments account (BIP352, Blindbit backend)    |
+| bwk-tx         | Transaction building, coin selection, PSBT            |
+| bwk-electrum   | Electrum protocol client                              |
+| bwk-sign       | Hot signer, SigningManager                            |
+| bwk-descriptor | Descriptor construction, SpkDerivator                 |
+| bwk-keys       | Key derivation (OXpriv, OXpub)                        |
+| bwk-p2p        | Bitcoin P2P client                                    |
+| bwk-backoff    | Exponential backoff                                   |
+| bwk-utils      | Test helpers                                          |
++----------------+-------------------------------------------------------+
+```
+
+See crate READMEs:
+[bwk](bwk/README.md),
+[bwk-sp](sp/README.md),
+[bwk-tx](tx/README.md),
+[bwk-electrum](electrum/README.md),
+[bwk-sign](sign/README.md),
+[bwk-descriptor](descriptor/README.md),
+[bwk-keys](keys/README.md),
+[bwk-p2p](p2p/README.md),
+[bwk-backoff](backoff/README.md),
+[bwk-utils](utils/README.md)
+
+## Build
+
+```bash
+cargo build --release
+cargo test --features test
+cargo clippy --all-targets -- -D warnings
+```
+
+MSRV: 1.78
