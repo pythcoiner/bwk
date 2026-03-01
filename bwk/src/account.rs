@@ -21,7 +21,9 @@ use miniscript::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
+    address_store::{
+        AddressEntry, AddressStatus, AddressTip, ChangeRecipientProvider, ChangeTipUpdater,
+    },
     coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
@@ -219,12 +221,16 @@ impl Account {
 
 // Locking API
 impl Account {
-    pub fn tx_builder(&self) -> Result<TxBuilder, bwk_tx::transaction::Error> {
-        let tip_handle = Box::new(ChangeTipUpdater::new(
-            self.coin_store.lock().expect("poisoned").address_store(),
+    pub fn tx_builder(&self) -> TxBuilder {
+        let tip_updater =
+            ChangeTipUpdater::new(self.coin_store.lock().expect("poisoned").address_store());
+        let change_provider = Box::new(ChangeRecipientProvider::new(
+            tip_updater,
+            self.descriptor(),
+            self.network(),
         ));
         let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
-        Ok(TxBuilder::new(self.descriptor(), tip_handle, self.network())?.coin_source(coin_source))
+        TxBuilder::new(change_provider).coin_source(coin_source)
     }
 
     pub fn balance(&self) -> (u64, Vec<Payment>) {
@@ -1623,8 +1629,7 @@ mod integration_tests {
         let mut account = Account::new(config);
         account.start_electrum();
         sleep(Duration::from_millis(300));
-        let mut builder =
-            TxBuilder::new_standalone(account.descriptor(), Network::Regtest).unwrap();
+        let mut builder = account.tx_builder();
 
         receive(&mut account, &bitcoind, 200_000);
         wait_until_timeout(
@@ -1684,7 +1689,7 @@ mod integration_tests {
         let saved_config = config.clone();
         let mut account = Account::new(config);
         sleep(Duration::from_millis(300));
-        let mut builder = account.tx_builder().unwrap();
+        let mut builder = account.tx_builder();
         let signer = account.hot_signer().unwrap();
 
         receive(&mut account, &bitcoind, 100_000_000);

@@ -10,7 +10,6 @@ use miniscript::{
 };
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "sp")]
 use bitcoin::bip32::DerivationPath;
 
 use crate::Error;
@@ -61,7 +60,6 @@ pub enum CoinSpendInfo {
         descriptor: Descriptor<DescriptorPublicKey>,
     },
     /// Silent Payment coin (BIP352)
-    #[cfg(feature = "sp")]
     Sp {
         derivation: DerivationPath,
         tweak: [u8; 32],
@@ -113,7 +111,6 @@ impl Coin {
         matches!(self.spend_info, CoinSpendInfo::Bip32 { .. })
     }
 
-    #[cfg(feature = "sp")]
     pub fn is_sp(&self) -> bool {
         matches!(self.spend_info, CoinSpendInfo::Sp { .. })
     }
@@ -124,7 +121,6 @@ impl Coin {
                 coin_path,
                 descriptor,
             } => self.spk_to_psbt_input(*coin_path, descriptor),
-            #[cfg(feature = "sp")]
             CoinSpendInfo::Sp { .. } => self.sp_to_psbt_input(),
         }
     }
@@ -182,7 +178,6 @@ impl Coin {
         Ok(dummy_psbt.inputs[0].clone())
     }
 
-    #[cfg(feature = "sp")]
     fn sp_to_psbt_input(&self) -> Result<psbt::Input, Error> {
         // For SP coins, we create a basic PSBT input with witness_utxo
         // The actual signing will be handled by the SP signer which uses the tweak

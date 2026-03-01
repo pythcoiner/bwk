@@ -8,4 +8,12 @@ pub enum Error {
     Derivation,
     MultiDescriptor,
     KeyChain,
+    /// SP output requires partial_secret but no SpPartialSecretProvider was given
+    NoSpProvider,
+    /// Failed to compute SP partial secret
+    SpPartialSecret,
+    /// Coin not found in store
+    CoinNotFound,
+    /// Change output already added to template
+    ChangeAlreadyAdded,
 }

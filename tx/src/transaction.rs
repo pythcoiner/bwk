@@ -1,13 +1,13 @@
 use miniscript::{
-    bitcoin::{self, absolute, transaction::Version, Network, Psbt, TxOut, Weight},
-    Descriptor, DescriptorPublicKey, ForEachKey,
+    bitcoin::{self, absolute, Network, Psbt, TxOut, Weight},
+    Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    coin::{shuffle_coins, Coin, KeyChain},
-    recipient::{shuffle_recipients, Recipient},
-    DUST_AMOUNT,
+    coin::shuffle_coins,
+    recipient::{FinalizationContext, RecipientProvider, SpPartialSecretProvider},
+    Coin, DUST_AMOUNT,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +26,22 @@ pub enum Error {
     Output,
     CoinSelection,
     CoinSelectionFee,
+    NoSpProvider,
+    SpPartialSecret,
+    ChangeAlreadyAdded,
+    /// Recipient passed to finalize() with change does not return true from is_change()
+    NotChange,
+    /// Change should have been added but wasn't - funds would be lost to fees
+    MissingChange {
+        excess: u64,
+    },
+    /// Fees exceed both percentage threshold and absolute threshold
+    DisproportionateFees {
+        fee: u64,
+        paid_outputs: u64,
+        max_percent: u8,
+        max_amount: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +50,21 @@ pub enum Warning {
     MaxUnderDust(u64),
     ChangeCreateDust(u64),
     MaxCreateDust(u64),
+    DisproportionateFees { fee: u64, paid_outputs: u64 },
+}
+
+impl Error {
+    pub fn to_warning(&self) -> Option<Warning> {
+        match self {
+            Error::DisproportionateFees {
+                fee, paid_outputs, ..
+            } => Some(Warning::DisproportionateFees {
+                fee: *fee,
+                paid_outputs: *paid_outputs,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,40 +82,156 @@ impl Fees {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxTemplate {
     pub inputs: Vec<Coin>,
-    pub outputs: Vec<Recipient>,
+    pub outputs: Vec<Box<dyn RecipientProvider>>,
     pub fees: Fees,
-    /// Descriptor of the potential change address, used to process
-    /// the weight of the change output
-    pub change_descriptor: Descriptor<DescriptorPublicKey>,
+}
+
+impl Clone for TxTemplate {
+    fn clone(&self) -> Self {
+        Self {
+            inputs: self.inputs.clone(),
+            outputs: self.outputs.iter().map(|o| o.clone_box()).collect(),
+            fees: self.fees.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for TxTemplate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxTemplate")
+            .field("inputs", &self.inputs)
+            .field("outputs", &format!("[{} outputs]", self.outputs.len()))
+            .field("fees", &self.fees)
+            .finish()
+    }
 }
 
 impl TxTemplate {
+    /// Build an unsigned transaction for weight estimation.
+    /// For SP outputs, uses a dummy P2TR script of correct size.
+    /// For actual signing, use finalize().
     pub fn tx(&self) -> bitcoin::Transaction {
-        let template = self.clone();
-        let input = template.inputs.into_iter().map(Into::into).collect();
-        let output = template.outputs.into_iter().map(Into::into).collect();
+        use bitcoin::XOnlyPublicKey;
+
+        let input = self.inputs.iter().cloned().map(Into::into).collect();
+        let output = self
+            .outputs
+            .iter()
+            .map(|r| {
+                let value = match r.amount() {
+                    Amount::Value(v) => bitcoin::Amount::from_sat(v),
+                    Amount::Max(Some(v)) => bitcoin::Amount::from_sat(v),
+                    Amount::Max(None) => bitcoin::Amount::MAX_MONEY,
+                    Amount::Anchor => bitcoin::Amount::ZERO,
+                };
+                let script = if r.is_silent_payment() {
+                    // Dummy P2TR script for weight estimation (correct size)
+                    let dummy_key = XOnlyPublicKey::from_slice(&[0x02; 32]).unwrap();
+                    bitcoin::ScriptBuf::new_p2tr_tweaked(
+                        bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(dummy_key),
+                    )
+                } else {
+                    r.create_script(&FinalizationContext {
+                        inputs: &[],
+                        partial_secret: None,
+                        network: Network::Bitcoin,
+                    })
+                };
+                TxOut {
+                    value,
+                    script_pubkey: script,
+                }
+            })
+            .collect();
         bitcoin::Transaction {
-            version: Version::TWO,
+            version: bitcoin::transaction::Version::TWO,
             lock_time: absolute::LockTime::ZERO,
             input,
             output,
         }
     }
-    pub fn into_psbt(&self) -> Result<Psbt, Error> {
-        // re-process the template as a sanity check
-        let TransactionResult {
-            tx_template, error, ..
-        } = process_transaction(self.clone(), &self.change_descriptor);
-        if let Some(error) = error {
-            return Err(error);
+
+    fn prepare_outputs(
+        &self,
+        change: Option<Box<dyn RecipientProvider>>,
+    ) -> Result<Vec<Box<dyn RecipientProvider>>, Error> {
+        let mut outputs: Vec<Box<dyn RecipientProvider>> =
+            self.outputs.iter().map(|o| o.clone_box()).collect();
+
+        if let Some(change_output) = change {
+            if !change_output.is_change() {
+                return Err(Error::NotChange);
+            }
+            if outputs.iter().any(|o| o.is_change()) {
+                return Err(Error::ChangeAlreadyAdded);
+            }
+            outputs.push(change_output);
         }
 
-        let unsigned_tx = tx_template.tx();
+        Ok(outputs)
+    }
 
-        let mut psbt = bitcoin::Psbt {
+    fn shuffle_maybe(
+        &self,
+        shuffle: bool,
+        mut outputs: Vec<Box<dyn RecipientProvider>>,
+    ) -> (Vec<Coin>, Vec<Box<dyn RecipientProvider>>) {
+        use rand::seq::SliceRandom;
+
+        let inputs = if shuffle {
+            shuffle_coins(self.inputs.clone())
+        } else {
+            self.inputs.clone()
+        };
+
+        if shuffle {
+            outputs.shuffle(&mut rand::rng());
+        }
+
+        (inputs, outputs)
+    }
+
+    fn compute_sp_partial_secret(
+        inputs: &[Coin],
+        outputs: &[Box<dyn RecipientProvider>],
+        sp_provider: &dyn SpPartialSecretProvider,
+    ) -> Result<Option<bitcoin::secp256k1::SecretKey>, Error> {
+        let needs_sp = outputs.iter().any(|r| r.is_silent_payment());
+        if !needs_sp {
+            return Ok(None);
+        }
+
+        let secret = sp_provider
+            .compute_partial_secret(inputs)
+            .map_err(|_| Error::SpPartialSecret)?;
+        Ok(Some(secret))
+    }
+
+    fn build_psbt(
+        inputs: &[Coin],
+        outputs: &[Box<dyn RecipientProvider>],
+        ctx: &FinalizationContext,
+    ) -> Result<Psbt, Error> {
+        let tx_outputs: Vec<TxOut> = outputs
+            .iter()
+            .map(|r| TxOut {
+                value: output_bitcoin_amount(r.as_ref()),
+                script_pubkey: r.create_script(ctx),
+            })
+            .collect();
+
+        let tx_inputs: Vec<bitcoin::TxIn> = inputs.iter().cloned().map(Into::into).collect();
+
+        let unsigned_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: tx_inputs,
+            output: tx_outputs,
+        };
+
+        let mut psbt = Psbt {
             unsigned_tx,
             version: 0,
             xpub: Default::default(),
@@ -94,17 +241,141 @@ impl TxTemplate {
             outputs: vec![],
         };
 
-        for i in &self.inputs {
+        for i in inputs {
             psbt.inputs
                 .push(i.to_psbt_input().map_err(|_| Error::Input)?);
         }
 
-        for o in &self.outputs {
+        for o in outputs {
             psbt.outputs
                 .push(o.to_psbt_output().map_err(|_| Error::Output)?);
         }
 
         Ok(psbt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize(
+        &self,
+        change: Option<Box<dyn RecipientProvider>>,
+        shuffle: bool,
+        sp_provider: Option<&dyn SpPartialSecretProvider>,
+        network: Network,
+        max_fee_percent: u8,
+        max_fee_amount: u64,
+        skip_checks: bool,
+    ) -> Result<Psbt, Error> {
+        let outputs = self.prepare_outputs(change)?;
+        let (inputs, outputs) = self.shuffle_maybe(shuffle, outputs);
+
+        if !skip_checks {
+            check_missing_change(&inputs, &outputs, &self.fees)?;
+            check_disproportionate_fee(&inputs, &outputs, max_fee_percent, max_fee_amount)?;
+        }
+
+        let partial_secret = match sp_provider {
+            Some(p) => Self::compute_sp_partial_secret(&inputs, &outputs, p)?,
+            None => None,
+        };
+        let ctx = FinalizationContext {
+            inputs: &inputs,
+            partial_secret,
+            network,
+        };
+
+        Self::build_psbt(&inputs, &outputs, &ctx)
+    }
+}
+
+fn output_amount(r: &dyn RecipientProvider) -> u64 {
+    match r.amount() {
+        Amount::Value(v) => v,
+        Amount::Max(Some(v)) => v,
+        Amount::Max(None) | Amount::Anchor => 0,
+    }
+}
+
+fn output_bitcoin_amount(r: &dyn RecipientProvider) -> bitcoin::Amount {
+    match r.amount() {
+        Amount::Value(v) => bitcoin::Amount::from_sat(v),
+        Amount::Max(Some(v)) => bitcoin::Amount::from_sat(v),
+        Amount::Max(None) => bitcoin::Amount::MAX_MONEY,
+        Amount::Anchor => bitcoin::Amount::ZERO,
+    }
+}
+
+fn sum_output_amounts(outputs: &[Box<dyn RecipientProvider>]) -> u64 {
+    outputs.iter().map(|r| output_amount(r.as_ref())).sum()
+}
+
+fn check_disproportionate_fee(
+    inputs: &[Coin],
+    outputs: &[Box<dyn RecipientProvider>],
+    max_fee_percent: u8,
+    max_fee_amount: u64,
+) -> Result<(), Error> {
+    let sum_inputs: u64 = inputs.iter().map(|c| c.txout.value.to_sat()).sum();
+    let sum_outputs: u64 = sum_output_amounts(outputs);
+    let fee = sum_inputs.saturating_sub(sum_outputs);
+
+    let paid_outputs: u64 = outputs
+        .iter()
+        .filter(|r| !r.is_change())
+        .map(|r| output_amount(r.as_ref()))
+        .sum();
+
+    if paid_outputs == 0 {
+        return Ok(());
+    }
+
+    let pct_threshold = paid_outputs * max_fee_percent as u64 / 100;
+    if fee > pct_threshold && fee > max_fee_amount {
+        Err(Error::DisproportionateFees {
+            fee,
+            paid_outputs,
+            max_percent: max_fee_percent,
+            max_amount: max_fee_amount,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn check_missing_change(
+    inputs: &[Coin],
+    outputs: &[Box<dyn RecipientProvider>],
+    fees: &Fees,
+) -> Result<(), Error> {
+    if outputs.iter().any(|o| o.is_change()) {
+        return Ok(());
+    }
+
+    let sum_inputs: u64 = inputs.iter().map(|c| c.txout.value.to_sat()).sum();
+    let sum_outputs: u64 = sum_output_amounts(outputs);
+    let fee = sum_inputs.saturating_sub(sum_outputs);
+
+    if fee <= DUST_AMOUNT {
+        return Ok(());
+    }
+
+    let estimated_fee = match fees {
+        Fees::Sats(f) => *f,
+        Fees::MilliSatsVb(rate) => {
+            let temp = TxTemplate {
+                inputs: inputs.to_vec(),
+                outputs: outputs.iter().map(|o| o.clone_box()).collect(),
+                fees: fees.clone(),
+            };
+            let weight = tx_estimated_weight(&temp);
+            weight.to_vbytes_ceil() * rate / 1_000
+        }
+    };
+
+    let excess = fee.saturating_sub(estimated_fee);
+    if excess > DUST_AMOUNT {
+        Err(Error::MissingChange { excess })
+    } else {
+        Ok(())
     }
 }
 
@@ -194,27 +465,7 @@ pub fn estimated_weight_raw(input_satisfaction_weights: &[u64], output_weights: 
     Weight::from_wu(weight)
 }
 
-pub fn change_weight(descriptor: &Descriptor<DescriptorPublicKey>) -> Weight {
-    let spk = descriptor
-        .clone()
-        .into_single_descriptors()
-        .unwrap()
-        .first()
-        .unwrap()
-        .at_derivation_index(0)
-        .unwrap()
-        .address(Network::Bitcoin)
-        .unwrap()
-        .script_pubkey();
-
-    let txout = TxOut {
-        value: bitcoin::Amount::MAX_MONEY,
-        script_pubkey: spk,
-    };
-    txout.weight()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TransactionResult {
     pub tx_template: TxTemplate,
     pub change: Option<bitcoin::Amount>,
@@ -333,73 +584,11 @@ pub fn process_fees(
     result
 }
 
-pub fn finalize_transaction<C>(
-    res: TransactionResult,
-    change_index: &mut C,
-    descriptor: Descriptor<DescriptorPublicKey>,
-    shuffle: bool,
-) -> Result<Psbt, Error>
-where
-    C: FnMut() -> u32,
-{
-    if let Some(error) = res.error {
-        return Err(error);
-    }
-
-    let mut template = res.tx_template;
-    let change_descriptor = descriptor
-        .clone()
-        .into_single_descriptors()
-        .expect("multipath")
-        .get(1)
-        .expect("multipath")
-        .clone();
-    let is_mainnet = change_descriptor.for_any_key(|k| match k {
-        DescriptorPublicKey::XPub(k) => k.xkey.network.is_mainnet(),
-        _ => unreachable!(),
-    });
-
-    let network = if is_mainnet {
-        Network::Bitcoin
-    } else {
-        Network::Signet
-    };
-
-    if let Some(change_value) = res.change {
-        let index = change_index();
-        let address = descriptor
-            .clone()
-            .into_single_descriptors()
-            .expect("multipath")
-            .get(1)
-            .expect("multipath")
-            .at_derivation_index(index)
-            .expect("derivation")
-            .address(network)
-            .expect("invalid descriptor");
-        let change_recip = Recipient {
-            address: address.as_unchecked().clone(),
-            amount: Amount::Value(change_value.to_sat()),
-            label: None, // FIXME: auto label change
-            origin: Some((KeyChain::Change, index)),
-            descriptor: Some(descriptor),
-        };
-        template.outputs.push(change_recip);
-    }
-
-    if shuffle {
-        template.inputs = shuffle_coins(template.inputs);
-        template.outputs = shuffle_recipients(template.outputs);
-    }
-
-    template.into_psbt()
-}
-
 /// Preprocesses a transaction based on the provided `TransactionTemplate`.
 #[allow(clippy::type_complexity)]
 pub fn process_transaction(
     tx_template: TxTemplate,
-    descriptor: &Descriptor<DescriptorPublicKey>,
+    change_recipient: Option<&dyn RecipientProvider>,
 ) -> TransactionResult {
     // TODO: implement coin selection if no or not enough input provided
 
@@ -419,7 +608,7 @@ pub fn process_transaction(
     let mut outputs_total = 0;
     let mut maxed_output = None;
     for (pos, o) in tx_template.outputs.iter().enumerate() {
-        match o.amount {
+        match o.amount() {
             Amount::Value(sat) => outputs_total += sat,
             Amount::Max(_) => {
                 if maxed_output.is_some() {
@@ -439,9 +628,11 @@ pub fn process_transaction(
         .iter()
         .fold(0u64, |sum, coin| sum + coin.txout.value.to_sat());
 
-    // let tx = tx_template.tx();
     let tx_weight_wo_change = tx_estimated_weight(&tx_template);
-    let tx_weight_with_change = tx_weight_wo_change + change_weight(descriptor);
+    let tx_weight_with_change = match change_recipient {
+        Some(r) => tx_weight_wo_change + r.output_weight(),
+        None => tx_weight_wo_change,
+    };
 
     let drain = match maxed_output {
         Some(_) => Drain::Max,
@@ -470,7 +661,15 @@ pub fn process_transaction(
     }
 
     result.fees = fees.map(bitcoin::Amount::from_sat);
-    // FIXME: maybe sanitize fees? fee < 10% total amount?
+
+    // Default thresholds: 10% and 2M sats (~$600)
+    if let Err(e) =
+        check_disproportionate_fee(&tx_template.inputs, &tx_template.outputs, 10, 2_000_000)
+    {
+        if let Some(w) = e.to_warning() {
+            result.warnings.push(w);
+        }
+    }
 
     match (maxed_output, max, change) {
         (Some(pos), Some(value), None) => {
@@ -479,7 +678,7 @@ pub fn process_transaction(
                 .outputs
                 .get_mut(pos)
                 .expect("max output missing")
-                .amount = Amount::Max(Some(value));
+                .set_amount(Amount::Max(Some(value)));
         }
         (None, None, Some(change)) => result.change = Some(bitcoin::Amount::from_sat(change)),
         (None, None, None) => {}
@@ -492,9 +691,9 @@ pub fn process_transaction(
 #[cfg(all(test, feature = "test"))]
 mod test {
     use super::*;
-    use crate::{
-        transaction::finalize_transaction,
-        tx_builder::test::{external_recipient, funding_coin, sum_inputs, sum_outputs, tr_signer},
+    use crate::coin::KeyChain;
+    use crate::tx_builder::test::{
+        external_recipient, funding_coin, sum_inputs, sum_outputs, tr_signer,
     };
     use miniscript::bitcoin;
 
@@ -510,30 +709,130 @@ mod test {
 
         let template = TxTemplate {
             inputs: vec![c1, c2],
-            outputs: vec![r1],
+            outputs: vec![Box::new(r1)],
             fees: Fees::MilliSatsVb(1000),
-            change_descriptor: descriptor.clone(),
         };
 
-        let res = process_transaction(template.clone(), &descriptor);
+        // Create change recipient prototype for fee estimation
+        let change_proto = crate::Recipient {
+            address: descriptor
+                .clone()
+                .into_single_descriptors()
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .at_derivation_index(0)
+                .unwrap()
+                .address(Network::Signet)
+                .unwrap()
+                .as_unchecked()
+                .clone(),
+            amount: Amount::Value(0),
+            label: None,
+            origin: Some((KeyChain::Change, 0)),
+            descriptor: Some(descriptor.clone()),
+        };
+
+        let res = process_transaction(template.clone(), Some(&change_proto));
 
         assert!(res.error.is_none());
         assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_788)));
         assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(212)));
 
-        let psbt = res.tx_template.into_psbt().unwrap();
-        assert_eq!(sum_inputs(&psbt), 80_000);
-        assert_eq!(sum_outputs(&psbt), 35_000); // change is not added
+        // Test finalize without change - should fail with MissingChange
+        let result =
+            res.tx_template
+                .finalize(None, false, None, Network::Signet, 10, 2_000_000, false);
+        assert!(matches!(result, Err(Error::MissingChange { .. })));
 
-        let psbt =
-            finalize_transaction(res.clone(), &mut (|| 1), descriptor.clone(), false).unwrap();
-        assert_eq!(sum_inputs(&psbt), 80_000);
-        assert_eq!(sum_outputs(&psbt), 80_000 - 212); // change is now added
-
-        // shuffling must not change amounts
-        let psbt =
-            finalize_transaction(res.clone(), &mut (|| 1), descriptor.clone(), true).unwrap();
+        // Test finalize with change
+        let change_index = 1u32;
+        let change_addr = descriptor
+            .clone()
+            .into_single_descriptors()
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .at_derivation_index(change_index)
+            .unwrap()
+            .address(Network::Signet)
+            .unwrap();
+        let change_amount = Amount::Value(res.change.unwrap().to_sat());
+        let change_recip = crate::Recipient {
+            address: change_addr.as_unchecked().clone(),
+            amount: change_amount.clone(),
+            label: None,
+            origin: Some((KeyChain::Change, change_index)),
+            descriptor: Some(descriptor.clone()),
+        };
+        let psbt = res
+            .tx_template
+            .finalize(
+                Some(Box::new(change_recip.clone())),
+                false,
+                None,
+                Network::Signet,
+                10,
+                2_000_000,
+                false,
+            )
+            .unwrap();
         assert_eq!(sum_inputs(&psbt), 80_000);
         assert_eq!(sum_outputs(&psbt), 80_000 - 212);
+
+        // Test finalize returns error if change already exists in outputs
+        let mut template_with_existing_change = res.tx_template.clone();
+        template_with_existing_change
+            .outputs
+            .push(Box::new(change_recip.clone()));
+        let result = template_with_existing_change.finalize(
+            Some(Box::new(change_recip)),
+            false,
+            None,
+            Network::Signet,
+            10,
+            2_000_000,
+            false,
+        );
+        assert!(matches!(result, Err(Error::ChangeAlreadyAdded)));
+    }
+
+    #[test]
+    fn test_disproportionate_fees() {
+        let (_signer, derivator) = tr_signer();
+
+        // 100k input, 10k output -> 90k fees
+        let c1 = funding_coin(100_000, &derivator, 1);
+        let r1 = external_recipient(10_000);
+
+        let template = TxTemplate {
+            inputs: vec![c1],
+            outputs: vec![Box::new(r1)],
+            fees: Fees::Sats(89_000),
+        };
+
+        let res = process_transaction(template.clone(), None);
+        assert!(res.error.is_none());
+
+        // Should fail: actual fee (90k) > 10% of paid_outputs (1k) AND > max_amount (50k)
+        let result =
+            res.tx_template
+                .finalize(None, false, None, Network::Signet, 10, 50_000, false);
+        assert!(matches!(
+            result,
+            Err(Error::DisproportionateFees { fee: 90000, .. })
+        ));
+
+        // Should succeed with skip_checks
+        let result = res
+            .tx_template
+            .finalize(None, false, None, Network::Signet, 10, 50_000, true);
+        assert!(result.is_ok());
+
+        // Should succeed if only one threshold is exceeded
+        let result =
+            res.tx_template
+                .finalize(None, false, None, Network::Signet, 10, 100_000, false);
+        assert!(result.is_ok());
     }
 }

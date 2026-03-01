@@ -1,8 +1,15 @@
 use bwk_descriptor::derivator::SpkDerivator;
-use bwk_tx::{coin::KeyChain, tx_builder::ChangeTip};
-use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
+use bwk_tx::{
+    coin::KeyChain, transaction::Amount, tx_builder::ChangeTip, FinalizationContext,
+    PsbtOutputInfo, RecipientProvider,
+};
+use miniscript::{
+    bitcoin::{self, address::NetworkUnchecked, Network, Script, ScriptBuf, TxOut, Weight},
+    Descriptor, DescriptorPublicKey,
+};
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     sync::{mpsc, Arc, Mutex},
 };
@@ -46,7 +53,118 @@ impl ChangeTip for ChangeTipUpdater {
     }
 }
 
-#[derive(Debug)]
+/// RecipientProvider for change outputs.
+/// Uses ChangeTipUpdater to derive new change addresses on each create_script() call.
+pub struct ChangeRecipientProvider {
+    tip_updater: ChangeTipUpdater,
+    descriptor: Descriptor<DescriptorPublicKey>,
+    network: Network,
+    amount: Amount,
+    /// The index used by the last create_script() call.
+    /// Set during create_script(), read by psbt_output_info().
+    current_index: Cell<Option<u32>>,
+}
+
+impl ChangeRecipientProvider {
+    pub fn new(
+        tip_updater: ChangeTipUpdater,
+        descriptor: Descriptor<DescriptorPublicKey>,
+        network: Network,
+    ) -> Self {
+        Self {
+            tip_updater,
+            descriptor,
+            network,
+            amount: Amount::Value(0),
+            current_index: Cell::new(None),
+        }
+    }
+}
+
+impl Clone for ChangeRecipientProvider {
+    fn clone(&self) -> Self {
+        Self {
+            tip_updater: ChangeTipUpdater(self.tip_updater.0.clone()),
+            descriptor: self.descriptor.clone(),
+            network: self.network,
+            amount: self.amount.clone(),
+            current_index: Cell::new(self.current_index.get()),
+        }
+    }
+}
+
+impl RecipientProvider for ChangeRecipientProvider {
+    fn output_weight(&self) -> Weight {
+        let script = self
+            .descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("change descriptor")
+            .at_derivation_index(0)
+            .expect("derivation")
+            .address(self.network)
+            .expect("address")
+            .script_pubkey();
+        TxOut {
+            value: bitcoin::Amount::MAX_MONEY,
+            script_pubkey: script,
+        }
+        .weight()
+    }
+
+    fn create_script(&self, _ctx: &FinalizationContext) -> ScriptBuf {
+        // Get next change index - this mutates the tip
+        let index = {
+            let mut updater = ChangeTipUpdater(self.tip_updater.0.clone());
+            updater.next_index()
+        };
+
+        // Store the index for psbt_output_info()
+        self.current_index.set(Some(index));
+
+        self.descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("change descriptor")
+            .at_derivation_index(index)
+            .expect("derivation")
+            .address(self.network)
+            .expect("address")
+            .script_pubkey()
+    }
+
+    fn psbt_output_info(&self) -> PsbtOutputInfo {
+        let index = self
+            .current_index
+            .get()
+            .expect("psbt_output_info() called before create_script()");
+        PsbtOutputInfo::Bip32 {
+            origin: (KeyChain::Change, index),
+            descriptor: self.descriptor.clone(),
+        }
+    }
+
+    fn is_change(&self) -> bool {
+        true
+    }
+
+    fn amount(&self) -> Amount {
+        self.amount.clone()
+    }
+
+    fn set_amount(&mut self, amount: Amount) {
+        self.amount = amount;
+    }
+
+    fn network(&self) -> Network {
+        self.network
+    }
+}
+
 /// Manages storage and generation of Bitcoin addresses.
 ///
 /// Tracks generated receiving and change addresses, notifies listeners,
@@ -61,6 +179,7 @@ impl ChangeTip for ChangeTipUpdater {
 ///   tips changes.
 /// - `tx_listener`: Optional channel for sending address tip changes.
 /// - `look_ahead`: Number of addresses to generate ahead of the current tip.
+#[derive(Debug)]
 pub struct AddressStore {
     store: BTreeMap<ScriptBuf, AddressEntry>,
     recv_generated_tip: u32,
@@ -498,5 +617,107 @@ impl AddressEntry {
     /// A `Box<Self>` containing the cloned address entry.
     pub fn clone_boxed(&self) -> Box<Self> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bwk_descriptor::{derivator::SpkDerivator, descriptor::ScriptType, tr_path};
+    use bwk_sign::HotSigner;
+    use bwk_tx::FinalizationContext;
+    use miniscript::bitcoin::bip32::ChildNumber;
+    use temp_dir::TempDir;
+
+    fn test_derivator() -> SpkDerivator {
+        let nw = Network::Regtest;
+        let signer = HotSigner::new(nw).unwrap();
+        let path = tr_path(nw, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        SpkDerivator::new_tr(xpub, nw).unwrap()
+    }
+
+    fn test_config(descriptor: Descriptor<DescriptorPublicKey>) -> Config {
+        let tmp = TempDir::new().expect("tempdir");
+        Config::new(
+            None, // no mnemonic needed with ScriptType::Descriptor
+            "test".to_string(),
+            Network::Regtest,
+            ScriptType::Descriptor(Box::new(descriptor)),
+            tmp.path().to_path_buf(),
+            "test",
+            false, // don't persist
+        )
+        .expect("valid config")
+    }
+
+    #[test]
+    fn change_recipient_provider_tracks_correct_index() {
+        let (tx, _rx) = mpsc::channel();
+        let network = Network::Regtest;
+        let derivator = test_derivator();
+        let descriptor = derivator.descriptor();
+        let config = test_config(descriptor.clone());
+
+        // Create AddressStore with change_generated_tip = 5
+        let store = AddressStore::new(
+            derivator, tx, 0,  // recv_tip
+            5,  // change_tip - start at index 5
+            20, // look_ahead
+            config,
+        );
+        let store = Arc::new(Mutex::new(store));
+
+        let tip_updater = ChangeTipUpdater::new(store);
+        let provider = ChangeRecipientProvider::new(tip_updater, descriptor, network);
+
+        // Create a dummy finalization context
+        let ctx = FinalizationContext {
+            inputs: &[],
+            partial_secret: None,
+            network,
+        };
+
+        // Call create_script - this should use index 6 (5 + 1)
+        let _script = provider.create_script(&ctx);
+
+        // Verify psbt_output_info returns the correct index
+        let info = provider.psbt_output_info();
+        match info {
+            PsbtOutputInfo::Bip32 { origin, .. } => {
+                assert_eq!(origin.0, KeyChain::Change);
+                assert_eq!(origin.1, 6, "Expected change index 6, got {}", origin.1);
+            }
+            _ => panic!("Expected PsbtOutputInfo::Bip32"),
+        }
+
+        // Call create_script again - should use index 7
+        let _script2 = provider.create_script(&ctx);
+        let info2 = provider.psbt_output_info();
+        match info2 {
+            PsbtOutputInfo::Bip32 { origin, .. } => {
+                assert_eq!(origin.1, 7, "Expected change index 7, got {}", origin.1);
+            }
+            _ => panic!("Expected PsbtOutputInfo::Bip32"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "psbt_output_info() called before create_script()")]
+    fn change_recipient_provider_panics_without_create_script() {
+        let (tx, _rx) = mpsc::channel();
+        let network = Network::Regtest;
+        let derivator = test_derivator();
+        let descriptor = derivator.descriptor();
+        let config = test_config(descriptor.clone());
+
+        let store = AddressStore::new(derivator, tx, 0, 0, 20, config);
+        let store = Arc::new(Mutex::new(store));
+
+        let tip_updater = ChangeTipUpdater::new(store);
+        let provider = ChangeRecipientProvider::new(tip_updater, descriptor, network);
+
+        // This should panic because create_script() was never called
+        let _info = provider.psbt_output_info();
     }
 }

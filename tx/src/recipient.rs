@@ -1,11 +1,117 @@
 use miniscript::{
-    bitcoin::{self, absolute, address::NetworkUnchecked, key::rand, Address, TxOut},
+    bitcoin::{
+        self, absolute,
+        address::NetworkUnchecked,
+        secp256k1::{PublicKey, SecretKey},
+        Address, Network, ScriptBuf, TxOut, Weight,
+    },
     psbt::PsbtExt,
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{coin::KeyChain, transaction::Amount, Error};
+use crate::{
+    coin::{Coin, KeyChain},
+    transaction::Amount,
+    Error,
+};
+
+/// Context passed during transaction finalization.
+/// Contains all information needed to create output scripts.
+pub struct FinalizationContext<'a> {
+    /// Selected input coins
+    pub inputs: &'a [Coin],
+    /// Partial secret for SP outputs (computed by SpPartialSecretProvider if any SP outputs exist)
+    pub partial_secret: Option<SecretKey>,
+    /// Bitcoin network
+    pub network: Network,
+}
+
+/// Trait for computing SP partial secret from inputs.
+/// Implemented by SpClient/Account in bwk-sp.
+pub trait SpPartialSecretProvider {
+    /// Compute the partial secret needed for SP output derivation.
+    /// This combines the spend key with tweaks from all selected inputs.
+    fn compute_partial_secret(&self, inputs: &[Coin]) -> Result<SecretKey, Error>;
+}
+
+/// Trait for types that can provide recipient output information.
+/// Implemented by Address, SilentPaymentAddress, and Account types.
+pub trait RecipientProvider: RecipientProviderClone {
+    /// Weight of this output for fee estimation
+    fn output_weight(&self) -> Weight;
+
+    /// Create output script using finalization context.
+    /// - For regular addresses: ignores context
+    /// - For SP: uses partial_secret from context to derive output key
+    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf;
+
+    /// PSBT output metadata for signers (BIP32 derivation or BIP375 SP info)
+    fn psbt_output_info(&self) -> PsbtOutputInfo;
+
+    /// Whether this recipient is a Silent Payment address.
+    fn is_silent_payment(&self) -> bool {
+        false
+    }
+
+    /// Whether this is a change output (KeyChain::Change in origin)
+    fn is_change(&self) -> bool {
+        false
+    }
+
+    /// The amount for this output
+    fn amount(&self) -> Amount;
+
+    /// Set the amount (used for Max output resolution)
+    fn set_amount(&mut self, amount: Amount);
+
+    /// Convert to PSBT output metadata
+    fn to_psbt_output(&self) -> Result<bitcoin::psbt::Output, Error> {
+        Ok(bitcoin::psbt::Output::default())
+    }
+
+    /// Network for this recipient
+    fn network(&self) -> Network;
+}
+
+/// Helper trait for cloning boxed RecipientProvider
+pub trait RecipientProviderClone {
+    fn clone_box(&self) -> Box<dyn RecipientProvider>;
+}
+
+impl<T> RecipientProviderClone for T
+where
+    T: RecipientProvider + Clone + 'static,
+{
+    fn clone_box(&self) -> Box<dyn RecipientProvider> {
+        Box::new(self.clone())
+    }
+}
+
+impl Clone for Box<dyn RecipientProvider> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+/// PSBT output metadata - needed by signers
+#[derive(Debug, Clone)]
+pub enum PsbtOutputInfo {
+    /// Descriptor-based wallets (BIP32 derivation paths)
+    Bip32 {
+        origin: (KeyChain, u32),
+        descriptor: Descriptor<DescriptorPublicKey>,
+    },
+    /// Silent Payment outputs (BIP375)
+    /// Contains PSBT_OUT_SP_V0_INFO (scan + spend pubkeys) and optional PSBT_OUT_SP_V0_LABEL
+    SilentPayment {
+        scan_pubkey: PublicKey,
+        spend_pubkey: PublicKey,
+        label: Option<u32>,
+    },
+    /// External address with no special metadata
+    None,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Recipient {
@@ -23,7 +129,7 @@ impl From<&Recipient> for TxOut {
             Amount::Max(value) => {
                 match value {
                     Some(v) => bitcoin::Amount::from_sat(v),
-                    // NOTE: vif value is None, that's mean simulation do
+                    // NOTE: if value is None, that's mean simulation do
                     // NOT success, thus we put a dummy MAX_MONEY amount
                     // in order to be sure the transaction is not realistically
                     // spendable, but can be used for weight estimation
@@ -101,8 +207,110 @@ impl Recipient {
     }
 }
 
-pub fn shuffle_recipients(mut vec: Vec<Recipient>) -> Vec<Recipient> {
-    use rand::seq::SliceRandom;
-    vec.shuffle(&mut rand::thread_rng());
-    vec
+impl RecipientProvider for Recipient {
+    fn output_weight(&self) -> Weight {
+        let script = self.address.clone().assume_checked().script_pubkey();
+        TxOut {
+            value: bitcoin::Amount::MAX_MONEY,
+            script_pubkey: script,
+        }
+        .weight()
+    }
+
+    fn create_script(&self, _ctx: &FinalizationContext) -> ScriptBuf {
+        self.address.clone().assume_checked().script_pubkey()
+    }
+
+    fn psbt_output_info(&self) -> PsbtOutputInfo {
+        match (&self.origin, &self.descriptor) {
+            (Some(origin), Some(descriptor)) => PsbtOutputInfo::Bip32 {
+                origin: *origin,
+                descriptor: descriptor.clone(),
+            },
+            _ => PsbtOutputInfo::None,
+        }
+    }
+
+    fn amount(&self) -> Amount {
+        self.amount.clone()
+    }
+
+    fn set_amount(&mut self, amount: Amount) {
+        self.amount = amount;
+    }
+
+    fn is_change(&self) -> bool {
+        matches!(self.origin, Some((KeyChain::Change, _)))
+    }
+
+    fn to_psbt_output(&self) -> Result<bitcoin::psbt::Output, Error> {
+        if let (Some(descr), Some((kc, index))) = (&self.descriptor, &self.origin) {
+            let descriptors = descr
+                .clone()
+                .into_single_descriptors()
+                .map_err(|_| Error::MultiDescriptor)?;
+            let recv = descriptors.first().ok_or(Error::MultiDescriptor)?;
+            let change = descriptors.get(1).ok_or(Error::MultiDescriptor)?;
+
+            let descr = match kc {
+                KeyChain::Receive => recv
+                    .at_derivation_index(*index)
+                    .map_err(|_| Error::Derivation)?,
+                KeyChain::Change => change
+                    .at_derivation_index(*index)
+                    .map_err(|_| Error::Derivation)?,
+                KeyChain::Custom(_) => return Err(Error::KeyChain),
+            };
+
+            let dummy_tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![],
+                output: vec![self.clone().into()],
+            };
+
+            let mut dummy_psbt = bitcoin::Psbt {
+                unsigned_tx: dummy_tx,
+                version: 0,
+                xpub: Default::default(),
+                proprietary: Default::default(),
+                unknown: Default::default(),
+                inputs: Default::default(),
+                outputs: vec![bitcoin::psbt::Output::default()],
+            };
+
+            PsbtExt::update_output_with_descriptor(&mut dummy_psbt, 0, &descr)
+                .map_err(|_| Error::Update)?;
+
+            Ok(dummy_psbt.outputs[0].clone())
+        } else {
+            Ok(bitcoin::psbt::Output::default())
+        }
+    }
+
+    fn network(&self) -> Network {
+        use miniscript::ForEachKey;
+
+        if let Some(descriptor) = &self.descriptor {
+            let is_mainnet = descriptor
+                .clone()
+                .into_single_descriptors()
+                .ok()
+                .and_then(|d| d.first().cloned())
+                .map(|d| {
+                    d.for_any_key(|k| match k {
+                        DescriptorPublicKey::XPub(k) => k.xkey.network.is_mainnet(),
+                        _ => false,
+                    })
+                })
+                .unwrap_or(false);
+            if is_mainnet {
+                Network::Bitcoin
+            } else {
+                Network::Signet
+            }
+        } else {
+            Network::Signet
+        }
+    }
 }
