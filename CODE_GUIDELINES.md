@@ -40,6 +40,27 @@ Use threads + channels for concurrency, no async/await.
 
 Module-level imports. No imports inside functions unless truly necessary.
 
+Use nested imports to group items from the same crate:
+```rust
+// Bad - separate use statements
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+// Good - nested imports
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+```
+
 ## Notification Channels
 
 Account types expose a takeable receiver:
