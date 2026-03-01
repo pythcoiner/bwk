@@ -7,6 +7,7 @@ mod account;
 mod coin_store;
 mod config;
 mod label_store;
+pub mod recipient;
 mod scan_state;
 mod tx_store;
 
@@ -24,6 +25,9 @@ pub use tx_store::{SpTxEntry, SpTxStore, TxDirection, TxStoreError};
 
 // Re-export external types for convenience
 pub use bitcoin;
-pub use bwk_tx::Fees;
+pub use bwk_tx::{
+    Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
+};
+pub use recipient::{SpRecipient, SpRecipientAddress};
 pub use silentpayments;
 pub use spdk_core;

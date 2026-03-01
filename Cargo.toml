@@ -31,7 +31,7 @@ hex_lit = "0.1.1"
 home = "=0.5.9"
 libc = "0.2.170"
 log = "0.4.20"
-miniscript = "12.2.0"
+miniscript = { version = "12.2.0", features = ["base64"] }
 native-tls = "=0.2.13"
 openssl = "0.10.66"
 rand = "0.9.1"
@@ -45,8 +45,8 @@ corepc-node = { version = "0.10.0", features = ["download", "29_0"] }
 dns-lookup = "2.0"
 
 # spdk dependencies
-spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "9197d0f", default-features = false }
-backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "9197d0f" }
+spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "cd178c8", default-features = false }
+backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "cd178c8" }
 silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
 

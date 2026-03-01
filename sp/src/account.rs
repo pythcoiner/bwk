@@ -466,6 +466,11 @@ impl Account {
         self.client.get_receiving_address()
     }
 
+    /// Returns a reference to the SpClient for advanced operations.
+    pub fn sp_client(&self) -> &SpClient {
+        &self.client
+    }
+
     /// Takes the notification receiver (can only be called once).
     pub fn receiver(&mut self) -> Option<mpsc::Receiver<Notification>> {
         self.receiver.take()
