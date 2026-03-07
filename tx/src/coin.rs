@@ -169,6 +169,8 @@ impl Coin {
             xpub: Default::default(),
             proprietary: Default::default(),
             unknown: Default::default(),
+            sp_dleqs: Default::default(),
+            sp_ecdh_shares: Default::default(),
             inputs: vec![inp],
             outputs: vec![],
         };
