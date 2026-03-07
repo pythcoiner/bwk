@@ -17,7 +17,9 @@ read the relevant BIP. Getting Bitcoin wrong breaks real money.
 
 ## Commits
 
-Single-line commit messages only.
+Single-line commit messages only. Prefix with the crate name and a colon
+(`bwk-sp: short description`). Use `workspace:` for workspace-level changes,
+`doc:` for documentation-only changes.
 
 ## Comments
 
@@ -78,6 +80,16 @@ Use `.expect("poisoned")` - no recovery from poisoned locks:
 ```rust
 self.store.lock().expect("poisoned")
 ```
+
+## Tests
+
+Use `unwrap()` in tests, not `expect("...")`. Tests already show the
+failing line on panic — the extra message is noise.
+
+## Section Separators
+
+Forbidden — no `//====`, `//----`, or any decorative banner lines.
+Use a simple `// Section name` comment if grouping is needed.
 
 ## Test Feature
 
