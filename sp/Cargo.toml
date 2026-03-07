@@ -9,6 +9,8 @@ spdk-core = { workspace = true, features = ["sync", "mnemonic", "bitcoin_32"] }
 backend-blindbit-native-non-async = { workspace = true }
 
 # bwk crates
+bwk = { workspace = true }
+bwk-sign = { workspace = true, features = ["sp"] }
 bwk-tx = { workspace = true }
 
 # Bitcoin

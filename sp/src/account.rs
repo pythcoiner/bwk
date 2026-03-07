@@ -14,60 +14,24 @@ use std::time::Duration;
 
 use bitcoin::absolute::Height;
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, BlockHash, Network, OutPoint, Transaction, Txid};
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::Signature;
+use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
 use silentpayments::SilentPaymentAddress;
 
 use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClient};
 use spdk_core::account::SpAccount;
-use spdk_core::{
-    bip39, OwnedOutput, Recipient, RecipientAddress, SilentPaymentUnsignedTransaction, SpClient,
-    SpScanner, Updater,
-};
-
-use bwk_tx::coin_selection::CoinCandidate;
-use bwk_tx::Fees;
+use spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
 
 use crate::{
+    coin_store::{MergedCoinSource, SpCoinSource},
+    recipient::{SpChangeRecipientProvider, SpSecretProvider},
     CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpLabelStore, SpTxEntry,
     SpTxStore,
 };
 
-//=============================================================================
-// Constants
-//=============================================================================
-
-/// Taproot keyspend satisfaction weight in WU (1 Schnorr signature = 66 WU)
-const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
-
-/// Taproot output weight in WU (8 value + 1 varint + 34 script_pubkey) * 4 = 172 WU
-const TR_OUTPUT_WEIGHT: u64 = 172;
-
-//=============================================================================
-// SpCoinCandidate
-//=============================================================================
-
-/// Lightweight coin type for bwk-tx coin selection.
-/// SP wallets only spend taproot keypath outputs.
-struct SpCoinCandidate {
-    outpoint: OutPoint,
-    value: u64,
-}
-
-impl CoinCandidate for SpCoinCandidate {
-    fn outpoint(&self) -> OutPoint {
-        self.outpoint
-    }
-    fn value_sat(&self) -> u64 {
-        self.value
-    }
-    fn satisfaction_weight(&self) -> u64 {
-        TR_KEYSPEND_SATISFACTION_WEIGHT
-    }
-}
-
-//=============================================================================
 // Type Aliases
-//=============================================================================
 
 /// Type alias for the tuple of stores returned by create_or_load_stores.
 type Stores = (
@@ -77,9 +41,7 @@ type Stores = (
     Arc<Mutex<ScanState>>,
 );
 
-//=============================================================================
 // AccountError
-//=============================================================================
 
 /// Errors that can occur in Account operations.
 #[derive(Debug, thiserror::Error)]
@@ -104,9 +66,7 @@ pub enum AccountError {
     Transaction(String),
 }
 
-//=============================================================================
 // Notification
-//=============================================================================
 
 /// Notifications sent by the Account to signal events.
 #[derive(Debug, Clone)]
@@ -161,9 +121,7 @@ pub enum Notification {
     },
 }
 
-//=============================================================================
 // ScanMode
-//=============================================================================
 
 /// Scan mode for the scanner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -177,9 +135,7 @@ pub enum ScanMode {
     Continuous,
 }
 
-//=============================================================================
 // PaymentType
-//=============================================================================
 
 /// Type of payment (for UI display).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,9 +146,7 @@ pub enum PaymentType {
     Send,
 }
 
-//=============================================================================
 // Payment
-//=============================================================================
 
 /// A payment record for UI display.
 #[derive(Debug, Clone)]
@@ -209,9 +163,7 @@ pub struct Payment {
     pub height: Option<u32>,
 }
 
-//=============================================================================
 // Account
-//=============================================================================
 
 /// Main orchestrator for a Silent Payment wallet account.
 ///
@@ -240,12 +192,12 @@ pub struct Account {
     scanner_handle: Option<JoinHandle<()>>,
     /// Flag to signal scanner to stop
     scanner_stop: Arc<AtomicBool>,
+    /// Optional embedded standard wallet accounts (segwit, taproot, etc.)
+    sub_accounts: Vec<bwk::Account>,
 }
 
 impl Account {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new Account from configuration.
     ///
@@ -280,6 +232,35 @@ impl Account {
         // Create/load stores
         let (coin_store, label_store, tx_store, scan_state) = Self::create_or_load_stores(&config);
 
+        // Create sub-accounts from config descriptors
+        let sub_accounts = config
+            .descriptors
+            .iter()
+            .enumerate()
+            .map(|(i, sub_cfg)| {
+                let mut bwk_config = bwk::Config {
+                    data_dir: config.account_dir(),
+                    dir_name: "",
+                    account: format!("{}-sub-{}", config.account_name, i),
+                    electrum_url: sub_cfg.electrum_url.clone(),
+                    electrum_port: sub_cfg.electrum_port,
+                    offline: if sub_cfg.electrum_url.is_none() {
+                        Some(true)
+                    } else {
+                        None
+                    },
+                    network: config.network,
+                    look_ahead: 20,
+                    mnemonic: config.mnemonic.clone(),
+                    descriptor: sub_cfg.descriptor.clone(),
+                    persist: config.persist,
+                };
+                bwk_config.dir_name =
+                    Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());
+                bwk::Account::new(bwk_config)
+            })
+            .collect();
+
         Ok(Account {
             client,
             backend,
@@ -292,6 +273,7 @@ impl Account {
             receiver: Some(receiver),
             scanner_handle: None,
             scanner_stop: Arc::new(AtomicBool::new(false)),
+            sub_accounts,
         })
     }
 
@@ -440,11 +422,7 @@ impl Account {
             Arc::new(Mutex::new(tx_store)),
             Arc::new(Mutex::new(scan_state)),
         )
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters (accessors)
-    //-------------------------------------------------------------------------
+    } // Getters (accessors)
 
     /// Returns the account name.
     pub fn name(&self) -> &str {
@@ -474,11 +452,7 @@ impl Account {
     /// Takes the notification receiver (can only be called once).
     pub fn receiver(&mut self) -> Option<mpsc::Receiver<Notification>> {
         self.receiver.take()
-    }
-
-    //-------------------------------------------------------------------------
-    // Coin & Balance Methods
-    //-------------------------------------------------------------------------
+    } // Coin & Balance Methods
 
     /// Returns a clone of all coins in the store.
     pub fn coins(&self) -> BTreeMap<OutPoint, SpCoinEntry> {
@@ -502,11 +476,7 @@ impl Account {
     /// Returns the total spendable balance in satoshis.
     pub fn balance(&self) -> u64 {
         self.spendable_coins().confirmed_balance
-    }
-
-    //-------------------------------------------------------------------------
-    // Transaction History
-    //-------------------------------------------------------------------------
+    } // Transaction History
 
     /// Returns all transaction entries.
     pub fn tx_history(&self) -> Vec<SpTxEntry> {
@@ -531,8 +501,6 @@ impl Account {
     /// For transactions, the label from the transaction entry is used,
     /// falling back to label_store lookup.
     pub fn payment_history(&self) -> Vec<Payment> {
-        use std::collections::HashMap;
-
         // Local struct to avoid clippy::type_complexity warning for tx_data tuple
         struct TxData {
             txid: Txid,
@@ -667,11 +635,7 @@ impl Account {
         });
 
         payments
-    }
-
-    //-------------------------------------------------------------------------
-    // Labels
-    //-------------------------------------------------------------------------
+    } // Labels
 
     /// Update the label for a coin.
     pub fn update_coin_label(&self, outpoint: OutPoint, label: String) {
@@ -702,11 +666,7 @@ impl Account {
             .expect("poisoned")
             .outpoint(outpoint)
             .cloned()
-    }
-
-    //-------------------------------------------------------------------------
-    // Scanning
-    //-------------------------------------------------------------------------
+    } // Scanning
 
     /// Get the current block height from the backend.
     pub fn block_height(&self) -> Result<u32, AccountError> {
@@ -1039,11 +999,24 @@ impl Account {
             .lock()
             .expect("poisoned")
             .last_scanned_height()
+    } // Sub-accounts
+
+    /// Add a standard wallet sub-account (segwit, taproot, etc.).
+    pub fn add_sub_account(&mut self, account: bwk::Account) {
+        self.sub_accounts.push(account);
     }
 
-    //-------------------------------------------------------------------------
-    // Transaction Building
-    //-------------------------------------------------------------------------
+    /// Returns a reference to the embedded sub-accounts.
+    pub fn sub_accounts(&self) -> &[bwk::Account] {
+        &self.sub_accounts
+    }
+
+    /// Total balance across SP and all sub-accounts.
+    pub fn total_balance(&self) -> u64 {
+        let sp_balance = self.balance();
+        let bip32_balance: u64 = self.sub_accounts.iter().map(|a| a.balance().0).sum();
+        sp_balance + bip32_balance
+    } // Transaction Building
 
     /// Check if this account can sign transactions.
     ///
@@ -1052,261 +1025,166 @@ impl Account {
         self.client.try_get_secret_spend_key().is_ok()
     }
 
-    /// Create an unsigned transaction sending to the given recipients.
+    /// Returns a [`TxBuilder`] pre-configured with this account's coin source,
+    /// change provider, and SP partial secret provider.
     ///
-    /// Uses bwk-tx for coin selection and fee processing, then constructs
-    /// the SP-specific unsigned transaction.
+    /// Usage mirrors [`bwk::Account::tx_builder()`]:
+    /// ```ignore
+    /// let mut builder = account.tx_builder();
+    /// builder.add_output(SpRecipient::new(sp_addr, 50_000, network));
+    /// builder.feerate(1000);
+    /// let mut psbt = builder.generate()?;
+    /// account.sign_psbt(&mut psbt)?;
+    /// ```
+    pub fn tx_builder(&self) -> bwk_tx::TxBuilder {
+        let change_addr = self.client.sp_receiver.get_change_address();
+        let change_provider = Box::new(SpChangeRecipientProvider::new(
+            change_addr,
+            self.config.network,
+        ));
+
+        let sp_source = SpCoinSource::new(self.coin_store.clone());
+        let sp_provider = Box::new(SpSecretProvider::new(
+            self.coin_store.clone(),
+            self.client.clone(),
+        ));
+
+        // Merge coin sources from all sub-accounts
+        let bip32_sources: Vec<Box<dyn bwk_tx::CoinSource>> = self
+            .sub_accounts
+            .iter()
+            .map(|a| Box::new(a.coin_source()) as Box<dyn bwk_tx::CoinSource>)
+            .collect();
+        let merged_source = Box::new(MergedCoinSource::new(sp_source, bip32_sources));
+
+        bwk_tx::TxBuilder::new(change_provider)
+            .coin_source(merged_source)
+            .sp_provider(sp_provider)
+    }
+
+    /// Sign all inputs in a PSBT — both SP and BIP32 (segwit/taproot).
     ///
-    /// # Arguments
-    /// * `recipients` - List of (address, amount) pairs to send to
-    /// * `fees` - Fee specification: `Fees::MilliSatsVb(rate)` or `Fees::Sats(absolute)`
+    /// 1. Signs SP inputs using `b_spend + tweak` (no taproot tweak).
+    /// 2. Signs BIP32 inputs via sub-account HotSigners.
     ///
     /// # Errors
-    /// * `AccountError::Transaction` if there are insufficient funds or other tx building errors
-    pub fn create_transaction(
-        &self,
-        recipients: Vec<(RecipientAddress, Amount)>,
-        fees: Fees,
-    ) -> Result<SilentPaymentUnsignedTransaction, AccountError> {
-        let coin_state = self.coin_store.lock().expect("poisoned").spendable_coins();
-
-        let available_utxos: Vec<(OutPoint, OwnedOutput)> = coin_state
-            .coins
-            .into_iter()
-            .map(|(outpoint, entry)| (outpoint, entry.owned_output().clone()))
-            .collect();
-
-        if available_utxos.is_empty() {
-            return Err(AccountError::Transaction("no spendable coins".to_string()));
+    /// * `AccountError::NoKeys` if this account has no spend secret key
+    /// * `AccountError::Transaction` on signing failure
+    pub fn sign_psbt(&self, psbt: &mut bitcoin::Psbt) -> Result<(), AccountError> {
+        // Sign SP inputs
+        if self.can_sign() {
+            self.sign_sp_inputs(psbt)?;
         }
 
-        // Build coin candidates for bwk-tx coin selection
-        let candidates: Vec<SpCoinCandidate> = available_utxos
+        // Sign BIP32 inputs via sub-account HotSigners
+        for sub in &self.sub_accounts {
+            if let Some(signer) = sub.hot_signer() {
+                signer.sign(psbt);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sign all inputs and finalize the PSBT into a broadcast-ready transaction.
+    ///
+    /// 1. Signs SP inputs (`b_spend + tweak`).
+    /// 2. Signs BIP32 inputs via sub-account HotSigners.
+    /// 3. Finalizes all inputs (builds witnesses) and extracts the transaction.
+    pub fn sign_and_finalize(
+        &self,
+        psbt: &mut bitcoin::Psbt,
+    ) -> Result<bitcoin::Transaction, AccountError> {
+        self.sign_psbt(psbt)?;
+        Self::finalize(psbt)
+    }
+
+    /// Finalize a signed PSBT into a broadcast-ready transaction.
+    ///
+    /// Handles taproot key-spend inputs (SP and BIP32) via `tap_key_sig`,
+    /// and segwit P2WPKH inputs via `partial_sigs`.
+    fn finalize(psbt: &mut bitcoin::Psbt) -> Result<bitcoin::Transaction, AccountError> {
+        for input in &mut psbt.inputs {
+            if let Some(sig) = input.tap_key_sig {
+                input.final_script_witness = Some(bitcoin::Witness::p2tr_key_spend(&sig));
+                input.tap_key_sig = None;
+                input.tap_internal_key = None;
+                input.tap_key_origins.clear();
+            } else if !input.partial_sigs.is_empty() {
+                let (pubkey, sig) = input.partial_sigs.iter().next().unwrap();
+                let mut witness = bitcoin::Witness::new();
+                witness.push(sig.to_vec());
+                witness.push(pubkey.to_bytes());
+                input.final_script_witness = Some(witness);
+                input.partial_sigs.clear();
+                input.bip32_derivation.clear();
+            }
+        }
+        Ok(psbt.clone().extract_tx_unchecked_fee_rate())
+    }
+
+    /// Sign only the SP inputs in a PSBT.
+    ///
+    /// For each input whose outpoint is found in this account's coin store,
+    /// computes the signing key (`b_spend + tweak`) and produces a Schnorr
+    /// signature stored in `tap_key_sig`.
+    fn sign_sp_inputs(&self, psbt: &mut bitcoin::Psbt) -> Result<(), AccountError> {
+        let b_spend = self
+            .client
+            .try_get_secret_spend_key()
+            .map_err(|e| AccountError::Transaction(e.to_string()))?;
+
+        let secp = Secp256k1::new();
+        let hash_ty = TapSighashType::Default;
+
+        let prevouts: Vec<bitcoin::TxOut> = psbt
+            .inputs
             .iter()
-            .map(|(outpoint, output)| SpCoinCandidate {
-                outpoint: *outpoint,
-                value: output.amount.to_sat(),
+            .map(|input| {
+                input
+                    .witness_utxo
+                    .clone()
+                    .expect("PSBT input must have witness_utxo")
             })
             .collect();
 
-        let output_total: u64 = recipients.iter().map(|(_, amt)| amt.to_sat()).sum();
+        let mut cache = SighashCache::new(&psbt.unsigned_tx);
+        let coin_store = self.coin_store.lock().expect("poisoned");
 
-        // For coin selection: use feerate for rate-based, 0 for absolute (fee is in target)
-        let (feerate_msats_vb, base_fee_for_target) = match &fees {
-            Fees::MilliSatsVb(rate) => {
-                // Estimate base tx fee to add to coin selection target
-                let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT; recipients.len()];
-                let base_weight = bwk_tx::estimated_weight_raw(&[], &output_weights);
-                let base_fee = base_weight.to_vbytes_ceil() * rate / 1000;
-                (*rate, base_fee)
-            }
-            Fees::Sats(absolute) => {
-                // With feerate=0, coin selection just compares raw values
-                (0, *absolute)
-            }
-        };
+        let mut aux_rand = [0u8; 32];
+        getrandom::getrandom(&mut aux_rand)
+            .map_err(|e| AccountError::Transaction(format!("random bytes: {e}")))?;
 
-        let (selection, _) = bwk_tx::coin_selection::select(
-            candidates.iter().collect(),
-            output_total + base_fee_for_target,
-            feerate_msats_vb,
-            50_000,
-            5_000_000,
-            bwk_tx::DUST_AMOUNT,
-        );
+        for (i, input) in psbt.unsigned_tx.input.iter().enumerate() {
+            let Some(entry) = coin_store.get(&input.previous_output) else {
+                // Not an SP input, skip
+                continue;
+            };
 
-        let selection = selection
-            .ok_or_else(|| AccountError::Transaction("coin selection failed".to_string()))?;
+            let sighash = cache
+                .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), hash_ty)
+                .map_err(|e| AccountError::Transaction(format!("sighash: {e}")))?;
 
-        // Map selected outpoints back to (OutPoint, OwnedOutput)
-        let selected_outpoints: HashSet<OutPoint> = selection.outpoints.into_iter().collect();
-        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = available_utxos
-            .into_iter()
-            .filter(|(op, _)| selected_outpoints.contains(op))
-            .collect();
+            let msg = Message::from_digest(sighash.to_byte_array());
+            let tweak = SecretKey::from_slice(entry.tweak())
+                .map_err(|e| AccountError::Transaction(format!("tweak: {e}")))?;
+            let sk = b_spend
+                .add_tweak(&tweak.into())
+                .map_err(|e| AccountError::Transaction(format!("add_tweak: {e}")))?;
 
-        // Compute fee using bwk-tx
-        let inputs_total: u64 = selected_utxos.iter().map(|(_, o)| o.amount.to_sat()).sum();
-        let input_weights: Vec<u64> = vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
-        let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT; recipients.len()];
-        let weight_wo_change = bwk_tx::estimated_weight_raw(&input_weights, &output_weights);
+            let keypair = Keypair::from_secret_key(&secp, &sk);
+            // SP outputs use dangerous_assume_tweaked() — no taproot tweak on the
+            // output key, so sign with the untweaked keypair directly.
+            let sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, &aux_rand);
 
-        let mut change_outputs = output_weights.clone();
-        change_outputs.push(TR_OUTPUT_WEIGHT);
-        let weight_with_change = bwk_tx::estimated_weight_raw(&input_weights, &change_outputs);
-
-        let fee_result = bwk_tx::process_fees(
-            fees,
-            weight_wo_change,
-            weight_with_change,
-            inputs_total,
-            output_total,
-            bwk_tx::Drain::Change,
-        );
-
-        if let Some(ref err) = fee_result.error {
-            return Err(AccountError::Transaction(format!("{err:?}")));
-        }
-
-        // Build recipients
-        let mut sp_recipients: Vec<Recipient> = recipients
-            .into_iter()
-            .map(|(address, amount)| Recipient { address, amount })
-            .collect();
-
-        // Add change output if needed
-        if let Some(change_value) = fee_result.change {
-            let change_address = self.client.sp_receiver.get_change_address();
-            sp_recipients.push(Recipient {
-                address: RecipientAddress::SpAddress(change_address),
-                amount: Amount::from_sat(change_value),
+            psbt.inputs[i].tap_key_sig = Some(Signature {
+                signature: sig,
+                sighash_type: hash_ty,
             });
         }
 
-        // Compute partial secret for selected UTXOs
-        let partial_secret = self
-            .client
-            .get_partial_secret_for_selected_utxos(&selected_utxos)
-            .map_err(|e| AccountError::Transaction(e.to_string()))?;
-
-        Ok(SilentPaymentUnsignedTransaction {
-            selected_utxos,
-            recipients: sp_recipients,
-            partial_secret,
-            unsigned_tx: None,
-            network: self.config.network,
-        })
-    }
-
-    /// Create a drain transaction that spends ALL coins to a single recipient.
-    ///
-    /// Uses bwk-tx for fee processing.
-    ///
-    /// # Arguments
-    /// * `recipient` - The address to send all funds to
-    /// * `fees` - Fee specification: `Fees::MilliSatsVb(rate)` or `Fees::Sats(absolute)`
-    ///
-    /// # Errors
-    /// * `AccountError::Transaction` if there are no spendable coins or other tx building errors
-    pub fn create_drain_transaction(
-        &self,
-        recipient: RecipientAddress,
-        fees: Fees,
-    ) -> Result<SilentPaymentUnsignedTransaction, AccountError> {
-        let coin_state = self.coin_store.lock().expect("poisoned").spendable_coins();
-
-        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = coin_state
-            .coins
-            .into_iter()
-            .map(|(outpoint, entry)| (outpoint, entry.owned_output().clone()))
-            .collect();
-
-        if selected_utxos.is_empty() {
-            return Err(AccountError::Transaction("no spendable coins".to_string()));
-        }
-
-        let inputs_total: u64 = selected_utxos.iter().map(|(_, o)| o.amount.to_sat()).sum();
-        let input_weights: Vec<u64> = vec![TR_KEYSPEND_SATISFACTION_WEIGHT; selected_utxos.len()];
-        let output_weights: Vec<u64> = vec![TR_OUTPUT_WEIGHT]; // single recipient
-
-        let weight_wo_change = bwk_tx::estimated_weight_raw(&input_weights, &output_weights);
-        // For drain, there's no "change" — the single output IS the drain.
-        // We use Max drain mode: fee is computed without change output.
-        let fee_result = bwk_tx::process_fees(
-            fees,
-            weight_wo_change,
-            weight_wo_change, // no change output for drain
-            inputs_total,
-            0, // no fixed output amount — the recipient gets everything minus fees
-            bwk_tx::Drain::Max,
-        );
-
-        if let Some(ref err) = fee_result.error {
-            return Err(AccountError::Transaction(format!("{err:?}")));
-        }
-
-        let drain_value = fee_result
-            .max
-            .ok_or_else(|| AccountError::Transaction("no funds for drain".to_string()))?;
-
-        let recipients = vec![Recipient {
-            address: recipient,
-            amount: Amount::from_sat(drain_value),
-        }];
-
-        let partial_secret = self
-            .client
-            .get_partial_secret_for_selected_utxos(&selected_utxos)
-            .map_err(|e| AccountError::Transaction(e.to_string()))?;
-
-        Ok(SilentPaymentUnsignedTransaction {
-            selected_utxos,
-            recipients,
-            partial_secret,
-            unsigned_tx: None,
-            network: self.config.network,
-        })
-    }
-
-    /// Finalize an unsigned transaction, preparing it for signing.
-    ///
-    /// This method converts the unsigned transaction to a ready-to-sign format by:
-    /// 1. Creating the actual transaction inputs from selected UTXOs
-    /// 2. Generating silent payment recipient public keys
-    /// 3. Building the final transaction outputs with real script pubkeys
-    ///
-    /// After finalization, the transaction can be signed with `sign_transaction()`.
-    ///
-    /// # Arguments
-    /// * `unsigned_tx` - The unsigned transaction from `create_transaction()` or `create_drain_transaction()`
-    ///
-    /// # Errors
-    /// * `AccountError::Transaction` if finalization fails (e.g., invalid silent payment address)
-    pub fn finalize_transaction(
-        &self,
-        unsigned_tx: SilentPaymentUnsignedTransaction,
-    ) -> Result<SilentPaymentUnsignedTransaction, AccountError> {
-        SpClient::finalize_transaction(unsigned_tx)
-            .map_err(|e| AccountError::Transaction(e.to_string()))
-    }
-
-    //-------------------------------------------------------------------------
-    // Signing
-    //-------------------------------------------------------------------------
-
-    /// Sign a finalized transaction.
-    ///
-    /// This method signs all inputs of the transaction using the spend key.
-    /// The transaction must have been finalized with `finalize_transaction()` first.
-    ///
-    /// # Arguments
-    /// * `unsigned_tx` - The finalized unsigned transaction
-    ///
-    /// # Errors
-    /// * `AccountError::NoKeys` if this account cannot sign (no spend secret key)
-    /// * `AccountError::Transaction` if signing fails
-    pub fn sign_transaction(
-        &self,
-        unsigned_tx: SilentPaymentUnsignedTransaction,
-    ) -> Result<Transaction, AccountError> {
-        if !self.can_sign() {
-            return Err(AccountError::NoKeys);
-        }
-
-        // Generate random bytes for Schnorr signature auxiliary randomness
-        let mut aux_rand = [0u8; 32];
-        getrandom::getrandom(&mut aux_rand).map_err(|e| {
-            AccountError::Transaction(format!("failed to generate random bytes: {}", e))
-        })?;
-
-        self.client
-            .sign_transaction(unsigned_tx, &aux_rand)
-            .map_err(|e| AccountError::Transaction(e.to_string()))
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+        Ok(())
+    } // Persistence
 
     /// Persist all stores to disk.
     pub fn persist(&self) {
@@ -1324,9 +1202,7 @@ impl Drop for Account {
     }
 }
 
-//=============================================================================
 // AccountUpdater - Implements Updater trait for Account
-//=============================================================================
 
 /// Internal struct that implements the Updater trait for scanning.
 struct AccountUpdater {
@@ -1470,9 +1346,7 @@ pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
         .map_err(|e| AccountError::Network(e.to_string()))
 }
 
-//=============================================================================
 // Tests
-//=============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -1695,9 +1569,6 @@ mod tests {
 
     #[test]
     fn test_scan_progress_throttling() {
-        use bitcoin::absolute::Height;
-        use spdk_core::Updater;
-
         let scan_state = Arc::new(Mutex::new(ScanState::new(0)));
         let coin_store = Arc::new(Mutex::new(SpCoinStore::new()));
         let tx_store = Arc::new(Mutex::new(SpTxStore::new()));

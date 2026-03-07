@@ -18,7 +18,7 @@ pub use account::{
 };
 pub use backend_blindbit_native_non_async::InfoResponse;
 pub use coin_store::{CoinState, CoinStoreError, SpCoinEntry, SpCoinStore};
-pub use config::{Config, ConfigError};
+pub use config::{Config, ConfigError, SubAccountConfig};
 pub use label_store::{LabelKey, LabelStoreError, SpLabelStore};
 pub use scan_state::{ScanState, ScanStateError};
 pub use tx_store::{SpTxEntry, SpTxStore, TxDirection, TxStoreError};
@@ -28,6 +28,6 @@ pub use bitcoin;
 pub use bwk_tx::{
     Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
 };
-pub use recipient::{SpRecipient, SpRecipientAddress};
+pub use recipient::{SpRecipient, SpRecipientAddress, TxBuilderSpExt};
 pub use silentpayments;
 pub use spdk_core;

@@ -3,14 +3,16 @@
 //! This module implements bwk-tx's RecipientProvider trait for SP types.
 //! Uses newtype wrappers to satisfy the orphan rule.
 
-use spdk_core::bitcoin::key::TapTweak;
-use spdk_core::bitcoin::{ScriptBuf, TxOut, Weight};
+use spdk_core::bitcoin::{key::TapTweak, script::PushBytesBuf, ScriptBuf, TxOut, Weight};
 use spdk_core::silentpayments::SilentPaymentAddress;
 use spdk_core::{OwnedOutput, RecipientAddress};
 
 use bwk_tx::{
-    transaction::Amount, Error as TxError, FinalizationContext, PsbtOutputInfo, RecipientProvider,
+    transaction::Amount, Coin, Error as TxError, FinalizationContext, PsbtOutputInfo,
+    RecipientProvider, SpPartialSecretProvider,
 };
+
+use spdk_core::bitcoin::OutPoint;
 
 const TR_OUTPUT_WEIGHT: u64 = 172;
 
@@ -171,7 +173,6 @@ impl RecipientProvider for SpRecipientAddress {
             }
             RecipientAddress::LegacyAddress(addr) => addr.clone().assume_checked().script_pubkey(),
             RecipientAddress::Data(data) => {
-                use spdk_core::bitcoin::script::PushBytesBuf;
                 let mut op_return = PushBytesBuf::with_capacity(data.len());
                 op_return
                     .extend_from_slice(data)
@@ -209,12 +210,112 @@ impl RecipientProvider for SpRecipientAddress {
     }
 }
 
-//=============================================================================
-// SpPartialSecretProvider for Account
-//=============================================================================
+// TxBuilderSpExt
 
-use bwk_tx::{Coin, SpPartialSecretProvider};
-use spdk_core::bitcoin::OutPoint;
+pub trait TxBuilderSpExt {
+    fn send_to_sp(&mut self, address: SilentPaymentAddress, amount: u64);
+}
+
+impl TxBuilderSpExt for bwk_tx::TxBuilder {
+    fn send_to_sp(&mut self, address: SilentPaymentAddress, amount: u64) {
+        let network = self.network();
+        self.add_output(SpRecipientAddress::from_sp(address, amount, network));
+    }
+}
+
+/// Change output provider for Silent Payment wallets.
+///
+/// Wraps an [`SpRecipient`] for the wallet's change address, adding
+/// `is_change() = true` so that [`TxBuilder`](bwk_tx::TxBuilder) handles it
+/// correctly during fee estimation and finalization.
+#[derive(Debug, Clone)]
+pub struct SpChangeRecipientProvider(SpRecipient);
+
+impl SpChangeRecipientProvider {
+    pub fn new(address: SilentPaymentAddress, network: Network) -> Self {
+        Self(SpRecipient::new(address, 0, network))
+    }
+}
+
+impl RecipientProvider for SpChangeRecipientProvider {
+    fn output_weight(&self) -> Weight {
+        self.0.output_weight()
+    }
+
+    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
+        self.0.create_script(ctx)
+    }
+
+    fn psbt_output_info(&self) -> PsbtOutputInfo {
+        self.0.psbt_output_info()
+    }
+
+    fn is_silent_payment(&self) -> bool {
+        true
+    }
+
+    fn is_change(&self) -> bool {
+        true
+    }
+
+    fn amount(&self) -> Amount {
+        self.0.amount()
+    }
+
+    fn set_amount(&mut self, amount: Amount) {
+        self.0.set_amount(amount);
+    }
+
+    fn network(&self) -> Network {
+        self.0.network()
+    }
+}
+
+// SpSecretProvider
+
+use std::sync::{Arc, Mutex};
+
+use spdk_core::SpClient;
+
+use crate::SpCoinStore;
+
+/// Standalone [`SpPartialSecretProvider`] that can be boxed into a
+/// [`TxBuilder`](bwk_tx::TxBuilder).
+///
+/// Holds a cloned [`SpClient`] and a shared coin store reference to look up
+/// `OwnedOutput` tweaks for selected inputs.
+pub struct SpSecretProvider {
+    coin_store: Arc<Mutex<SpCoinStore>>,
+    client: SpClient,
+}
+
+impl SpSecretProvider {
+    pub fn new(coin_store: Arc<Mutex<SpCoinStore>>, client: SpClient) -> Self {
+        Self { coin_store, client }
+    }
+}
+
+impl SpPartialSecretProvider for SpSecretProvider {
+    fn compute_partial_secret(
+        &self,
+        inputs: &[Coin],
+    ) -> Result<spdk_core::bitcoin::secp256k1::SecretKey, TxError> {
+        let store = self.coin_store.lock().expect("poisoned");
+        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = inputs
+            .iter()
+            .map(|coin| {
+                let entry = store.get(&coin.outpoint).ok_or(TxError::CoinNotFound)?;
+                Ok((coin.outpoint, entry.owned_output().clone()))
+            })
+            .collect::<Result<Vec<_>, TxError>>()?;
+
+        self.client
+            .get_partial_secret_for_selected_utxos(&selected_utxos)
+            .map_err(|_| TxError::SpPartialSecret)
+    }
+}
+
+// SpPartialSecretProvider for Account
 
 use crate::Account;
 
@@ -223,7 +324,6 @@ impl SpPartialSecretProvider for Account {
         &self,
         inputs: &[Coin],
     ) -> Result<spdk_core::bitcoin::secp256k1::SecretKey, TxError> {
-        // Extract (OutPoint, OwnedOutput) from our coin store
         let selected_utxos: Vec<(OutPoint, OwnedOutput)> = inputs
             .iter()
             .map(|coin| {

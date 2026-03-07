@@ -13,9 +13,7 @@ use serde::{Deserialize, Serialize};
 use silentpayments::receiving::Label;
 use spdk_core::{OutputSpendStatus, OwnedOutput};
 
-//=============================================================================
 // SpCoinEntry
-//=============================================================================
 
 /// A silent payment coin entry wrapping an OutPoint and OwnedOutput.
 ///
@@ -30,18 +28,12 @@ pub struct SpCoinEntry {
 }
 
 impl SpCoinEntry {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new coin entry from an outpoint and owned output.
     pub fn new(outpoint: OutPoint, output: OwnedOutput) -> Self {
         Self { outpoint, output }
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters (accessors)
-    //-------------------------------------------------------------------------
+    } // Getters (accessors)
 
     /// Returns the block height where this output was confirmed.
     pub fn height(&self) -> u32 {
@@ -104,9 +96,7 @@ impl SpCoinEntry {
     }
 }
 
-//=============================================================================
 // CoinState
-//=============================================================================
 
 /// Balance summary for the coin store.
 ///
@@ -127,9 +117,7 @@ pub struct CoinState {
     pub unconfirmed_balance: u64,
 }
 
-//=============================================================================
 // CoinStoreError
-//=============================================================================
 
 /// Errors that can occur in the coin store.
 #[derive(Debug, thiserror::Error)]
@@ -142,9 +130,7 @@ pub enum CoinStoreError {
     Parse(String),
 }
 
-//=============================================================================
 // SpCoinStore
-//=============================================================================
 
 /// Storage for silent payment coins.
 ///
@@ -165,9 +151,7 @@ pub struct SpCoinStore {
 }
 
 impl SpCoinStore {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new empty coin store.
     pub fn new() -> Self {
@@ -210,11 +194,7 @@ impl SpCoinStore {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns a reference to a coin entry by outpoint.
     pub fn get(&self, outpoint: &OutPoint) -> Option<&SpCoinEntry> {
@@ -224,11 +204,7 @@ impl SpCoinStore {
     /// Returns a mutable reference to a coin entry by outpoint.
     pub fn get_mut(&mut self, outpoint: &OutPoint) -> Option<&mut SpCoinEntry> {
         self.store.get_mut(outpoint)
-    }
-
-    //-------------------------------------------------------------------------
-    // Mutators
-    //-------------------------------------------------------------------------
+    } // Mutators
 
     /// Insert a new coin entry from an outpoint and owned output.
     pub fn insert(&mut self, outpoint: OutPoint, output: OwnedOutput) {
@@ -264,11 +240,7 @@ impl SpCoinStore {
         if let Some(entry) = self.store.get_mut(outpoint) {
             entry.output.spend_status = OutputSpendStatus::Mined(block_hash);
         }
-    }
-
-    //-------------------------------------------------------------------------
-    // Queries
-    //-------------------------------------------------------------------------
+    } // Queries
 
     /// Returns a reference to the internal coin map.
     pub fn coins(&self) -> &BTreeMap<OutPoint, SpCoinEntry> {
@@ -314,11 +286,7 @@ impl SpCoinStore {
             .map(|entry| entry.amount_sat())
             .sum();
         Amount::from_sat(sats)
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+    } // Persistence
 
     /// Persist the store to disk.
     ///
@@ -359,9 +327,83 @@ impl SpCoinStore {
     }
 }
 
-//=============================================================================
+// SpCoinSource (CoinSource for TxBuilder)
+
+use std::sync::{Arc, Mutex};
+
+use bwk_tx::coin::{CoinSpendInfo, CoinStatus};
+use bwk_tx::tx_builder::CoinSource;
+use bwk_tx::Coin;
+
+/// Taproot keyspend satisfaction weight in WU (1 Schnorr signature = 66 WU)
+const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
+
+/// Implements [`CoinSource`] for the SP coin store, providing spendable coins
+/// to [`TxBuilder`](bwk_tx::TxBuilder).
+pub struct SpCoinSource(Arc<Mutex<SpCoinStore>>);
+
+impl SpCoinSource {
+    pub fn new(store: Arc<Mutex<SpCoinStore>>) -> Self {
+        Self(store)
+    }
+}
+
+impl CoinSource for SpCoinSource {
+    fn spendable_coins(&self) -> Vec<Coin> {
+        let store = self.0.lock().expect("poisoned");
+        store
+            .spendable_coins()
+            .coins
+            .into_iter()
+            .map(|(outpoint, entry)| Coin {
+                txout: bitcoin::TxOut {
+                    value: entry.amount(),
+                    script_pubkey: entry.script().clone(),
+                },
+                outpoint,
+                height: Some(entry.height() as u64),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                status: CoinStatus::Confirmed,
+                label: None,
+                satisfaction_size: TR_KEYSPEND_SATISFACTION_WEIGHT,
+                spend_info: CoinSpendInfo::Sp {
+                    derivation: bitcoin::bip32::DerivationPath::default(),
+                    tweak: *entry.tweak(),
+                },
+            })
+            .collect()
+    }
+}
+
+// MergedCoinSource (SP + BIP32 sub-accounts)
+
+/// A [`CoinSource`] that merges coins from the SP coin store and zero or more
+/// BIP32 sub-account coin sources (segwit, taproot, etc.).
+pub struct MergedCoinSource {
+    sp_source: SpCoinSource,
+    bip32_sources: Vec<Box<dyn CoinSource>>,
+}
+
+impl MergedCoinSource {
+    pub fn new(sp_source: SpCoinSource, bip32_sources: Vec<Box<dyn CoinSource>>) -> Self {
+        Self {
+            sp_source,
+            bip32_sources,
+        }
+    }
+}
+
+impl CoinSource for MergedCoinSource {
+    fn spendable_coins(&self) -> Vec<Coin> {
+        let mut coins = self.sp_source.spendable_coins();
+        for source in &self.bip32_sources {
+            coins.extend(source.spendable_coins());
+        }
+        coins
+    }
+}
+
 // Tests
-//=============================================================================
 
 #[cfg(test)]
 mod tests {

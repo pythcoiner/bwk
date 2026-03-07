@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use bitcoin::Network;
+use bwk::miniscript::{Descriptor, DescriptorPublicKey};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for a Silent Payment account.
@@ -44,12 +45,26 @@ pub struct Config {
     pub dust_limit: Option<u64>,
     /// Block height to start scanning from (skip earlier blocks)
     pub birthday_height: Option<u32>,
+
+    // Sub-accounts
+    /// Optional descriptors for embedded standard wallets (segwit, taproot, etc.)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub descriptors: Vec<SubAccountConfig>,
+}
+
+/// Configuration for an embedded standard wallet sub-account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAccountConfig {
+    /// Miniscript descriptor (e.g. wpkh or tr)
+    pub descriptor: Descriptor<DescriptorPublicKey>,
+    /// Electrum server URL (optional, offline if not set)
+    pub electrum_url: Option<String>,
+    /// Electrum server port
+    pub electrum_port: Option<u16>,
 }
 
 impl Config {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new Config from a mnemonic phrase.
     ///
@@ -73,6 +88,7 @@ impl Config {
             persist: true,
             dust_limit: None,
             birthday_height: None,
+            descriptors: Vec::new(),
         }
     }
 
@@ -125,6 +141,7 @@ impl Config {
             persist: true,
             dust_limit: None,
             birthday_height: None,
+            descriptors: Vec::new(),
         })
     }
 
@@ -144,11 +161,7 @@ impl Config {
             .map_err(|e| ConfigError::Parse(format!("failed to parse config: {}", e)))?;
         config.sanitize();
         Ok(config)
-    }
-
-    //-------------------------------------------------------------------------
-    // Sanitization
-    //-------------------------------------------------------------------------
+    } // Sanitization
 
     /// Sanitize all config values, clamping or fixing invalid fields.
     pub fn sanitize(&mut self) {
@@ -168,11 +181,7 @@ impl Config {
             Network::Bitcoin => 709_632,
             _ => 1,
         }
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns the account name.
     pub fn account_name(&self) -> &str {
@@ -187,11 +196,7 @@ impl Config {
     /// Returns the Blindbit server URL.
     pub fn blindbit_url(&self) -> &str {
         &self.blindbit_url
-    }
-
-    //-------------------------------------------------------------------------
-    // Mutators (setters)
-    //-------------------------------------------------------------------------
+    } // Mutators (setters)
 
     /// Set the Blindbit server URL.
     pub fn set_blindbit_url(&mut self, url: String) {
@@ -212,11 +217,7 @@ impl Config {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
-    }
-
-    //-------------------------------------------------------------------------
-    // Path helpers
-    //-------------------------------------------------------------------------
+    } // Path helpers
 
     /// Returns the account-specific data directory.
     ///
@@ -267,11 +268,7 @@ impl Config {
     /// Format: `{account_dir}/config.json`
     pub fn config_path(&self) -> PathBuf {
         self.account_dir().join("config.json")
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+    } // Persistence
 
     /// Persist the config to disk.
     ///
