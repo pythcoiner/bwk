@@ -207,6 +207,10 @@ impl Account {
         self.config.clone()
     }
 
+    pub fn coin_source(&self) -> CoinStoreSource {
+        CoinStoreSource::new(self.coin_store.clone())
+    }
+
     pub fn hot_signer(&self) -> Option<HotSigner> {
         let mnemonic_str = self.config.mnemonic.clone()?;
         let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
