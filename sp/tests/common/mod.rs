@@ -13,8 +13,9 @@ use bitcoin::absolute::Height;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey};
 
-#[allow(unused_imports)]
-use backend_blindbit_native_non_async::BlindbitBackend;
+use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
+use blindbitd::BlindbitD;
+use bwk_utils::test::corepc_node;
 use spdk_core::ChainBackend;
 
 use bwk_sp::Config;
@@ -557,6 +558,280 @@ pub fn swap_to_sp(
     tx.input[0].witness = witness;
 
     Some(tx)
+}
+
+// TestEnv — integration test harness
+
+use bwk_sign::HotSigner;
+use bwk_tx::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
+
+/// Mnemonic for BIP32 coins (different from SP mnemonics).
+#[allow(dead_code)]
+pub fn bip32_mnemonic() -> &'static str {
+    "legal winner thank year wave sausage worth useful legal winner thank yellow"
+}
+
+/// Satisfaction weight for a taproot key-spend input (same as SP coins).
+const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
+
+/// Integration test environment wrapping BlindbitD + bitcoind.
+#[allow(dead_code)]
+pub struct TestEnv {
+    bbd: BlindbitD,
+    pub bitcoind: corepc_node::Node,
+    pub height: u32,
+    fund_index: u32,
+}
+
+#[allow(dead_code)]
+impl TestEnv {
+    /// Create BlindbitD, take bitcoind, mine 101 blocks, wait for sync.
+    pub fn new() -> Self {
+        let mut bbd = BlindbitD::new().unwrap();
+        let mut bitcoind = bbd.bitcoin().unwrap();
+        bwk_utils::test::generate_blocks(&mut bitcoind.client, 101);
+        let backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
+        wait_for_sync_and_index(&backend, 101);
+        TestEnv {
+            bbd,
+            bitcoind,
+            height: 101,
+            fund_index: 0,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        self.bbd.url()
+    }
+
+    fn backend(&self) -> BlindbitBackend<UreqClient> {
+        BlindbitBackend::new(self.bbd.url(), UreqClient::new()).unwrap()
+    }
+
+    /// Create SP account with default mnemonic (no persistence).
+    pub fn sp_account(&self, name: &str) -> bwk_sp::Account {
+        test_account_named(name, &self.bbd.url())
+    }
+
+    /// Create SP account with custom mnemonic (no persistence).
+    pub fn sp_account_with_mnemonic(&self, name: &str, mnemonic: &str) -> bwk_sp::Account {
+        test_account_with_mnemonic(name, mnemonic, &self.bbd.url())
+    }
+
+    /// Mine blocks and wait for BlindbitD to sync.
+    pub fn mine(&mut self, blocks: usize) {
+        bwk_utils::test::generate_blocks(&mut self.bitcoind.client, blocks);
+        self.height = bwk_utils::test::get_height(&mut self.bitcoind.client) as u32;
+        wait_for_sync_and_index(&self.backend(), self.height);
+    }
+
+    /// Broadcast a transaction and mine 1 block.
+    pub fn broadcast_and_mine(&mut self, tx: &bitcoin::Transaction) {
+        self.bitcoind.client.send_raw_transaction(tx).unwrap();
+        self.mine(1);
+    }
+
+    /// Fund an SP account by creating a swap_to_sp transaction.
+    ///
+    /// Creates a taproot signer from the SP mnemonic, sends BTC to it via
+    /// bitcoind, then creates a swap_to_sp transaction to the SP address.
+    pub fn fund_sp(&mut self, account: &mut bwk_sp::Account, btc: f64) {
+        let mnemonic = test_mnemonic();
+        let network = bitcoin::Network::Regtest;
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+
+        let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic).unwrap();
+        let idx = self.fund_index;
+        self.fund_index += 1;
+        let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(idx);
+
+        let fund_txid =
+            bwk_utils::test::send(&mut self.bitcoind.client, taproot_addr.clone(), btc).unwrap();
+        self.mine(2);
+
+        let tx = bwk_utils::test::get_tx(&mut self.bitcoind.client, fund_txid).unwrap();
+        let (index, txout) = bwk_utils::test::txouts_for(&taproot_addr, &tx)
+            .into_iter()
+            .next()
+            .unwrap();
+        let outpoint = OutPoint {
+            txid: fund_txid,
+            vout: index as u32,
+        };
+
+        let sp_address = account.sp_address();
+        let recipient_pubkey =
+            generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).unwrap();
+
+        let sp_tx = swap_to_sp(
+            sk,
+            outpoint,
+            txout,
+            recipient_pubkey,
+            Amount::from_sat(1000),
+            &secp,
+        )
+        .unwrap();
+
+        self.broadcast_and_mine(&sp_tx);
+        account.scan_blocks(Some(1), Some(self.height)).unwrap();
+    }
+
+    /// Derive a taproot receive address from the BIP32 mnemonic.
+    pub fn taproot_addr(&self, index: u32) -> bitcoin::Address {
+        let signer =
+            HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let (addr, _) = signer.taproot_receive_address_and_key(index);
+        addr
+    }
+
+    /// Derive a segwit (P2WPKH) receive address from the BIP32 mnemonic.
+    pub fn segwit_addr(&self, index: u32) -> bitcoin::Address {
+        let signer =
+            HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let (addr, _) = signer.wpkh_receive_address_and_key(index);
+        addr
+    }
+
+    /// Add a taproot sub-account to an SP account so it can sign BIP32
+    /// taproot inputs via `sign_and_finalize()`.
+    #[allow(dead_code)]
+    pub fn add_taproot_sub_account(&self, account: &mut bwk_sp::Account) {
+        let signer =
+            HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let descriptor = signer.descriptors().into_iter().next().unwrap();
+        let sub = bwk::Account::new(bwk::Config {
+            data_dir: std::path::PathBuf::new(),
+            dir_name: "",
+            account: "sub-tr".to_string(),
+            electrum_url: None,
+            electrum_port: None,
+            offline: Some(true),
+            network: bitcoin::Network::Regtest,
+            look_ahead: 20,
+            mnemonic: Some(bip32_mnemonic().to_string()),
+            descriptor,
+            persist: false,
+        });
+        account.add_sub_account(sub);
+    }
+
+    /// Add a segwit (P2WPKH) sub-account to an SP account so it can sign
+    /// BIP32 segwit inputs via `sign_and_finalize()`.
+    #[allow(dead_code)]
+    pub fn add_segwit_sub_account(&self, account: &mut bwk_sp::Account) {
+        let signer =
+            HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let descriptor = signer.descriptors().into_iter().next().unwrap();
+        let sub = bwk::Account::new(bwk::Config {
+            data_dir: std::path::PathBuf::new(),
+            dir_name: "",
+            account: "sub-sw".to_string(),
+            electrum_url: None,
+            electrum_port: None,
+            offline: Some(true),
+            network: bitcoin::Network::Regtest,
+            look_ahead: 20,
+            mnemonic: Some(bip32_mnemonic().to_string()),
+            descriptor,
+            persist: false,
+        });
+        account.add_sub_account(sub);
+    }
+
+    /// Create a funded taproot coin via bitcoind.
+    ///
+    /// The coin is built manually with `CoinSpendInfo::Bip32` so it can be
+    /// added to a TxBuilder as a BIP32 input. Register a taproot sub-account
+    /// via `add_taproot_sub_account()` so `sign_and_finalize()` can sign it.
+    pub fn create_taproot_coin(&mut self, btc: f64) -> Coin {
+        let signer =
+            HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let (addr, _) = signer.taproot_receive_address_and_key(0);
+
+        let txid = bwk_utils::test::send(&mut self.bitcoind.client, addr.clone(), btc).unwrap();
+        self.mine(1);
+
+        let tx = bwk_utils::test::get_tx(&mut self.bitcoind.client, txid).unwrap();
+        let (vout, txout) = bwk_utils::test::txouts_for(&addr, &tx)
+            .into_iter()
+            .next()
+            .unwrap();
+        let height = bwk_utils::test::get_tx_height(&mut self.bitcoind.client, txid);
+
+        let descriptor = signer.descriptors().into_iter().next().unwrap();
+        Coin {
+            txout,
+            outpoint: OutPoint {
+                txid,
+                vout: vout as u32,
+            },
+            height,
+            sequence: bitcoin::Sequence::ZERO,
+            status: CoinStatus::Confirmed,
+            label: None,
+            satisfaction_size: TR_KEYSPEND_SATISFACTION_WEIGHT,
+            spend_info: CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, 0),
+                descriptor,
+            },
+        }
+    }
+
+    /// Create a funded segwit (P2WPKH) coin via bitcoind.
+    ///
+    /// Register a segwit sub-account via `add_segwit_sub_account()` so
+    /// `sign_and_finalize()` can sign it.
+    pub fn create_segwit_coin(&mut self, btc: f64) -> Coin {
+        let signer =
+            HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
+                .unwrap();
+        let (addr, _) = signer.wpkh_receive_address_and_key(0);
+
+        let txid = bwk_utils::test::send(&mut self.bitcoind.client, addr.clone(), btc).unwrap();
+        self.mine(1);
+
+        let tx = bwk_utils::test::get_tx(&mut self.bitcoind.client, txid).unwrap();
+        let (vout, txout) = bwk_utils::test::txouts_for(&addr, &tx)
+            .into_iter()
+            .next()
+            .unwrap();
+        let height = bwk_utils::test::get_tx_height(&mut self.bitcoind.client, txid);
+
+        let descriptor = signer.descriptors().into_iter().next().unwrap();
+        let satisfaction = descriptor
+            .clone()
+            .into_single_descriptors()
+            .unwrap()
+            .first()
+            .unwrap()
+            .clone()
+            .max_weight_to_satisfy()
+            .unwrap()
+            .to_wu();
+
+        Coin {
+            txout,
+            outpoint: OutPoint {
+                txid,
+                vout: vout as u32,
+            },
+            height,
+            sequence: bitcoin::Sequence::ZERO,
+            status: CoinStatus::Confirmed,
+            label: None,
+            satisfaction_size: satisfaction,
+            spend_info: CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, 0),
+                descriptor,
+            },
+        }
+    }
 }
 
 // Tests for test utilities
