@@ -17,6 +17,6 @@ pub use transaction::{
     estimated_weight_raw, process_fees, Amount, Drain, FeeResult, Fees, TransactionResult,
     TxTemplate, Warning,
 };
-pub use tx_builder::ChangeTip;
+pub use tx_builder::{ChangeTip, CoinSource, TxBuilder};
 
 pub const DUST_AMOUNT: u64 = 5_000;

@@ -1,5 +1,6 @@
 use crate::{
     coin_selection,
+    recipient::SpPartialSecretProvider,
     transaction::{process_transaction, tx_estimated_weight, Amount, Error},
     Coin, Fees, Recipient, RecipientProvider, TransactionResult, TxTemplate,
 };
@@ -59,6 +60,7 @@ pub struct TxBuilder {
     change_provider: Box<dyn RecipientProvider>,
     pub tx_template: TxTemplate,
     coin_source: Option<Box<dyn CoinSource>>,
+    sp_provider: Option<Box<dyn SpPartialSecretProvider>>,
     max_fee_percent: u8,
     max_fee_amount: u64,
     #[cfg(feature = "test")]
@@ -75,6 +77,7 @@ impl TxBuilder {
                 fees: crate::Fees::MilliSatsVb(1_000),
             },
             coin_source: None,
+            sp_provider: None,
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
             #[cfg(feature = "test")]
@@ -95,13 +98,21 @@ impl TxBuilder {
                 fees: crate::Fees::MilliSatsVb(1_000),
             },
             coin_source: Some(Box::new(BTreeMap::new())),
+            sp_provider: None,
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
             derivator: Some(derivator),
         }
     }
+    pub fn network(&self) -> bitcoin::Network {
+        self.change_provider.network()
+    }
     pub fn coin_source(mut self, coin_source: Box<dyn CoinSource>) -> Self {
         self.coin_source = Some(coin_source);
+        self
+    }
+    pub fn sp_provider(mut self, provider: Box<dyn SpPartialSecretProvider>) -> Self {
+        self.sp_provider = Some(provider);
         self
     }
     pub fn max_fee_percent(mut self, pct: u8) -> Self {
@@ -131,14 +142,22 @@ impl TxBuilder {
             self.tx_template.inputs.push(coin);
         }
     }
+    /// Add all spendable coins from the coin source as inputs (for drain)
+    pub fn drain_inputs(&mut self) {
+        if let Some(source) = &self.coin_source {
+            for coin in source.spendable_coins() {
+                self.add_input(coin);
+            }
+        }
+    }
     /// Replace current template outputs by new set of outputs
     pub fn outputs(mut self, recipients: Vec<Box<dyn RecipientProvider>>) -> Self {
         self.tx_template.outputs = recipients;
         self
     }
     /// Add output to the set of outputs
-    pub fn add_output(&mut self, recipient: Box<dyn RecipientProvider>) {
-        self.tx_template.outputs.push(recipient);
+    pub fn add_output(&mut self, recipient: impl RecipientProvider + 'static) {
+        self.tx_template.outputs.push(Box::new(recipient));
     }
     /// Initialise a new template
     pub fn new_template(&mut self) {
@@ -205,7 +224,7 @@ impl TxBuilder {
         res.tx_template.finalize(
             change_recip,
             true,
-            None,
+            self.sp_provider.as_deref(),
             self.change_provider.network(),
             self.max_fee_percent,
             self.max_fee_amount,
@@ -256,7 +275,7 @@ impl TxBuilder {
             origin: None,
             descriptor: None,
         };
-        self.add_output(Box::new(recipient));
+        self.add_output(recipient);
         let base_fee = tx_estimated_weight(&self.tx_template).to_vbytes_ceil() * feerate / 1000;
         let coins = self.select_coins(amount + base_fee, feerate);
         if coins.is_empty() {
@@ -1010,8 +1029,8 @@ mod tests {
 
         builder_a.add_input(c1);
         builder_a.add_input(c2);
-        builder_a.add_output(Box::new(r1));
-        builder_a.add_output(Box::new(r2));
+        builder_a.add_output(r1);
+        builder_a.add_output(r2);
 
         let res = builder_a.simulate();
         assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(300)));
