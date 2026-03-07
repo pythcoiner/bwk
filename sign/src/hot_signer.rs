@@ -338,7 +338,7 @@ impl HotSigner {
                     self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?;
                     self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
                 }
-                (false, false, false) => return Err(Error::SigningInfo),
+                (false, false, false) => continue,
                 _ => {
                     unreachable!()
                 }
