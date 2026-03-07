@@ -14,9 +14,7 @@ use std::str::FromStr;
 use bitcoin::{OutPoint, Txid};
 use serde::{Deserialize, Serialize};
 
-//=============================================================================
 // LabelKey
-//=============================================================================
 
 /// A key for labeling either an outpoint or a transaction.
 ///
@@ -118,9 +116,7 @@ mod label_map_serde {
     }
 }
 
-//=============================================================================
 // LabelStoreError
-//=============================================================================
 
 /// Errors that can occur in the label store.
 #[derive(Debug, thiserror::Error)]
@@ -133,9 +129,7 @@ pub enum LabelStoreError {
     Parse(String),
 }
 
-//=============================================================================
 // SpLabelStore
-//=============================================================================
 
 /// Storage for user-facing text labels.
 ///
@@ -158,9 +152,7 @@ pub struct SpLabelStore {
 }
 
 impl SpLabelStore {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new empty label store.
     pub fn new() -> Self {
@@ -203,20 +195,12 @@ impl SpLabelStore {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns a reference to a label by key.
     pub fn get(&self, key: &LabelKey) -> Option<&String> {
         self.store.get(key)
-    }
-
-    //-------------------------------------------------------------------------
-    // Mutators
-    //-------------------------------------------------------------------------
+    } // Mutators
 
     /// Set a label for a key.
     ///
@@ -230,11 +214,7 @@ impl SpLabelStore {
     /// Returns the removed label if it existed.
     pub fn remove(&mut self, key: &LabelKey) -> Option<String> {
         self.store.remove(key)
-    }
-
-    //-------------------------------------------------------------------------
-    // Convenience methods
-    //-------------------------------------------------------------------------
+    } // Convenience methods
 
     /// Get a label for an outpoint.
     pub fn outpoint(&self, outpoint: &OutPoint) -> Option<&String> {
@@ -254,11 +234,7 @@ impl SpLabelStore {
     /// Set a label for a transaction.
     pub fn set_transaction(&mut self, txid: Txid, label: String) {
         self.store.insert(LabelKey::Transaction(txid), label);
-    }
-
-    //-------------------------------------------------------------------------
-    // Queries
-    //-------------------------------------------------------------------------
+    } // Queries
 
     /// Returns the number of labels in the store.
     pub fn len(&self) -> usize {
@@ -268,11 +244,7 @@ impl SpLabelStore {
     /// Returns true if the store is empty.
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+    } // Persistence
 
     /// Persist the store to disk.
     ///
@@ -300,9 +272,7 @@ impl SpLabelStore {
     }
 }
 
-//=============================================================================
 // Tests
-//=============================================================================
 
 #[cfg(test)]
 mod tests {

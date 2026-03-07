@@ -9,9 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-//=============================================================================
 // ScanStateError
-//=============================================================================
 
 /// Errors that can occur in the scan state.
 #[derive(Debug, thiserror::Error)]
@@ -24,9 +22,7 @@ pub enum ScanStateError {
     Parse(String),
 }
 
-//=============================================================================
 // ScanState
-//=============================================================================
 
 /// Tracks blockchain scanning progress for Silent Payment wallets.
 ///
@@ -53,9 +49,7 @@ pub struct ScanState {
 }
 
 impl ScanState {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new scan state with the given birthday height.
     pub fn new(birthday_height: u32) -> Self {
@@ -102,11 +96,7 @@ impl ScanState {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns the last scanned block height, if any.
     pub fn last_scanned_height(&self) -> Option<u32> {
@@ -131,11 +121,7 @@ impl ScanState {
     /// Returns whether persistence is enabled.
     pub fn is_persist_enabled(&self) -> bool {
         self.persist
-    }
-
-    //-------------------------------------------------------------------------
-    // Mutators
-    //-------------------------------------------------------------------------
+    } // Mutators
 
     /// Update the scan state with a new height and block hash.
     pub fn update(&mut self, height: u32, block_hash: [u8; 32]) {
@@ -151,11 +137,7 @@ impl ScanState {
             None => self.last_scanned_height = Some(height),
             _ => {}
         }
-    }
-
-    //-------------------------------------------------------------------------
-    // Queries
-    //-------------------------------------------------------------------------
+    } // Queries
 
     /// Returns the height where the next scan should start.
     ///
@@ -165,11 +147,7 @@ impl ScanState {
         self.last_scanned_height
             .map(|h| h + 1)
             .unwrap_or(self.birthday_height)
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+    } // Persistence
 
     /// Persist the state to disk.
     ///
@@ -197,9 +175,7 @@ impl ScanState {
     }
 }
 
-//=============================================================================
 // Tests
-//=============================================================================
 
 #[cfg(test)]
 mod tests {

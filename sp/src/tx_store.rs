@@ -11,9 +11,7 @@ use std::path::PathBuf;
 use bitcoin::{Transaction, Txid};
 use serde::{Deserialize, Serialize};
 
-//=============================================================================
 // TxDirection
-//=============================================================================
 
 /// Direction of a transaction relative to the wallet.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,9 +24,7 @@ pub enum TxDirection {
     Internal,
 }
 
-//=============================================================================
 // SpTxEntry
-//=============================================================================
 
 /// A transaction entry in the store.
 ///
@@ -54,9 +50,7 @@ pub struct SpTxEntry {
 }
 
 impl SpTxEntry {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new transaction entry.
     pub fn new(txid: Txid, direction: TxDirection, amount: u64) -> Self {
@@ -84,11 +78,7 @@ impl SpTxEntry {
             timestamp: None,
             label: None,
         }
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns the transaction ID.
     pub fn txid(&self) -> &Txid {
@@ -136,9 +126,7 @@ impl SpTxEntry {
     }
 }
 
-//=============================================================================
 // TxStoreError
-//=============================================================================
 
 /// Errors that can occur in the transaction store.
 #[derive(Debug, thiserror::Error)]
@@ -151,9 +139,7 @@ pub enum TxStoreError {
     Parse(String),
 }
 
-//=============================================================================
 // SpTxStore
-//=============================================================================
 
 /// Storage for transactions.
 ///
@@ -174,9 +160,7 @@ pub struct SpTxStore {
 }
 
 impl SpTxStore {
-    //-------------------------------------------------------------------------
     // Constructors
-    //-------------------------------------------------------------------------
 
     /// Create a new empty transaction store.
     pub fn new() -> Self {
@@ -215,11 +199,7 @@ impl SpTxStore {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
-    }
-
-    //-------------------------------------------------------------------------
-    // Getters
-    //-------------------------------------------------------------------------
+    } // Getters
 
     /// Returns a reference to a transaction entry by txid.
     pub fn get(&self, txid: &Txid) -> Option<&SpTxEntry> {
@@ -229,11 +209,7 @@ impl SpTxStore {
     /// Returns a mutable reference to a transaction entry by txid.
     pub fn get_mut(&mut self, txid: &Txid) -> Option<&mut SpTxEntry> {
         self.store.get_mut(txid)
-    }
-
-    //-------------------------------------------------------------------------
-    // Mutators
-    //-------------------------------------------------------------------------
+    } // Mutators
 
     /// Insert a transaction entry.
     ///
@@ -259,11 +235,7 @@ impl SpTxStore {
         if let Some(entry) = self.store.get_mut(txid) {
             entry.label = Some(label);
         }
-    }
-
-    //-------------------------------------------------------------------------
-    // Queries
-    //-------------------------------------------------------------------------
+    } // Queries
 
     /// Returns all transaction entries.
     pub fn transactions(&self) -> Vec<&SpTxEntry> {
@@ -278,11 +250,7 @@ impl SpTxStore {
     /// Returns true if the store is empty.
     pub fn is_empty(&self) -> bool {
         self.store.is_empty()
-    }
-
-    //-------------------------------------------------------------------------
-    // Persistence
-    //-------------------------------------------------------------------------
+    } // Persistence
 
     /// Persist the store to disk.
     ///
@@ -310,9 +278,7 @@ impl SpTxStore {
     }
 }
 
-//=============================================================================
 // Tests
-//=============================================================================
 
 #[cfg(test)]
 mod tests {
