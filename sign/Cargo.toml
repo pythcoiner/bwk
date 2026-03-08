@@ -27,7 +27,7 @@ async-hwi = { workspace = true, features = ["service"], optional = true }
 tokio = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["hwi", "sp"]
 test = ["bwk-utils/test"]
 sp = ["dep:spdk-core"]
 hwi = ["dep:async-hwi", "dep:tokio"]
