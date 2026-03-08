@@ -1065,7 +1065,7 @@ impl Account {
     /// Sign all inputs in a PSBT — both SP and BIP32 (segwit/taproot).
     ///
     /// 1. Signs SP inputs using `b_spend + tweak` (no taproot tweak).
-    /// 2. Signs BIP32 inputs via sub-account HotSigners.
+    /// 2. Signs BIP32 inputs via sub-account SigningManagers.
     ///
     /// # Errors
     /// * `AccountError::NoKeys` if this account has no spend secret key
@@ -1087,7 +1087,7 @@ impl Account {
     /// Sign all inputs and finalize the PSBT into a broadcast-ready transaction.
     ///
     /// 1. Signs SP inputs (`b_spend + tweak`).
-    /// 2. Signs BIP32 inputs via sub-account HotSigners.
+    /// 2. Signs BIP32 inputs via sub-account SigningManagers.
     /// 3. Finalizes all inputs (builds witnesses) and extracts the transaction.
     pub fn sign_and_finalize(
         &self,

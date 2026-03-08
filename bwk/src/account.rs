@@ -1155,6 +1155,7 @@ mod integration_tests {
     use miniscript::bitcoin::{
         self, bip32::ChildNumber, Address, Amount, Network, Transaction, Txid,
     };
+    use miniscript::psbt::PsbtExt;
     use temp_dir::TempDir;
 
     use electrsd::{
@@ -1568,8 +1569,7 @@ mod integration_tests {
         builder.dummy_external_output(amount);
         let mut psbt = builder.generate().unwrap();
         account.sign_psbt(&mut psbt);
-        use miniscript::psbt::PsbtExt;
-        PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).expect("finalize");
+        PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).unwrap();
         let tx = psbt.extract_tx_unchecked_fee_rate();
         let txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
         let blocks: u32 = random_range(2..15);
@@ -1715,9 +1715,8 @@ mod integration_tests {
                     .pay(random_range(10_000..1_000_000), addr, 1000)
                     .unwrap();
                 account.sign_psbt(&mut psbt);
-                use miniscript::psbt::PsbtExt;
                 PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
-                    .expect("finalize");
+                    .unwrap();
                 let tx = psbt.extract_tx_unchecked_fee_rate();
                 let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
                 generate(&bitcoind, random_range(1..5));
