@@ -19,10 +19,13 @@ keywords = ["bitcoin"]
 readme = "README.md"
 
 [workspace.dependencies]
+crossbeam = "0.8"
+async-hwi = { version = "0.0.30", default-features = false }
+tokio = { version = "1.21", features = ["rt-multi-thread"] }
 base64ct = "=1.6.0"
 url = "=2.5.2"
 bip39 = "2.2.0"
-bitcoin = { git = "https://github.com/pythcoiner/rust-bitcoin.git", rev = "d7998651" }
+bitcoin = { git = "https://github.com/pythcoiner/rust-bitcoin.git", rev = "d7998651", features = ["serde"] }
 bitcoin_slices = "0.8.0"
 dirs = "6.0.0"
 hex = "0.4"
@@ -35,7 +38,7 @@ miniscript = { version = "12.2.0", features = ["base64"] }
 native-tls = "=0.2.13"
 openssl = "0.10.66"
 rand = "0.9.1"
-serde = "1.0.218"
+serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.128"
 env_logger = "0.11.6"
 temp-dir = "0.1.16"

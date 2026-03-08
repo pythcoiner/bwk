@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use crossbeam::channel;
 
 use crate::error::Error;
 use crate::signing_manager;
@@ -21,14 +21,16 @@ pub enum SignerNotif {
     Signed(bip32::Fingerprint, Psbt),
     Error(bip32::Fingerprint, Error),
     Manager(signing_manager::Error),
+    #[cfg(feature = "hwi")]
+    DeviceUpdate,
 }
 
 /// This trait implement features that are available when the signer is connected.
-pub trait Signer {
+pub trait Signer: Send {
     /// Initialyse the signer with a new channel, in return the signer
     /// must return a [`SignerNotif::Info`] notification to the newly
     /// registered channel.
-    fn init(&mut self, channel: mpsc::Sender<SignerNotif>);
+    fn init(&mut self, channel: channel::Sender<SignerNotif>);
     /// Request general informations from the signer.
     /// The signer must return a [`SignerNotif::Info`] notification.
     fn info(&self);

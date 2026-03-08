@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, str::FromStr, sync::mpsc};
+use std::{collections::BTreeSet, str::FromStr};
+
+use crossbeam::channel;
 
 use crate::{
     error::Error,
@@ -28,7 +30,7 @@ use {
 };
 
 impl Signer for HotSigner {
-    fn init(&mut self, channel: mpsc::Sender<SignerNotif>) {
+    fn init(&mut self, channel: channel::Sender<SignerNotif>) {
         self.sender = Some(channel);
         self.info();
     }
@@ -96,7 +98,7 @@ pub struct HotSigner {
     derivator: KeyDerivator,
     descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
     network: bitcoin::Network,
-    sender: Option<mpsc::Sender<SignerNotif>>,
+    sender: Option<channel::Sender<SignerNotif>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -753,8 +755,8 @@ mod tests {
     use bitcoin::Network;
     use bwk_descriptor::{derivator::SpkDerivator, descriptor::wpkh};
     use bwk_utils::test::{random_output, setup_logger, txid};
+    use crossbeam::channel;
     use miniscript::bitcoin::{absolute::Height, Amount, ScriptBuf, TxIn, Witness};
-    use std::sync::mpsc;
 
     #[test]
     fn test_create_hot_signer_from_xpriv() {
@@ -873,12 +875,12 @@ mod tests {
     // Notification Signer tests
 
     struct MockSender {
-        receiver: mpsc::Receiver<SignerNotif>,
+        receiver: channel::Receiver<SignerNotif>,
     }
 
     impl MockSender {
-        fn new() -> (mpsc::Sender<SignerNotif>, Self) {
-            let (sender, receiver) = mpsc::channel();
+        fn new() -> (channel::Sender<SignerNotif>, Self) {
+            let (sender, receiver) = channel::unbounded();
             (sender, MockSender { receiver })
         }
     }
