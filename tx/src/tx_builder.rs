@@ -1,11 +1,10 @@
 use crate::{
-    coin_selection,
+    coin_selection::{CoinSelector, DefaultCoinSelector},
     recipient::SpPartialSecretProvider,
     transaction::{process_transaction, tx_estimated_weight, Amount, Error},
     Coin, Fees, Recipient, RecipientProvider, TransactionResult, TxTemplate,
 };
 use bitcoin::Psbt;
-use std::collections::BTreeMap;
 
 #[cfg(feature = "test")]
 use {
@@ -24,6 +23,7 @@ use {
         OutPoint, ScriptBuf, Sequence, TxOut,
     },
     miniscript::{Descriptor, DescriptorPublicKey},
+    std::collections::BTreeMap,
 };
 
 /// Trait for managing change address index tip.
@@ -61,6 +61,7 @@ pub struct TxBuilder {
     pub tx_template: TxTemplate,
     coin_source: Option<Box<dyn CoinSource>>,
     sp_provider: Option<Box<dyn SpPartialSecretProvider>>,
+    coin_selector: Box<dyn CoinSelector>,
     max_fee_percent: u8,
     max_fee_amount: u64,
     #[cfg(feature = "test")]
@@ -78,6 +79,7 @@ impl TxBuilder {
             },
             coin_source: None,
             sp_provider: None,
+            coin_selector: Box::new(DefaultCoinSelector::default()),
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
             #[cfg(feature = "test")]
@@ -99,6 +101,7 @@ impl TxBuilder {
             },
             coin_source: Some(Box::new(BTreeMap::new())),
             sp_provider: None,
+            coin_selector: Box::new(DefaultCoinSelector::default()),
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
             derivator: Some(derivator),
@@ -113,6 +116,10 @@ impl TxBuilder {
     }
     pub fn sp_provider(mut self, provider: Box<dyn SpPartialSecretProvider>) -> Self {
         self.sp_provider = Some(provider);
+        self
+    }
+    pub fn coin_selector(mut self, coin_selector: Box<dyn CoinSelector>) -> Self {
+        self.coin_selector = coin_selector;
         self
     }
     pub fn max_fee_percent(mut self, pct: u8) -> Self {
@@ -235,27 +242,7 @@ impl TxBuilder {
         // NOTE: target must contains fees for base tx + outputs
         if let Some(source) = &self.coin_source {
             let coins = source.spendable_coins();
-            if coins.is_empty() {
-                return coins;
-            }
-            let (selection, _) = coin_selection::select(
-                coins.iter().collect(),
-                target,
-                feerate,
-                50_000,
-                5_000_000,
-                500,
-            );
-            if let Some(sel) = selection {
-                let mut coins: BTreeMap<_, _> =
-                    coins.into_iter().map(|c| (c.outpoint, c)).collect();
-                sel.outpoints
-                    .iter()
-                    .map(|op| coins.remove(op).expect("exists"))
-                    .collect()
-            } else {
-                vec![]
-            }
+            self.coin_selector.select_coins(coins, target, feerate)
         } else {
             vec![]
         }

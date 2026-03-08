@@ -193,3 +193,52 @@ pub fn select<T: CoinCandidate>(
 
     (selection, cj_selection)
 }
+
+/// Trait abstracting the coin selection strategy.
+/// Implement this to provide custom selection algorithms.
+pub trait CoinSelector {
+    fn select_coins(&self, candidates: Vec<Coin>, target: u64, feerate: u64) -> Vec<Coin>;
+}
+
+/// Default coin selector wrapping the exhaustive algorithm.
+pub struct DefaultCoinSelector {
+    pub min_change: u64,
+    pub max_change: u64,
+    pub dust: u64,
+}
+
+impl Default for DefaultCoinSelector {
+    fn default() -> Self {
+        Self {
+            min_change: 50_000,
+            max_change: 5_000_000,
+            dust: 500,
+        }
+    }
+}
+
+impl CoinSelector for DefaultCoinSelector {
+    fn select_coins(&self, candidates: Vec<Coin>, target: u64, feerate: u64) -> Vec<Coin> {
+        if candidates.is_empty() {
+            return vec![];
+        }
+        let (selection, _) = select(
+            candidates.iter().collect(),
+            target,
+            feerate,
+            self.min_change,
+            self.max_change,
+            self.dust,
+        );
+        if let Some(sel) = selection {
+            let mut coins: BTreeMap<_, _> =
+                candidates.into_iter().map(|c| (c.outpoint, c)).collect();
+            sel.outpoints
+                .iter()
+                .map(|op| coins.remove(op).expect("exists"))
+                .collect()
+        } else {
+            vec![]
+        }
+    }
+}
