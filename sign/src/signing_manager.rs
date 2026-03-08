@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{Read, Write},
     path::PathBuf,
@@ -11,7 +11,7 @@ use crossbeam::channel;
 use bwk_descriptor::descriptor::wpkh;
 use miniscript::{
     bitcoin::{self, bip32},
-    Descriptor, DescriptorPublicKey,
+    Descriptor, DescriptorPublicKey, ForEachKey,
 };
 
 use crate::{
@@ -42,11 +42,13 @@ impl Clone for SignerKind {
     }
 }
 
+#[allow(clippy::mutable_key_type)]
 struct ExternalSigner {
     signer: Box<dyn Signer>,
     #[cfg(feature = "hwi")]
     kind: SignerKind,
     id: String,
+    descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
 }
 
 /// A manager for handling hot signers and their notifications.
@@ -290,7 +292,8 @@ impl SigningManager {
                 }
             }
             // Find first registered descriptor and trigger async signing
-            if let Some(descriptor) = psbt_matching_descriptor(psbt, fingerprint) {
+            if let Some(descriptor) = psbt_matching_descriptor(psbt, fingerprint, &ext.descriptors)
+            {
                 ext.signer.sign_with_descriptor(psbt.clone(), descriptor);
             } else {
                 log::warn!("sign_with: no matching descriptor found for fingerprint {fingerprint}");
@@ -341,6 +344,7 @@ impl SigningManager {
                 signer: Box::new(signer),
                 kind: SignerKind::External(kind),
                 id: device_id.to_string(),
+                descriptors: BTreeSet::new(),
             };
             self.signers.insert(fg, ext);
             Some(fg)
@@ -353,23 +357,66 @@ impl SigningManager {
     pub fn remove_hw_signer(&mut self, fingerprint: &bip32::Fingerprint) {
         self.signers.remove(fingerprint);
     }
+
+    /// Register a descriptor for a hardware signer identified by fingerprint.
+    ///
+    /// This stores the descriptor in the ExternalSigner for use during signing,
+    /// and delegates to the underlying signer (which calls device.register_wallet()).
+    #[cfg(feature = "hwi")]
+    pub fn register_hw_descriptor(
+        &mut self,
+        fingerprint: &bip32::Fingerprint,
+        descriptor: Descriptor<DescriptorPublicKey>,
+    ) {
+        if let Some(ext) = self.signers.get_mut(fingerprint) {
+            ext.descriptors.insert(descriptor.clone());
+            ext.signer.register_descriptor(descriptor);
+        }
+    }
 }
 
-/// Find a descriptor from PSBT derivation info that references the given fingerprint.
-/// Returns a simple pk() descriptor referencing any pubkey with a matching fingerprint origin.
+/// Find a registered descriptor that references the given fingerprint, confirmed by the PSBT.
+/// Iterates the signer's registered descriptors and returns the first one whose key origins
+/// include the given fingerprint.
+#[allow(clippy::mutable_key_type)]
 fn psbt_matching_descriptor(
     psbt: &bitcoin::Psbt,
     fingerprint: bip32::Fingerprint,
+    descriptors: &BTreeSet<Descriptor<DescriptorPublicKey>>,
 ) -> Option<Descriptor<DescriptorPublicKey>> {
+    // Collect all fingerprints referenced in this PSBT for quick lookup
+    let mut psbt_fingerprints = BTreeSet::new();
     for input in &psbt.inputs {
         for (fg, _) in input.bip32_derivation.values() {
-            if *fg == fingerprint {
-                // We can't reconstruct a full descriptor from PSBT alone without
-                // the registered descriptor set. Return None to let callers decide.
-                return None;
-            }
+            psbt_fingerprints.insert(*fg);
+        }
+        for (_, (fg, _)) in input.tap_key_origins.values() {
+            psbt_fingerprints.insert(*fg);
         }
     }
+
+    if !psbt_fingerprints.contains(&fingerprint) {
+        return None;
+    }
+
+    // Find the first registered descriptor that references this fingerprint
+    for descriptor in descriptors {
+        let matches = descriptor.for_any_key(|k| match k {
+            DescriptorPublicKey::XPub(key) => key
+                .origin
+                .as_ref()
+                .is_some_and(|(fg, _)| *fg == fingerprint),
+            DescriptorPublicKey::MultiXPub(key) => key
+                .origin
+                .as_ref()
+                .is_some_and(|(fg, _)| *fg == fingerprint),
+            DescriptorPublicKey::Single(_) => false,
+        });
+        if matches {
+            return Some(descriptor.clone());
+        }
+    }
+
     None
 }
 
