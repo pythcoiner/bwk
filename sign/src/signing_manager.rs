@@ -8,7 +8,6 @@ use std::{
 
 use crossbeam::channel;
 
-use bwk_descriptor::descriptor::wpkh;
 use miniscript::{
     bitcoin::{self, bip32},
     Descriptor, DescriptorPublicKey, ForEachKey,
@@ -220,8 +219,14 @@ impl SigningManager {
         self.bip32_signers.insert(signer.fingerprint(), signer);
     }
 
-    pub fn sign(&self, network: bitcoin::Network, psbt: String) {
-        let psbt = match bitcoin::Psbt::from_str(&psbt) {
+    pub fn register_bip32_descriptor(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
+        for signer in self.bip32_signers.values_mut() {
+            signer.inner_register_descriptor(descriptor.clone());
+        }
+    }
+
+    pub fn sign(&self, psbt: String) {
+        let mut psbt = match bitcoin::Psbt::from_str(&psbt) {
             Ok(p) => p,
             Err(_) => {
                 if self
@@ -235,22 +240,17 @@ impl SigningManager {
             }
         };
 
-        let signer = self
+        self.sign_psbt(&mut psbt);
+
+        let fg = self
             .bip32_signers
-            .iter()
+            .keys()
             .next()
-            .expect("at least one signer")
-            .1;
-
-        let n_path = match network {
-            bitcoin::Network::Bitcoin => 0,
-            _ => 1,
-        };
-        let deriv_path = bip32::DerivationPath::from_str(&format!("m/84'/{}'/0'", n_path)).unwrap();
-        let xpub = signer.xpub(&deriv_path);
-        let descriptor = wpkh(xpub);
-
-        signer.sign_with_descriptor(psbt, descriptor);
+            .copied()
+            .unwrap_or_default();
+        if self.sender.send(SignerNotif::Signed(fg, psbt)).is_err() {
+            log::error!("SigningManager::sign() fails to send notif")
+        }
     }
 
     pub fn sign_psbt(&self, psbt: &mut bitcoin::Psbt) {

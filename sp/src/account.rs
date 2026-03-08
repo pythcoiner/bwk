@@ -1076,11 +1076,9 @@ impl Account {
             self.sign_sp_inputs(psbt)?;
         }
 
-        // Sign BIP32 inputs via sub-account HotSigners
+        // Sign BIP32 inputs via sub-account SigningManagers
         for sub in &self.sub_accounts {
-            if let Some(signer) = sub.hot_signer() {
-                signer.sign(psbt);
-            }
+            sub.sign_psbt(psbt);
         }
 
         Ok(())

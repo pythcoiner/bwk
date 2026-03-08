@@ -12,7 +12,7 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
-use bwk_sign::{signing_manager::SigningManager, HotSigner, Signer};
+use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, Coin};
 use miniscript::{
     bitcoin::{self, OutPoint, ScriptBuf},
@@ -158,6 +158,7 @@ impl Account {
             SigningManager::new(PathBuf::new(), config.dir_name()).enable_persist(config.persist);
         if let Some(mnemo) = config.mnemonic.clone() {
             signing_manager.new_bip32_signer_from_mnemonic(config.network(), mnemo);
+            signing_manager.register_bip32_descriptor(config.descriptor.clone());
         }
         let mut account = Account {
             coin_store,
@@ -211,15 +212,12 @@ impl Account {
         CoinStoreSource::new(self.coin_store.clone())
     }
 
-    pub fn hot_signer(&self) -> Option<HotSigner> {
-        let mnemonic_str = self.config.mnemonic.clone()?;
-        let mut signer = HotSigner::new_from_mnemonics(self.network(), &mnemonic_str).ok()?;
-        signer.register_descriptor(self.descriptor());
-        Some(signer)
+    pub fn sign(&self, psbt: String) {
+        self.signing_manager.sign(psbt);
     }
 
-    pub fn sign(&self, psbt: String) {
-        self.signing_manager.sign(self.config.network(), psbt);
+    pub fn sign_psbt(&self, psbt: &mut bitcoin::Psbt) {
+        self.signing_manager.sign_psbt(psbt);
     }
 }
 
@@ -1569,9 +1567,10 @@ mod integration_tests {
         builder.tx_template.inputs = coins;
         builder.dummy_external_output(amount);
         let mut psbt = builder.generate().unwrap();
-        let signer = account.hot_signer().unwrap();
-        signer.sign(&mut psbt);
-        let tx = signer.finalize(&mut psbt).unwrap();
+        account.sign_psbt(&mut psbt);
+        use miniscript::psbt::PsbtExt;
+        PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).expect("finalize");
+        let tx = psbt.extract_tx_unchecked_fee_rate();
         let txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
         let blocks: u32 = random_range(2..15);
         generate(bitcoind, blocks);
@@ -1694,7 +1693,6 @@ mod integration_tests {
         let mut account = Account::new(config);
         sleep(Duration::from_millis(300));
         let mut builder = account.tx_builder();
-        let signer = account.hot_signer().unwrap();
 
         receive(&mut account, &bitcoind, 100_000_000);
         for _ in 0..15 {
@@ -1716,8 +1714,11 @@ mod integration_tests {
                 let mut psbt = builder
                     .pay(random_range(10_000..1_000_000), addr, 1000)
                     .unwrap();
-                signer.sign(&mut psbt);
-                let tx = signer.finalize(&mut psbt).unwrap();
+                account.sign_psbt(&mut psbt);
+                use miniscript::psbt::PsbtExt;
+                PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
+                    .expect("finalize");
+                let tx = psbt.extract_tx_unchecked_fee_rate();
                 let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
                 generate(&bitcoind, random_range(1..5));
             } else {
