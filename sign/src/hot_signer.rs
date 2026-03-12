@@ -324,6 +324,7 @@ impl HotSigner {
     ) -> Result<(), Error> {
         let mut cache = sighash::SighashCache::new(psbt.unsigned_tx.clone());
         let derivator = SpkDerivator::new(descriptor.clone(), self.network).unwrap();
+        let mut signed_any = false;
         for index in 0..psbt.inputs.len() {
             match (
                 !psbt.inputs[index].bip32_derivation.is_empty(),
@@ -331,20 +332,27 @@ impl HotSigner {
                 !psbt.inputs[index].tap_key_origins.is_empty(),
             ) {
                 (true, false, false) => {
-                    self.sign_input_segwit(psbt, index, &derivator, &mut cache)?
+                    self.sign_input_segwit(psbt, index, &derivator, &mut cache)?;
+                    signed_any = true;
                 }
                 (false, false, true) => {
-                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
+                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?;
+                    signed_any = true;
                 }
                 (false, true, true) => {
                     self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?;
-                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?
+                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?;
+                    signed_any = true;
                 }
                 (false, false, false) => continue,
                 _ => {
                     unreachable!()
                 }
             }
+        }
+
+        if !signed_any {
+            return Err(Error::SigningInfo);
         }
 
         Ok(())
