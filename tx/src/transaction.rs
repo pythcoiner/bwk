@@ -280,7 +280,7 @@ impl TxTemplate {
         skip_checks: bool,
     ) -> Result<Psbt, Error> {
         let outputs = self.prepare_outputs(change)?;
-        let (inputs, outputs) = self.shuffle_maybe(shuffle, outputs);
+        let (inputs, mut outputs) = self.shuffle_maybe(shuffle, outputs);
 
         if !skip_checks {
             check_missing_change(&inputs, &outputs, &self.fees)?;
@@ -291,6 +291,13 @@ impl TxTemplate {
             Some(p) => Self::compute_sp_partial_secret(&inputs, &outputs, p)?,
             None => None,
         };
+
+        // Batch-derive SP output scripts so the k-counter is correct
+        // across all outputs sharing the same scan key (BIP352).
+        if let (Some(p), Some(secret)) = (sp_provider, partial_secret) {
+            p.derive_sp_scripts(&mut outputs, secret);
+        }
+
         let ctx = FinalizationContext {
             inputs: &inputs,
             partial_secret,

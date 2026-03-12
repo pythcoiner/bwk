@@ -28,6 +28,8 @@ pub struct SpRecipient {
     pub label: Option<u32>,
     /// Network
     pub network: Network,
+    /// Pre-computed output script (set by batch derivation)
+    precomputed_script: Option<ScriptBuf>,
 }
 
 impl SpRecipient {
@@ -38,6 +40,7 @@ impl SpRecipient {
             amount: Amount::Value(amount),
             label: None,
             network,
+            precomputed_script: None,
         }
     }
 
@@ -53,6 +56,7 @@ impl SpRecipient {
             amount: Amount::Value(amount),
             label: Some(label),
             network,
+            precomputed_script: None,
         }
     }
 }
@@ -64,11 +68,17 @@ impl RecipientProvider for SpRecipient {
     }
 
     fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
+        if let Some(ref script) = self.precomputed_script {
+            return script.clone();
+        }
+
         let partial_secret = ctx
             .partial_secret
             .expect("SP output requires partial_secret in FinalizationContext");
 
-        // Generate output pubkey using silentpayments crate
+        // Fallback: single-output independent derivation (k=0).
+        // For multi-output transactions, derive_sp_scripts() should have
+        // already set precomputed_script with the correct k value.
         let pubkeys =
             silentpayments::sending::generate_recipient_pubkeys(vec![self.address], partial_secret)
                 .expect("failed to generate SP recipient pubkeys");
@@ -79,6 +89,10 @@ impl RecipientProvider for SpRecipient {
 
         let pubkey = output_pubkeys[0];
         ScriptBuf::new_p2tr_tweaked(pubkey.dangerous_assume_tweaked())
+    }
+
+    fn set_precomputed_script(&mut self, script: ScriptBuf) {
+        self.precomputed_script = Some(script);
     }
 
     fn psbt_output_info(&self) -> PsbtOutputInfo {
@@ -111,6 +125,8 @@ pub struct SpRecipientAddress {
     pub inner: RecipientAddress,
     pub amount: Amount,
     pub network: Network,
+    /// Pre-computed output script (set by batch derivation)
+    precomputed_script: Option<ScriptBuf>,
 }
 
 impl SpRecipientAddress {
@@ -120,6 +136,7 @@ impl SpRecipientAddress {
             inner: addr,
             amount: Amount::Value(amount),
             network,
+            precomputed_script: None,
         }
     }
 
@@ -129,6 +146,7 @@ impl SpRecipientAddress {
             inner: RecipientAddress::SpAddress(addr),
             amount: Amount::Value(amount),
             network,
+            precomputed_script: None,
         }
     }
 }
@@ -158,6 +176,10 @@ impl RecipientProvider for SpRecipientAddress {
     fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
         match &self.inner {
             RecipientAddress::SpAddress(sp) => {
+                if let Some(ref script) = self.precomputed_script {
+                    return script.clone();
+                }
+
                 let partial_secret = ctx
                     .partial_secret
                     .expect("SP output requires partial_secret");
@@ -180,6 +202,10 @@ impl RecipientProvider for SpRecipientAddress {
                 ScriptBuf::new_op_return(op_return)
             }
         }
+    }
+
+    fn set_precomputed_script(&mut self, script: ScriptBuf) {
+        self.precomputed_script = Some(script);
     }
 
     fn psbt_output_info(&self) -> PsbtOutputInfo {
@@ -246,6 +272,10 @@ impl RecipientProvider for SpChangeRecipientProvider {
         self.0.create_script(ctx)
     }
 
+    fn set_precomputed_script(&mut self, script: ScriptBuf) {
+        self.0.set_precomputed_script(script);
+    }
+
     fn psbt_output_info(&self) -> PsbtOutputInfo {
         self.0.psbt_output_info()
     }
@@ -271,13 +301,84 @@ impl RecipientProvider for SpChangeRecipientProvider {
     }
 }
 
-// SpSecretProvider
+// Batch SP script derivation
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use spdk_core::SpClient;
 
 use crate::SpCoinStore;
+
+/// Convert bitcoin::Network to silentpayments::Network.
+fn to_sp_network(network: Network) -> silentpayments::Network {
+    match network {
+        Network::Bitcoin => silentpayments::Network::Mainnet,
+        Network::Testnet | Network::Signet => silentpayments::Network::Testnet,
+        Network::Regtest => silentpayments::Network::Regtest,
+        _ => silentpayments::Network::Testnet,
+    }
+}
+
+/// Batch-derive output scripts for all SP outputs in a transaction.
+///
+/// Per BIP352, outputs sharing the same scan key must be derived together
+/// with incrementing `k` values. This function:
+/// 1. Collects all SP addresses from outputs via `psbt_output_info()`
+/// 2. Calls `generate_recipient_pubkeys()` once with all SP addresses
+/// 3. Uses per-address counters to assign the correct pubkey to each output
+/// 4. Stores the pre-computed script on each SP output
+fn batch_derive_sp_scripts(
+    outputs: &mut [Box<dyn RecipientProvider>],
+    partial_secret: spdk_core::bitcoin::secp256k1::SecretKey,
+) {
+    // Collect SP output indices and reconstruct their addresses
+    let mut sp_indices = Vec::new();
+    let mut sp_addresses = Vec::new();
+
+    for (i, output) in outputs.iter().enumerate() {
+        if !output.is_silent_payment() {
+            continue;
+        }
+        if let PsbtOutputInfo::SilentPayment {
+            scan_pubkey,
+            spend_pubkey,
+            ..
+        } = output.psbt_output_info()
+        {
+            let sp_network = to_sp_network(output.network());
+            let addr = SilentPaymentAddress::new(scan_pubkey, spend_pubkey, sp_network, 0)
+                .expect("valid SP address from psbt_output_info");
+            sp_addresses.push(addr);
+            sp_indices.push(i);
+        }
+    }
+
+    if sp_addresses.is_empty() {
+        return;
+    }
+
+    // Single call with all addresses — BIP352 k-counter increments per scan-key group
+    let pubkey_map =
+        silentpayments::sending::generate_recipient_pubkeys(sp_addresses.clone(), partial_secret)
+            .expect("failed to generate SP recipient pubkeys");
+
+    // Assign the correct pubkey to each output using per-address counters
+    let mut counters: HashMap<SilentPaymentAddress, usize> = HashMap::new();
+
+    for (sp_idx, &output_idx) in sp_indices.iter().enumerate() {
+        let addr = &sp_addresses[sp_idx];
+        let pubkeys = pubkey_map.get(addr).expect("missing pubkey for SP address");
+        let k = counters.entry(*addr).or_insert(0);
+        let pubkey = pubkeys[*k];
+        *k += 1;
+
+        let script = ScriptBuf::new_p2tr_tweaked(pubkey.dangerous_assume_tweaked());
+        outputs[output_idx].set_precomputed_script(script);
+    }
+}
+
+// SpSecretProvider
 
 /// Standalone [`SpPartialSecretProvider`] that can be boxed into a
 /// [`TxBuilder`](bwk_tx::TxBuilder).
@@ -313,6 +414,14 @@ impl SpPartialSecretProvider for SpSecretProvider {
             .get_partial_secret_for_selected_utxos(&selected_utxos)
             .map_err(|_| TxError::SpPartialSecret)
     }
+
+    fn derive_sp_scripts(
+        &self,
+        outputs: &mut [Box<dyn RecipientProvider>],
+        partial_secret: spdk_core::bitcoin::secp256k1::SecretKey,
+    ) {
+        batch_derive_sp_scripts(outputs, partial_secret);
+    }
 }
 
 // SpPartialSecretProvider for Account
@@ -335,5 +444,13 @@ impl SpPartialSecretProvider for Account {
         self.sp_client()
             .get_partial_secret_for_selected_utxos(&selected_utxos)
             .map_err(|_| TxError::SpPartialSecret)
+    }
+
+    fn derive_sp_scripts(
+        &self,
+        outputs: &mut [Box<dyn RecipientProvider>],
+        partial_secret: spdk_core::bitcoin::secp256k1::SecretKey,
+    ) {
+        batch_derive_sp_scripts(outputs, partial_secret);
     }
 }

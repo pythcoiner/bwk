@@ -91,7 +91,11 @@ fn test_sp_to_sp_self() {
         .into_iter()
         .filter(|(op, _)| op.txid == tx.compute_txid())
         .collect();
-    assert!(!new_outputs.is_empty());
+    assert_eq!(
+        new_outputs.len(),
+        2,
+        "self-send must detect both receive and change outputs"
+    );
 }
 
 /// SP → SP (other wallet): verify recipient detects the output.
@@ -314,4 +318,163 @@ fn test_mixed_sp_segwit_to_segwit() {
     let mut psbt = builder.generate().unwrap();
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+}
+
+/// 3 SP inputs → SP + taproot (drain multiple SP coins).
+#[test]
+fn test_multi_sp_inputs_to_sp_and_taproot() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test-multi-in");
+
+    // Fund with 3 separate SP outputs
+    env.fund_sp(&mut account, 0.1);
+    env.fund_sp(&mut account, 0.1);
+    env.fund_sp(&mut account, 0.1);
+    assert_eq!(account.coins().len(), 3);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to_sp(account.sp_address(), 50_000);
+    builder.send_to(env.taproot_addr(10), 50_000);
+    builder.drain_inputs();
+
+    let mut psbt = builder.generate().unwrap();
+    assert_eq!(psbt.unsigned_tx.input.len(), 3);
+
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    let txid = tx.compute_txid();
+    env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == txid)
+        .collect();
+    // 1 SP receive + 1 SP change (taproot output not ours)
+    assert_eq!(
+        new_outputs.len(),
+        2,
+        "3-input tx must detect both SP receive and change"
+    );
+}
+
+/// SP → 3 SP outputs to self (2 receive + 1 change, same scan key, k=0..2).
+#[test]
+fn test_sp_to_three_sp_outputs_self() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test-3sp-self");
+    env.fund_sp(&mut account, 0.5);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    // 2 explicit outputs to receive address + auto change = 3 SP outputs
+    builder.send_to_sp(account.sp_address(), 50_000);
+    builder.send_to_sp(account.sp_address(), 60_000);
+    let coins = builder.select_coins(110_000, 1000);
+    assert!(!coins.is_empty());
+    for c in coins {
+        builder.add_input(c);
+    }
+
+    let mut psbt = builder.generate().unwrap();
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    let txid = tx.compute_txid();
+    env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == txid)
+        .collect();
+    // 2 receive (no label) + 1 change (change label) = 3 SP outputs
+    assert_eq!(
+        new_outputs.len(),
+        3,
+        "self-send with 3 SP outputs (2 receive + 1 change) must all be detected"
+    );
+}
+
+/// 2 SP inputs → 3 SP outputs to self (multiple inputs, multiple outputs).
+#[test]
+fn test_multi_sp_inputs_to_three_sp_outputs() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test-multi-3sp");
+    env.fund_sp(&mut account, 0.3);
+    env.fund_sp(&mut account, 0.3);
+    assert_eq!(account.coins().len(), 2);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to_sp(account.sp_address(), 50_000);
+    builder.send_to_sp(account.sp_address(), 60_000);
+    builder.drain_inputs();
+
+    let mut psbt = builder.generate().unwrap();
+    assert_eq!(psbt.unsigned_tx.input.len(), 2);
+
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    let txid = tx.compute_txid();
+    env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == txid)
+        .collect();
+    assert_eq!(
+        new_outputs.len(),
+        3,
+        "2 SP inputs to 3 SP outputs (2 receive + 1 change) must all be detected"
+    );
+}
+
+/// SP → SP other + SP self + SP change (3 outputs, 2 scan-key groups).
+#[test]
+fn test_sp_to_sp_other_and_self() {
+    let mut env = TestEnv::new();
+    let mut sender = env.sp_account_with_mnemonic("sender", test_mnemonic());
+    let mut receiver = env.sp_account_with_mnemonic("receiver", test_mnemonic_2());
+
+    env.fund_sp(&mut sender, 0.5);
+
+    let mut builder = sender.tx_builder().feerate(1000);
+    builder.send_to_sp(receiver.sp_address(), 50_000);
+    builder.send_to_sp(sender.sp_address(), 60_000);
+    let coins = builder.select_coins(110_000, 1000);
+    assert!(!coins.is_empty());
+    for c in coins {
+        builder.add_input(c);
+    }
+
+    let mut psbt = builder.generate().unwrap();
+    let tx = sender.sign_and_finalize(&mut psbt).unwrap();
+    let txid = tx.compute_txid();
+    env.broadcast_and_mine(&tx);
+
+    // Sender scans: should find self-receive + change
+    sender.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let sender_new: Vec<_> = sender
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == txid)
+        .collect();
+    assert_eq!(
+        sender_new.len(),
+        2,
+        "sender must detect self-receive and change outputs"
+    );
+
+    // Receiver scans: should find the output sent to them
+    receiver.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let receiver_new: Vec<_> = receiver
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == txid)
+        .collect();
+    assert_eq!(
+        receiver_new.len(),
+        1,
+        "receiver must detect exactly 1 output"
+    );
+    assert!(receiver.balance() >= 50_000);
 }

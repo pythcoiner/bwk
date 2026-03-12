@@ -33,6 +33,18 @@ pub trait SpPartialSecretProvider {
     /// Compute the partial secret needed for SP output derivation.
     /// This combines the spend key with tweaks from all selected inputs.
     fn compute_partial_secret(&self, inputs: &[Coin]) -> Result<SecretKey, Error>;
+
+    /// Batch-derive scripts for all Silent Payment outputs in a transaction.
+    ///
+    /// BIP352 requires all SP outputs sharing the same scan key to be derived
+    /// together with incrementing `k` values. This method is called during
+    /// `finalize()` after computing `partial_secret` but before `build_psbt()`.
+    fn derive_sp_scripts(
+        &self,
+        _outputs: &mut [Box<dyn RecipientProvider>],
+        _partial_secret: SecretKey,
+    ) {
+    }
 }
 
 /// Trait for types that can provide recipient output information.
@@ -64,6 +76,9 @@ pub trait RecipientProvider: RecipientProviderClone {
 
     /// Set the amount (used for Max output resolution)
     fn set_amount(&mut self, amount: Amount);
+
+    /// Store a pre-computed output script (used by SP batch derivation).
+    fn set_precomputed_script(&mut self, _script: ScriptBuf) {}
 
     /// Convert to PSBT output metadata
     fn to_psbt_output(&self) -> Result<bitcoin::psbt::Output, Error> {
