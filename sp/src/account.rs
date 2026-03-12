@@ -802,6 +802,43 @@ impl Account {
             let mut last_notified_tip: Option<u32> = None;
             let mut waiting = false;
 
+            let scan_backend = match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = sender.send(Notification::FailStartScanning {
+                        message: e.to_string(),
+                    });
+                    let _ = sender.send(Notification::ScanStopped);
+                    return;
+                }
+            };
+
+            let with_cutthrough = scan_backend
+                .info()
+                .map(|info| info.tweaks_cut_through_with_dust_filter)
+                .unwrap_or(false);
+
+            let mut scanner = match SpAccount::restore(
+                scan_backend,
+                client.clone(),
+                AccountUpdater {
+                    coin_store: coin_store.clone(),
+                    tx_store: tx_store.clone(),
+                    scan_state: scan_state.clone(),
+                    sender: sender.clone(),
+                },
+                stop.clone(),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = sender.send(Notification::FailStartScanning {
+                        message: e.to_string(),
+                    });
+                    let _ = sender.send(Notification::ScanStopped);
+                    return;
+                }
+            };
+
             while !stop.load(Ordering::Relaxed) {
                 let chain_height = match backend.block_height() {
                     Ok(h) => h.to_consensus_u32(),
@@ -847,34 +884,6 @@ impl Account {
                     Ok(h) => h,
                     Err(_) => continue,
                 };
-
-                let scan_backend =
-                    match BlindbitBackend::new(blindbit_url.clone(), http_client_scan.clone()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            let _ = sender.send(Notification::FailStartScanning {
-                                message: e.to_string(),
-                            });
-                            break;
-                        }
-                    };
-
-                let with_cutthrough = scan_backend
-                    .info()
-                    .map(|info| info.tweaks_cut_through_with_dust_filter)
-                    .unwrap_or(false);
-
-                let mut scanner = SpAccount::new(
-                    scan_backend,
-                    client.clone(),
-                    AccountUpdater {
-                        coin_store: coin_store.clone(),
-                        tx_store: tx_store.clone(),
-                        scan_state: scan_state.clone(),
-                        sender: sender.clone(),
-                    },
-                    stop.clone(),
-                );
 
                 let _ = sender.send(Notification::ScanStarted {
                     start: start.to_consensus_u32(),
@@ -1299,6 +1308,11 @@ impl Updater for AccountUpdater {
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();
         Ok(())
+    }
+
+    fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        let store = self.coin_store.lock().expect("poisoned");
+        Ok(store.all_outpoints())
     }
 }
 

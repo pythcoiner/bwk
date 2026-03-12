@@ -654,6 +654,9 @@ fn test_double_spend_via_reorg() {
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -925,6 +928,9 @@ fn test_double_spend_attempt_rejected() {
         }
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
         }
     }
 
@@ -1257,6 +1263,9 @@ fn test_concurrent_funding_during_scan() {
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             self.scan_complete.store(true, Ordering::SeqCst);
             Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
         }
     }
 
@@ -1622,6 +1631,9 @@ fn test_notification_order_full_sequence() {
             guard.push(TestNotification::SaveCalled);
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -1842,6 +1854,9 @@ fn test_notification_multiple_outputs_same_block() {
 
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
         }
     }
 
@@ -2345,6 +2360,9 @@ fn test_dust_limit_filters_small_outputs() {
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -2586,6 +2604,9 @@ fn test_dust_limit_zero_accepts_all() {
 
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
         }
     }
 
@@ -3001,6 +3022,9 @@ fn test_receive_with_sp_label() {
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let captured_outputs = Arc::new(Mutex::new(Vec::new()));
@@ -3350,6 +3374,9 @@ fn test_persists_immediately_on_new_output() {
             *count_guard = outputs.len();
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -3594,6 +3621,9 @@ fn test_persists_on_spent_detection() {
         }
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
         }
     }
 

@@ -495,6 +495,9 @@ fn test_reorg_spent_status_reset() {
         fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
             Ok(())
         }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
     }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();

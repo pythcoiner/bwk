@@ -1715,8 +1715,7 @@ mod integration_tests {
                     .pay(random_range(10_000..1_000_000), addr, 1000)
                     .unwrap();
                 account.sign_psbt(&mut psbt);
-                PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
-                    .unwrap();
+                PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).unwrap();
                 let tx = psbt.extract_tx_unchecked_fee_rate();
                 let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
                 generate(&bitcoind, random_range(1..5));

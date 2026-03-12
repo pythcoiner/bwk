@@ -48,8 +48,8 @@ corepc-node = { git = "https://github.com/pythcoiner/corepc.git", branch = "bip3
 dns-lookup = "2.0"
 
 # spdk dependencies
-spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "cd178c8", default-features = false }
-backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "cd178c8" }
+spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "f00f559", default-features = false }
+backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "f00f559" }
 silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
 

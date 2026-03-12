@@ -177,7 +177,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "backend-blindbit-native-non-async"
 version = "0.1.0"
-source = "git+https://github.com/pythcoiner/spdk.git?rev=cd178c8#cd178c8c491a5434d3a15e2e52f8b222e71e32dc"
+source = "git+https://github.com/pythcoiner/spdk.git?rev=f00f559#f00f5594cf743be25874a5c01e110776a925b7f4"
 dependencies = [
  "bitcoin 0.1.0",
  "hex",
@@ -309,7 +309,7 @@ dependencies = [
 [[package]]
 name = "bitcoin"
 version = "0.1.0"
-source = "git+https://github.com/pythcoiner/spdk.git?rev=cd178c8#cd178c8c491a5434d3a15e2e52f8b222e71e32dc"
+source = "git+https://github.com/pythcoiner/spdk.git?rev=f00f559#f00f5594cf743be25874a5c01e110776a925b7f4"
 dependencies = [
  "bitcoin 0.32.8",
 ]
@@ -2911,7 +2911,7 @@ dependencies = [
 [[package]]
 name = "spdk-core"
 version = "0.1.0"
-source = "git+https://github.com/pythcoiner/spdk.git?rev=cd178c8#cd178c8c491a5434d3a15e2e52f8b222e71e32dc"
+source = "git+https://github.com/pythcoiner/spdk.git?rev=f00f559#f00f5594cf743be25874a5c01e110776a925b7f4"
 dependencies = [
  "bdk_coin_select",
  "bip39",
