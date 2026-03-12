@@ -179,7 +179,10 @@ fn test_reorg_removes_orphaned_coins() {
         .call("invalidateblock", &[fund_block_hash.into()])
         .unwrap();
 
-    // 10. Double-spend the funding input on the new chain
+    // 10. Mine blocks on new fork to ensure wallet has mature coinbase outputs
+    bwk_test::generate_blocks(bitcoind, 5);
+
+    // 11. Double-spend the funding input on the new chain
     let new_addr: String = bitcoind
         .call(
             "getnewaddress",
@@ -196,12 +199,12 @@ fn test_reorg_removes_orphaned_coins() {
         )
         .expect("send to different address");
 
-    // 11. Mine new chain (SP tx is now invalid)
-    bwk_test::generate_blocks(bitcoind, 5);
+    // 12. Mine new chain (SP tx is now invalid)
+    bwk_test::generate_blocks(bitcoind, 1);
     let new_height: u32 = bitcoind.call("getblockcount", &[]).unwrap();
     wait_for_sync_and_index(&backend, new_height);
 
-    // 12. Verify backend works after reorg and rescan succeeds
+    // 13. Verify backend works after reorg and rescan succeeds
     let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
     let mut scanner2 = SpAccount::new(
         scan_backend2,

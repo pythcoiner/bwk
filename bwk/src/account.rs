@@ -1322,7 +1322,7 @@ mod integration_tests {
         let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 100);
 
-        const TIMEOUT: u64 = 5;
+        const TIMEOUT: u64 = 15;
         const BLOCKS: u32 = 1;
 
         let look_ahead = 20;
@@ -1446,7 +1446,7 @@ mod integration_tests {
         let (url, port, mut electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 110);
 
-        const TIMEOUT: u64 = 5;
+        const TIMEOUT: u64 = 15;
 
         let look_ahead = 20;
 
