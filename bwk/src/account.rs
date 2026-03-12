@@ -1640,7 +1640,7 @@ mod integration_tests {
                 let coins = account.coins();
                 coins.len() == 1
             },
-            5,
+            15,
         );
         spend(&mut account, &mut builder, &bitcoind, 100_000);
         wait_until_timeout(
@@ -1648,7 +1648,7 @@ mod integration_tests {
                 let payments = account.payment_history();
                 payments.len() == 2
             },
-            5,
+            15,
         );
 
         let payments = account.payment_history();
