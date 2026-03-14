@@ -247,7 +247,7 @@ impl TxBuilder {
             vec![]
         }
     }
-    pub fn pay_with_label(
+    fn pay_with_label(
         &mut self,
         amount: u64,
         address: bitcoin::Address,
@@ -255,16 +255,62 @@ impl TxBuilder {
         label: Option<String>,
     ) -> Result<bitcoin::Psbt, Error> {
         self.new_template();
+        self._pay_with_label(crate::Amount::Value(amount), address, feerate, label)
+    }
+    pub fn pay(
+        &mut self,
+        amount: u64,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+    ) -> Result<bitcoin::Psbt, Error> {
+        self.pay_with_label(amount, address, feerate, None)
+    }
+    pub fn sweep_with_label(
+        &mut self,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+        label: Option<String>,
+    ) -> Result<bitcoin::Psbt, Error> {
+        self._pay_with_label(crate::Amount::Max(None), address, feerate, label)
+    }
+    pub fn sweep(
+        &mut self,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+    ) -> Result<bitcoin::Psbt, Error> {
+        self._pay_with_label(crate::Amount::Max(None), address, feerate, None)
+    }
+    fn _pay_with_label(
+        &mut self,
+        amount: crate::Amount,
+        address: bitcoin::Address,
+        feerate: u64, /* msats/vb */
+        label: Option<String>,
+    ) -> Result<bitcoin::Psbt, Error> {
         let recipient = Recipient {
             address: address.as_unchecked().clone(),
-            amount: crate::Amount::Value(amount),
+            amount: amount.clone(),
             label,
             origin: None,
             descriptor: None,
         };
         self.add_output(recipient);
         let base_fee = tx_estimated_weight(&self.tx_template).to_vbytes_ceil() * feerate / 1000;
-        let coins = self.select_coins(amount + base_fee, feerate);
+        let coins = if !self.tx_template.inputs.is_empty() {
+            self.tx_template.inputs.clone()
+        } else {
+            match amount {
+                Amount::Value(a) => self.select_coins(a + base_fee, feerate),
+                Amount::Max(_) => {
+                    if let Some(source) = &self.coin_source {
+                        source.spendable_coins()
+                    } else {
+                        vec![]
+                    }
+                }
+                Amount::Anchor => return Err(Error::PayToAnchor),
+            }
+        };
         if coins.is_empty() {
             return Err(Error::CoinSelection);
         }
@@ -284,14 +330,6 @@ impl TxBuilder {
         } else {
             Err(Error::CoinSelectionFee)
         }
-    }
-    pub fn pay(
-        &mut self,
-        amount: u64,
-        address: bitcoin::Address,
-        feerate: u64, /* msats/vb */
-    ) -> Result<bitcoin::Psbt, Error> {
-        self.pay_with_label(amount, address, feerate, None)
     }
 }
 
@@ -1031,6 +1069,182 @@ mod tests {
         let size = tx.weight().to_vbytes_ceil();
         assert_eq!(size, 229);
         let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        // receive coins and add as inputs
+        let c1 = builder.fund_with_bitcoind(bitcoind, 1_000_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 2_000_000);
+        let c3 = builder.fund_with_bitcoind(bitcoind, 3_000_000);
+        builder.add_input(c1);
+        builder.add_input(c2);
+        builder.add_input(c3);
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        // sweep all coins to external address
+        let mut psbt = builder.sweep(address, 1000).unwrap();
+        // All 3 coins should be used as inputs
+        assert_eq!(psbt.inputs.len(), 3);
+        assert_eq!(sum_inputs(&psbt), 6_000_000);
+        // Single output, no change
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+        let total_out = sum_outputs(&psbt);
+        assert!(total_out < 6_000_000);
+
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_drain_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        // receive coins, use drain_inputs to add all from coin_source
+        builder.fund_with_bitcoind(bitcoind, 500_000);
+        builder.fund_with_bitcoind(bitcoind, 1_500_000);
+        builder.drain_inputs();
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        let mut psbt = builder.sweep(address, 1000).unwrap();
+        assert_eq!(psbt.inputs.len(), 2);
+        assert_eq!(sum_inputs(&psbt), 2_000_000);
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_with_label_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        let c1 = builder.fund_with_bitcoind(bitcoind, 500_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 1_500_000);
+        builder.add_input(c1);
+        builder.add_input(c2);
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        let mut psbt = builder
+            .sweep_with_label(address, 1000, Some("sweep label".to_string()))
+            .unwrap();
+        assert_eq!(psbt.inputs.len(), 2);
+        assert_eq!(sum_inputs(&psbt), 2_000_000);
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_with_inputs_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        // supply coins via .inputs() before sweep
+        let c1 = builder.fund_with_bitcoind(bitcoind, 400_000);
+        let c2 = builder.fund_with_bitcoind(bitcoind, 600_000);
+        builder = builder.inputs(vec![c1, c2]);
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        let mut psbt = builder.sweep(address, 1000).unwrap();
+        assert_eq!(psbt.inputs.len(), 2);
+        assert_eq!(sum_inputs(&psbt), 1_000_000);
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_all_online() {
+        let mut node = bitcoind_with_txindex();
+        let bitcoind = &mut node.client;
+        let (signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        // receive coins but don't add as inputs
+        builder.fund_with_bitcoind(bitcoind, 300_000);
+        builder.fund_with_bitcoind(bitcoind, 700_000);
+
+        let address = bitcoind
+            .get_new_address(None, None)
+            .unwrap()
+            .address()
+            .unwrap()
+            .assume_checked();
+
+        // sweep with empty template inputs: should drain all from coin_source
+        let mut psbt = builder.sweep(address, 1000).unwrap();
+        assert_eq!(psbt.inputs.len(), 2);
+        assert_eq!(sum_inputs(&psbt), 1_000_000);
+        assert_eq!(psbt.unsigned_tx.output.len(), 1);
+
+        signer.sign(&mut psbt);
+        let tx = signer.finalize(&mut psbt).unwrap();
+        let _txid = bitcoind.send_raw_transaction(&tx).unwrap().txid().unwrap();
+    }
+
+    #[test]
+    fn test_sweep_no_coins() {
+        let (_signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+
+        let address = builder.receive_address_at(0);
+
+        let result = builder.sweep(address, 1000);
+        assert!(matches!(result, Err(Error::CoinSelection)));
+    }
+
+    #[test]
+    fn test_pay_to_anchor_fails() {
+        let (_signer, derivator) = tr_signer();
+        let mut builder = test::builder_from_derivator(derivator);
+        let address = builder.receive_address_at(0);
+
+        let result = builder._pay_with_label(crate::Amount::Anchor, address, 1000, None);
+        assert!(matches!(result, Err(Error::PayToAnchor)));
     }
 
     #[test]

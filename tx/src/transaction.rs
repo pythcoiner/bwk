@@ -29,6 +29,7 @@ pub enum Error {
     NoSpProvider,
     SpPartialSecret,
     ChangeAlreadyAdded,
+    PayToAnchor,
     /// Recipient passed to finalize() with change does not return true from is_change()
     NotChange,
     /// Change should have been added but wasn't - funds would be lost to fees
