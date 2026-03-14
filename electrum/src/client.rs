@@ -334,7 +334,7 @@ impl Client {
                                 }
                             }
                             CoinRequest::Stop => {
-                                send.send(CoinResponse::Stopped.into()).unwrap();
+                                let _ = send.send(CoinResponse::Stopped.into());
                                 return;
                             }
                         };
