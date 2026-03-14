@@ -1560,7 +1560,7 @@ mod integration_tests {
         builder: &mut TxBuilder,
         bitcoind: &BitcoinD,
         amount: u64,
-    ) -> bitcoin::Txid {
+    ) -> (bitcoin::Txid, u32) {
         let coins = account.spendable_coins().coins.into_values().collect();
         builder.new_template();
         builder.tx_template.inputs = coins;
@@ -1572,14 +1572,15 @@ mod integration_tests {
         let txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
         let blocks: u32 = random_range(2..15);
         generate(bitcoind, blocks);
-        txid
+        (txid, blocks)
     }
 
-    fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) {
+    fn receive(account: &mut Account, bitcoind: &BitcoinD, amount: u64) -> u32 {
         let recv_addr = account.new_recv_addr();
         send_to_address(bitcoind, &recv_addr, Amount::from_sat(amount));
         let blocks: u32 = random_range(2..15);
         generate(bitcoind, blocks);
+        blocks
     }
 
     #[allow(unused)]
@@ -1628,25 +1629,24 @@ mod integration_tests {
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
-        account.start_electrum();
         sleep(Duration::from_millis(300));
         let mut builder = account.tx_builder();
 
-        receive(&mut account, &bitcoind, 200_000);
+        let blocks = receive(&mut account, &bitcoind, 200_000);
         wait_until_timeout(
             || {
                 let coins = account.coins();
                 coins.len() == 1
             },
-            15,
+            (blocks as u64) * 3,
         );
-        spend(&mut account, &mut builder, &bitcoind, 100_000);
+        let (_, blocks) = spend(&mut account, &mut builder, &bitcoind, 100_000);
         wait_until_timeout(
             || {
                 let payments = account.payment_history();
                 payments.len() == 2
             },
-            15,
+            (blocks as u64) * 3,
         );
 
         let payments = account.payment_history();
@@ -1692,9 +1692,12 @@ mod integration_tests {
         sleep(Duration::from_millis(300));
         let mut builder = account.tx_builder();
 
-        receive(&mut account, &bitcoind, 100_000_000);
+        let mut prev_blocks = receive(&mut account, &bitcoind, 100_000_000);
         for _ in 0..15 {
-            wait_until_timeout(|| !account.spendable_coins().coins.is_empty(), 5);
+            wait_until_timeout(
+                || !account.spendable_coins().coins.is_empty(),
+                (prev_blocks as u64) * 3,
+            );
             sleep(Duration::from_millis(1000));
             let coins = account.spendable_coins();
             let balance = coins
@@ -1704,6 +1707,7 @@ mod integration_tests {
             assert!(balance > 1_100_000);
             let pay: bool = random();
             if pay {
+                let blocks: u32 = random_range(1..5);
                 let addr = bitcoind
                     .client
                     .get_new_address(None, None)
@@ -1716,9 +1720,10 @@ mod integration_tests {
                 PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).unwrap();
                 let tx = psbt.extract_tx_unchecked_fee_rate();
                 let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
-                generate(&bitcoind, random_range(1..5));
+                generate(&bitcoind, blocks);
+                prev_blocks = blocks;
             } else {
-                receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
+                prev_blocks = receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
             }
         }
         wait_until_timeout(
@@ -1726,7 +1731,7 @@ mod integration_tests {
                 let payments = account.payment_history();
                 payments.len() == 15
             },
-            5,
+            (prev_blocks as u64) * 3,
         );
         sleep(Duration::from_secs(3));
         let payments = account.payment_history();
