@@ -13,7 +13,7 @@ use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
 use bwk_sign::signing_manager::SigningManager;
-use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, Coin};
+use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
 use miniscript::{
     bitcoin::{self, OutPoint, ScriptBuf},
     Descriptor, DescriptorPublicKey,
@@ -21,9 +21,7 @@ use miniscript::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    address_store::{
-        AddressEntry, AddressStatus, AddressTip, ChangeRecipientProvider, ChangeTipUpdater,
-    },
+    address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
     coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
@@ -226,7 +224,7 @@ impl Account {
     pub fn tx_builder(&self) -> TxBuilder {
         let tip_updater =
             ChangeTipUpdater::new(self.coin_store.lock().expect("poisoned").address_store());
-        let change_provider = Box::new(ChangeRecipientProvider::new(
+        let change_provider = Box::new(ChangeRecipientProvider::new_with_updater(
             tip_updater,
             self.descriptor(),
             self.network(),

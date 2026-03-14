@@ -315,7 +315,7 @@ impl TxBuilder {
         }
         if let Some(source) = self.coin_source.as_mut() {
             let txid = self.tx_template.tx().compute_txid();
-            for (pos, recipient) in self.tx_template.outputs.iter().enumerate() {
+            for (pos, recipient) in self.tx_template.outputs.iter_mut().enumerate() {
                 // Check if this output is a BIP32 change output belonging to this wallet
                 if let PsbtOutputInfo::Bip32 { origin, descriptor } = recipient.psbt_output_info() {
                     if descriptor == this_descriptor {

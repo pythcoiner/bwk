@@ -67,7 +67,7 @@ impl RecipientProvider for SpRecipient {
         Weight::from_wu(TR_OUTPUT_WEIGHT)
     }
 
-    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
+    fn create_script(&mut self, ctx: &FinalizationContext) -> ScriptBuf {
         if let Some(ref script) = self.precomputed_script {
             return script.clone();
         }
@@ -173,7 +173,7 @@ impl RecipientProvider for SpRecipientAddress {
         }
     }
 
-    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
+    fn create_script(&mut self, ctx: &FinalizationContext) -> ScriptBuf {
         match &self.inner {
             RecipientAddress::SpAddress(sp) => {
                 if let Some(ref script) = self.precomputed_script {
@@ -268,7 +268,7 @@ impl RecipientProvider for SpChangeRecipientProvider {
         self.0.output_weight()
     }
 
-    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf {
+    fn create_script(&mut self, ctx: &FinalizationContext) -> ScriptBuf {
         self.0.create_script(ctx)
     }
 

@@ -1,15 +1,8 @@
 use bwk_descriptor::derivator::SpkDerivator;
-use bwk_tx::{
-    coin::KeyChain, transaction::Amount, tx_builder::ChangeTip, FinalizationContext,
-    PsbtOutputInfo, RecipientProvider,
-};
-use miniscript::{
-    bitcoin::{self, address::NetworkUnchecked, Network, Script, ScriptBuf, TxOut, Weight},
-    Descriptor, DescriptorPublicKey,
-};
+use bwk_tx::{coin::KeyChain, tx_builder::ChangeTip};
+use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
 use serde::{Deserialize, Serialize};
 use std::{
-    cell::Cell,
     collections::BTreeMap,
     sync::{mpsc, Arc, Mutex},
 };
@@ -35,6 +28,7 @@ pub struct AddressTip {
     pub change: u32,
 }
 
+#[derive(Clone)]
 pub struct ChangeTipUpdater(Arc<Mutex<AddressStore>>);
 
 impl ChangeTipUpdater {
@@ -50,118 +44,6 @@ impl ChangeTip for ChangeTipUpdater {
         let tip = store.change_generated_tip;
         store.update_change(tip);
         tip
-    }
-}
-
-/// RecipientProvider for change outputs.
-/// Uses ChangeTipUpdater to derive new change addresses on each create_script() call.
-pub struct ChangeRecipientProvider {
-    tip_updater: ChangeTipUpdater,
-    descriptor: Descriptor<DescriptorPublicKey>,
-    network: Network,
-    amount: Amount,
-    /// The index used by the last create_script() call.
-    /// Set during create_script(), read by psbt_output_info().
-    current_index: Cell<Option<u32>>,
-}
-
-impl ChangeRecipientProvider {
-    pub fn new(
-        tip_updater: ChangeTipUpdater,
-        descriptor: Descriptor<DescriptorPublicKey>,
-        network: Network,
-    ) -> Self {
-        Self {
-            tip_updater,
-            descriptor,
-            network,
-            amount: Amount::Value(0),
-            current_index: Cell::new(None),
-        }
-    }
-}
-
-impl Clone for ChangeRecipientProvider {
-    fn clone(&self) -> Self {
-        Self {
-            tip_updater: ChangeTipUpdater(self.tip_updater.0.clone()),
-            descriptor: self.descriptor.clone(),
-            network: self.network,
-            amount: self.amount.clone(),
-            current_index: Cell::new(self.current_index.get()),
-        }
-    }
-}
-
-impl RecipientProvider for ChangeRecipientProvider {
-    fn output_weight(&self) -> Weight {
-        let script = self
-            .descriptor
-            .clone()
-            .into_single_descriptors()
-            .expect("multipath")
-            .get(1)
-            .expect("change descriptor")
-            .at_derivation_index(0)
-            .expect("derivation")
-            .address(self.network)
-            .expect("address")
-            .script_pubkey();
-        TxOut {
-            value: bitcoin::Amount::MAX_MONEY,
-            script_pubkey: script,
-        }
-        .weight()
-    }
-
-    fn create_script(&self, _ctx: &FinalizationContext) -> ScriptBuf {
-        // Get next change index - this mutates the tip
-        let index = {
-            let mut updater = ChangeTipUpdater(self.tip_updater.0.clone());
-            updater.next_index()
-        };
-
-        // Store the index for psbt_output_info()
-        self.current_index.set(Some(index));
-
-        self.descriptor
-            .clone()
-            .into_single_descriptors()
-            .expect("multipath")
-            .get(1)
-            .expect("change descriptor")
-            .at_derivation_index(index)
-            .expect("derivation")
-            .address(self.network)
-            .expect("address")
-            .script_pubkey()
-    }
-
-    fn psbt_output_info(&self) -> PsbtOutputInfo {
-        let index = self
-            .current_index
-            .get()
-            .expect("psbt_output_info() called before create_script()");
-        PsbtOutputInfo::Bip32 {
-            origin: (KeyChain::Change, index),
-            descriptor: self.descriptor.clone(),
-        }
-    }
-
-    fn is_change(&self) -> bool {
-        true
-    }
-
-    fn amount(&self) -> Amount {
-        self.amount.clone()
-    }
-
-    fn set_amount(&mut self, amount: Amount) {
-        self.amount = amount;
-    }
-
-    fn network(&self) -> Network {
-        self.network
     }
 }
 
@@ -625,8 +507,9 @@ mod tests {
     use super::*;
     use bwk_descriptor::{derivator::SpkDerivator, descriptor::ScriptType, tr_path};
     use bwk_sign::HotSigner;
-    use bwk_tx::FinalizationContext;
-    use miniscript::bitcoin::bip32::ChildNumber;
+    use bwk_tx::{ChangeRecipientProvider, FinalizationContext, PsbtOutputInfo, RecipientProvider};
+    use miniscript::bitcoin::{bip32::ChildNumber, Network};
+    use miniscript::{Descriptor, DescriptorPublicKey};
     use temp_dir::TempDir;
 
     fn test_derivator() -> SpkDerivator {
@@ -669,7 +552,8 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
 
         let tip_updater = ChangeTipUpdater::new(store);
-        let provider = ChangeRecipientProvider::new(tip_updater, descriptor, network);
+        let mut provider =
+            ChangeRecipientProvider::new_with_updater(tip_updater, descriptor, network);
 
         // Create a dummy finalization context
         let ctx = FinalizationContext {
@@ -715,7 +599,7 @@ mod tests {
         let store = Arc::new(Mutex::new(store));
 
         let tip_updater = ChangeTipUpdater::new(store);
-        let provider = ChangeRecipientProvider::new(tip_updater, descriptor, network);
+        let provider = ChangeRecipientProvider::new_with_updater(tip_updater, descriptor, network);
 
         // This should panic because create_script() was never called
         let _info = provider.psbt_output_info();

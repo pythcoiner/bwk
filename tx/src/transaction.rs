@@ -112,13 +112,13 @@ impl TxTemplate {
     /// Build an unsigned transaction for weight estimation.
     /// For SP outputs, uses a dummy P2TR script of correct size.
     /// For actual signing, use finalize().
-    pub fn tx(&self) -> bitcoin::Transaction {
+    pub fn tx(&mut self) -> bitcoin::Transaction {
         use bitcoin::XOnlyPublicKey;
 
         let input = self.inputs.iter().cloned().map(Into::into).collect();
         let output = self
             .outputs
-            .iter()
+            .iter_mut()
             .map(|r| {
                 let value = match r.amount() {
                     Amount::Value(v) => bitcoin::Amount::from_sat(v),
@@ -211,11 +211,11 @@ impl TxTemplate {
 
     fn build_psbt(
         inputs: &[Coin],
-        outputs: &[Box<dyn RecipientProvider>],
+        outputs: &mut [Box<dyn RecipientProvider>],
         ctx: &FinalizationContext,
     ) -> Result<Psbt, Error> {
         let tx_outputs: Vec<TxOut> = outputs
-            .iter()
+            .iter_mut()
             .map(|r| TxOut {
                 value: output_bitcoin_amount(r.as_ref()),
                 script_pubkey: r.create_script(ctx),
@@ -304,7 +304,7 @@ impl TxTemplate {
             network,
         };
 
-        Self::build_psbt(&inputs, &outputs, &ctx)
+        Self::build_psbt(&inputs, &mut outputs, &ctx)
     }
 }
 
@@ -425,34 +425,17 @@ pub fn max_input_satisfaction_size(descriptor: &Descriptor<DescriptorPublicKey>)
 
 /// Estimates the maximum possible weight of an unsigned transaction
 pub fn tx_estimated_weight(tx_template: &TxTemplate) -> Weight {
-    let mut inputs_weight = 0u64;
-    for inp in &tx_template.inputs {
-        inputs_weight += inp.satisfaction_size;
-    }
-    let size = tx_template
-        .tx()
-        .weight()
-        .to_wu()
-        .checked_add(inputs_weight)
-        .and_then(|weight| {
-            weight.checked_add(
-                // Make sure the Segwit marker and flag are included:
-                // https://docs.rs/bitcoin/0.31.0/src/bitcoin/blockdata/transaction.rs.html#752-753
-                // https://docs.rs/bitcoin/0.31.0/src/bitcoin/blockdata/transaction.rs.html#968-979
-                if tx_template
-                    .tx()
-                    .input
-                    .iter()
-                    .all(|txin| txin.witness.is_empty())
-                {
-                    2
-                } else {
-                    0
-                },
-            )
-        })
-        .unwrap();
-    Weight::from_wu(size)
+    let input_weights: Vec<u64> = tx_template
+        .inputs
+        .iter()
+        .map(|inp| inp.satisfaction_size)
+        .collect();
+    let output_weights: Vec<u64> = tx_template
+        .outputs
+        .iter()
+        .map(|o| o.output_weight().to_wu())
+        .collect();
+    estimated_weight_raw(&input_weights, &output_weights)
 }
 
 /// Estimate transaction weight from raw input/output weights.

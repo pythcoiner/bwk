@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     coin::{Coin, KeyChain},
     transaction::Amount,
+    tx_builder::ChangeTip,
     Error,
 };
 
@@ -56,7 +57,7 @@ pub trait RecipientProvider: RecipientProviderClone {
     /// Create output script using finalization context.
     /// - For regular addresses: ignores context
     /// - For SP: uses partial_secret from context to derive output key
-    fn create_script(&self, ctx: &FinalizationContext) -> ScriptBuf;
+    fn create_script(&mut self, ctx: &FinalizationContext) -> ScriptBuf;
 
     /// PSBT output metadata for signers (BIP32 derivation or BIP375 SP info)
     fn psbt_output_info(&self) -> PsbtOutputInfo;
@@ -234,7 +235,7 @@ impl RecipientProvider for Recipient {
         .weight()
     }
 
-    fn create_script(&self, _ctx: &FinalizationContext) -> ScriptBuf {
+    fn create_script(&mut self, _ctx: &FinalizationContext) -> ScriptBuf {
         self.address.clone().assume_checked().script_pubkey()
     }
 
@@ -331,5 +332,143 @@ impl RecipientProvider for Recipient {
         } else {
             Network::Signet
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct LocalTipUpdater(u32);
+
+impl LocalTipUpdater {
+    pub fn new(tip: u32) -> Self {
+        Self(tip)
+    }
+}
+
+impl ChangeTip for LocalTipUpdater {
+    fn next_index(&mut self) -> u32 {
+        self.0 += 1;
+        self.0
+    }
+}
+
+/// RecipientProvider for change outputs in descriptor-based wallets.
+///
+/// Generic over `T: ChangeTip` to decouple from concrete wallet implementations.
+/// The type parameter is erased when boxed into `Box<dyn RecipientProvider>`.
+pub struct ChangeRecipientProvider<T: ChangeTip> {
+    tip_updater: T,
+    descriptor: Descriptor<DescriptorPublicKey>,
+    network: Network,
+    amount: Amount,
+    current_index: Option<u32>,
+}
+
+impl ChangeRecipientProvider<LocalTipUpdater> {
+    pub fn new(descriptor: Descriptor<DescriptorPublicKey>, network: Network) -> Self {
+        Self {
+            tip_updater: LocalTipUpdater::new(0),
+            descriptor,
+            network,
+            amount: Amount::Value(0),
+            current_index: None,
+        }
+    }
+
+    pub fn tip(mut self, tip: u32) -> Self {
+        self.tip_updater = LocalTipUpdater::new(tip);
+        self
+    }
+}
+
+impl<T: ChangeTip> ChangeRecipientProvider<T> {
+    pub fn new_with_updater(
+        tip_updater: T,
+        descriptor: Descriptor<DescriptorPublicKey>,
+        network: Network,
+    ) -> Self {
+        Self {
+            tip_updater,
+            descriptor,
+            network,
+            amount: Amount::Value(0),
+            current_index: None,
+        }
+    }
+}
+
+impl<T: ChangeTip + Clone> Clone for ChangeRecipientProvider<T> {
+    fn clone(&self) -> Self {
+        Self {
+            tip_updater: self.tip_updater.clone(),
+            descriptor: self.descriptor.clone(),
+            network: self.network,
+            amount: self.amount.clone(),
+            current_index: self.current_index,
+        }
+    }
+}
+
+impl<T: ChangeTip + Clone + 'static> RecipientProvider for ChangeRecipientProvider<T> {
+    fn output_weight(&self) -> Weight {
+        let script = self
+            .descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("change descriptor")
+            .at_derivation_index(0)
+            .expect("derivation")
+            .address(self.network)
+            .expect("address")
+            .script_pubkey();
+        TxOut {
+            value: bitcoin::Amount::MAX_MONEY,
+            script_pubkey: script,
+        }
+        .weight()
+    }
+
+    fn create_script(&mut self, _ctx: &FinalizationContext) -> ScriptBuf {
+        let index = self.tip_updater.next_index();
+        self.current_index = Some(index);
+
+        self.descriptor
+            .clone()
+            .into_single_descriptors()
+            .expect("multipath")
+            .get(1)
+            .expect("change descriptor")
+            .at_derivation_index(index)
+            .expect("derivation")
+            .address(self.network)
+            .expect("address")
+            .script_pubkey()
+    }
+
+    fn psbt_output_info(&self) -> PsbtOutputInfo {
+        let index = self
+            .current_index
+            .expect("psbt_output_info() called before create_script()");
+        PsbtOutputInfo::Bip32 {
+            origin: (KeyChain::Change, index),
+            descriptor: self.descriptor.clone(),
+        }
+    }
+
+    fn is_change(&self) -> bool {
+        true
+    }
+
+    fn amount(&self) -> Amount {
+        self.amount.clone()
+    }
+
+    fn set_amount(&mut self, amount: Amount) {
+        self.amount = amount;
+    }
+
+    fn network(&self) -> Network {
+        self.network
     }
 }
