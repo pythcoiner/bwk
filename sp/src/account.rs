@@ -18,6 +18,7 @@ use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::taproot::Signature;
 use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
+use miniscript::psbt::PsbtExt;
 use silentpayments::SilentPaymentAddress;
 
 use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClient};
@@ -1070,26 +1071,11 @@ impl Account {
     }
 
     /// Finalize a signed PSBT into a broadcast-ready transaction.
-    ///
-    /// Handles taproot key-spend inputs (SP and BIP32) via `tap_key_sig`,
-    /// and segwit P2WPKH inputs via `partial_sigs`.
     fn finalize(psbt: &mut bitcoin::Psbt) -> Result<bitcoin::Transaction, AccountError> {
-        for input in &mut psbt.inputs {
-            if let Some(sig) = input.tap_key_sig {
-                input.final_script_witness = Some(bitcoin::Witness::p2tr_key_spend(&sig));
-                input.tap_key_sig = None;
-                input.tap_internal_key = None;
-                input.tap_key_origins.clear();
-            } else if !input.partial_sigs.is_empty() {
-                let (pubkey, sig) = input.partial_sigs.iter().next().unwrap();
-                let mut witness = bitcoin::Witness::new();
-                witness.push(sig.to_vec());
-                witness.push(pubkey.to_bytes());
-                input.final_script_witness = Some(witness);
-                input.partial_sigs.clear();
-                input.bip32_derivation.clear();
-            }
-        }
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        PsbtExt::finalize_mut(psbt, &secp).map_err(|errors| {
+            AccountError::Transaction(format!("failed to finalize: {errors:?}"))
+        })?;
         Ok(psbt.clone().extract_tx_unchecked_fee_rate())
     }
 

@@ -15,6 +15,7 @@ bwk-tx = { workspace = true }
 
 # Bitcoin
 bitcoin = { workspace = true }
+miniscript = { workspace = true }
 silentpayments = { workspace = true }
 
 # Serialization
