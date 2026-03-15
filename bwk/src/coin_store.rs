@@ -745,15 +745,15 @@ impl CoinStore {
             unconfirmed_coins: 0,
             unconfirmed_balance: 0,
         };
-        for coin in state.coins.values() {
-            match coin.status {
+        for entry in &coins {
+            match entry.coin.status {
                 CoinStatus::Unconfirmed => {
                     state.unconfirmed_coins += 1;
-                    state.unconfirmed_balance += coin.txout.value.to_sat();
+                    state.unconfirmed_balance += entry.coin.txout.value.to_sat();
                 }
                 CoinStatus::Confirmed => {
                     state.confirmed_coins += 1;
-                    state.confirmed_balance += coin.txout.value.to_sat();
+                    state.confirmed_balance += entry.coin.txout.value.to_sat();
                 }
                 _ => {}
             }
