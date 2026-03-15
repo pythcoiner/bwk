@@ -832,7 +832,8 @@ fn test_double_spend_via_reorg() {
         .expect("broadcast spend B");
     bwk_test::generate_blocks(bitcoind, 2);
     let spend_b_height = bwk_test::get_tx_height(bitcoind, spend_b_txid).expect("height") as u32;
-    wait_for_sync_and_index(&backend, spend_b_height);
+    let chain_tip: u32 = bitcoind.call("getblockcount", &[]).unwrap();
+    wait_for_sync_and_index(&backend, chain_tip);
 
     // 12. Scan Chain B - should find different outputs
     let outputs_b = Arc::new(Mutex::new(HashMap::new()));
