@@ -557,6 +557,7 @@ impl Account {
             stop.store(true, Ordering::Relaxed);
         }
         self.electrum_stop = None;
+        self.tx_listener = None;
         self.config.set_offline(true);
         self.config.to_file();
     }
