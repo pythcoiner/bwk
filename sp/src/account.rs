@@ -1020,6 +1020,11 @@ impl Account {
         &self.sub_accounts
     }
 
+    /// Returns a mutable reference to the embedded sub-accounts.
+    pub fn sub_accounts_mut(&mut self) -> &mut [bwk::Account] {
+        &mut self.sub_accounts
+    }
+
     /// Total balance across SP and all sub-accounts.
     pub fn total_balance(&self) -> u64 {
         let sp_balance = self.balance();
