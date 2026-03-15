@@ -43,8 +43,38 @@ pub struct CoinState {
     pub unconfirmed_balance: u64,
 }
 
-/// Represents different types of errors that can occur.
-#[derive(Debug)]
+/// Silent Payments notification variants (behind `sp` feature).
+#[cfg(feature = "sp")]
+#[derive(Debug, Clone)]
+pub enum SpNotification {
+    /// Scanner is starting
+    StartingScan,
+    /// Scan has started
+    ScanStarted { start: u32, end: u32 },
+    /// Scanner failed to start
+    FailStartScanning { message: String },
+    /// Scan failed during scanning
+    FailScan { message: String },
+    /// Scanner is stopping
+    StoppingScan,
+    /// Scanner has stopped
+    ScanStopped,
+    /// Scan progress update
+    ScanProgress { current: u32, end: u32 },
+    /// Scan completed successfully
+    ScanCompleted,
+    /// A new output was found
+    NewOutput(OutPoint),
+    /// An output was spent
+    OutputSpent(OutPoint),
+    /// Continuous mode: at chain tip, waiting for new blocks
+    WaitingForBlocks { tip_height: u32 },
+    /// Continuous mode: new block(s) detected
+    NewBlocksDetected { from_height: u32, to_height: u32 },
+}
+
+/// Notifications sent by an Account to signal events.
+#[derive(Debug, Clone)]
 pub enum Notification {
     Electrum(TxListenerNotif),
     AddressTipChanged,
@@ -53,6 +83,8 @@ pub enum Notification {
     InvalidLookAhead,
     Stopped,
     Error(Error),
+    #[cfg(feature = "sp")]
+    Sp(SpNotification),
 }
 
 impl From<TxListenerNotif> for Notification {
@@ -67,7 +99,14 @@ impl From<Error> for Notification {
     }
 }
 
-#[derive(Debug)]
+#[cfg(feature = "sp")]
+impl From<SpNotification> for Notification {
+    fn from(sp: SpNotification) -> Self {
+        Notification::Sp(sp)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Error {
     CreatePool,
     JoinPool,
@@ -113,17 +152,23 @@ impl Drop for Account {
 // Constructor
 impl Account {
     /// Creates a new `Account` instance with the given configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The configuration for the account.
-    ///
-    /// # Returns
-    ///
-    /// A new `Account` instance.
     pub fn new(config: Config) -> Self {
-        assert!(!config.account.is_empty());
         let (sender, receiver) = mpsc::channel();
+        let mut account = Self::new_inner(config, sender);
+        account.receiver = Some(receiver);
+        account
+    }
+
+    /// Creates a new `Account` using an external notification sender.
+    ///
+    /// The account will send notifications through the provided sender.
+    /// No receiver is created; `receiver()` will return `None`.
+    pub fn new_with_sender(config: Config, sender: mpsc::Sender<Notification>) -> Self {
+        Self::new_inner(config, sender)
+    }
+
+    fn new_inner(config: Config, sender: mpsc::Sender<Notification>) -> Self {
+        assert!(!config.account.is_empty());
         let tx_data = if config.persist {
             TxStore::store_from_file(config.transactions_path())
         } else {
@@ -163,7 +208,7 @@ impl Account {
             label_store,
             tx_listener: None,
             electrum_stop: None,
-            receiver: Some(receiver),
+            receiver: None,
             sender,
             config,
             signing_manager,

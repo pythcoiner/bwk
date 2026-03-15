@@ -6,7 +6,9 @@ pub mod label_store;
 pub mod log;
 pub mod tx_store;
 
-pub use account::Account;
+#[cfg(feature = "sp")]
+pub use account::SpNotification;
+pub use account::{Account, Error, Notification, TxListenerNotif};
 pub use config::Config;
 
 // Re-exports

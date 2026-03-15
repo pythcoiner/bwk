@@ -13,7 +13,10 @@ use common::{
     TempDir,
 };
 
-use bwk_sp::{Account, AccountError, Config, Notification, SpCoinStore, SpLabelStore, SpTxStore};
+use bwk_sp::{
+    Account, AccountError, Config, Notification, SpCoinStore, SpLabelStore, SpNotification,
+    SpTxStore,
+};
 
 // MockBackend Tests
 
@@ -161,34 +164,34 @@ fn test_notification_channel_send_receive() {
     let (sender, receiver) = mpsc::channel::<Notification>();
 
     // Send various notifications
-    sender.send(Notification::StartingScan).unwrap();
+    sender.send(SpNotification::StartingScan.into()).unwrap();
     sender
-        .send(Notification::ScanProgress {
+        .send(Notification::Sp(SpNotification::ScanProgress {
             current: 100,
             end: 200,
-        })
+        }))
         .unwrap();
-    sender.send(Notification::ScanCompleted).unwrap();
+    sender.send(SpNotification::ScanCompleted.into()).unwrap();
     sender
-        .send(Notification::FailStartScanning {
+        .send(Notification::Sp(SpNotification::FailStartScanning {
             message: "test error".to_string(),
-        })
+        }))
         .unwrap();
     sender
-        .send(Notification::FailScan {
+        .send(Notification::Sp(SpNotification::FailScan {
             message: "scan error".to_string(),
-        })
+        }))
         .unwrap();
-    sender.send(Notification::StoppingScan).unwrap();
-    sender.send(Notification::ScanStopped).unwrap();
+    sender.send(SpNotification::StoppingScan.into()).unwrap();
+    sender.send(SpNotification::ScanStopped.into()).unwrap();
 
     // Verify received notifications
     assert!(matches!(
         receiver.recv().unwrap(),
-        Notification::StartingScan
+        Notification::Sp(SpNotification::StartingScan)
     ));
     match receiver.recv().unwrap() {
-        Notification::ScanProgress { current, end } => {
+        Notification::Sp(SpNotification::ScanProgress { current, end }) => {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         }
@@ -196,27 +199,27 @@ fn test_notification_channel_send_receive() {
     }
     assert!(matches!(
         receiver.recv().unwrap(),
-        Notification::ScanCompleted
+        Notification::Sp(SpNotification::ScanCompleted)
     ));
     match receiver.recv().unwrap() {
-        Notification::FailStartScanning { message } => {
+        Notification::Sp(SpNotification::FailStartScanning { message }) => {
             assert_eq!(message, "test error");
         }
         _ => panic!("expected FailStartScanning"),
     }
     match receiver.recv().unwrap() {
-        Notification::FailScan { message } => {
+        Notification::Sp(SpNotification::FailScan { message }) => {
             assert_eq!(message, "scan error");
         }
         _ => panic!("expected FailScan"),
     }
     assert!(matches!(
         receiver.recv().unwrap(),
-        Notification::StoppingScan
+        Notification::Sp(SpNotification::StoppingScan)
     ));
     assert!(matches!(
         receiver.recv().unwrap(),
-        Notification::ScanStopped
+        Notification::Sp(SpNotification::ScanStopped)
     ));
 }
 
@@ -226,15 +229,19 @@ fn test_notification_output_events() {
     let (sender, receiver) = mpsc::channel::<Notification>();
     let outpoint = test_outpoint();
 
-    sender.send(Notification::NewOutput(outpoint)).unwrap();
-    sender.send(Notification::OutputSpent(outpoint)).unwrap();
+    sender
+        .send(Notification::Sp(SpNotification::NewOutput(outpoint)))
+        .unwrap();
+    sender
+        .send(Notification::Sp(SpNotification::OutputSpent(outpoint)))
+        .unwrap();
 
     match receiver.recv().unwrap() {
-        Notification::NewOutput(op) => assert_eq!(op, outpoint),
+        Notification::Sp(SpNotification::NewOutput(op)) => assert_eq!(op, outpoint),
         _ => panic!("expected NewOutput"),
     }
     match receiver.recv().unwrap() {
-        Notification::OutputSpent(op) => assert_eq!(op, outpoint),
+        Notification::Sp(SpNotification::OutputSpent(op)) => assert_eq!(op, outpoint),
         _ => panic!("expected OutputSpent"),
     }
 }
@@ -484,17 +491,17 @@ fn test_account_error_display() {
 /// Test Notification Debug and Clone.
 #[test]
 fn test_notification_debug_clone() {
-    let notif = Notification::ScanProgress {
+    let notif = Notification::Sp(SpNotification::ScanProgress {
         current: 100,
         end: 200,
-    };
+    });
     let debug = format!("{:?}", notif);
     assert!(debug.contains("ScanProgress"));
     assert!(debug.contains("100"));
 
     let cloned = notif.clone();
     match cloned {
-        Notification::ScanProgress { current, end } => {
+        Notification::Sp(SpNotification::ScanProgress { current, end }) => {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         }

@@ -38,4 +38,5 @@ temp-dir.workspace = true
 
 [features]
 default = []
+sp = []
 test = ["bwk-utils/test", "bwk-sign/test", "bwk-tx/test"]

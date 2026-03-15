@@ -19,7 +19,7 @@ use common::{
     test_mnemonic, test_outpoint, wait_for_sync_and_index, TempDir,
 };
 
-use bwk_sp::{Config, Notification, SpLabelStore};
+use bwk_sp::{Config, Notification, SpLabelStore, SpNotification};
 
 //
 // These tests require the `blindbitd` crate which provides:
@@ -687,8 +687,8 @@ fn test_scan_notifications() {
     // Non-blocking receive with timeout
     while let Ok(notif) = receiver.try_recv() {
         match notif {
-            Notification::ScanProgress { .. } => saw_progress = true,
-            Notification::ScanCompleted => saw_completed = true,
+            Notification::Sp(SpNotification::ScanProgress { .. }) => saw_progress = true,
+            Notification::Sp(SpNotification::ScanCompleted) => saw_completed = true,
             _ => {}
         }
     }
@@ -1102,9 +1102,9 @@ fn test_background_scanner_detects_new_blocks() {
     while start_time.elapsed() < timeout {
         while let Ok(notification) = receiver.try_recv() {
             match notification {
-                Notification::StartingScan
-                | Notification::ScanProgress { .. }
-                | Notification::ScanCompleted => {
+                Notification::Sp(SpNotification::StartingScan)
+                | Notification::Sp(SpNotification::ScanProgress { .. })
+                | Notification::Sp(SpNotification::ScanCompleted) => {
                     received_progress = true;
                 }
                 _ => {}

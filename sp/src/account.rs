@@ -66,60 +66,8 @@ pub enum AccountError {
     Transaction(String),
 }
 
-// Notification
-
-/// Notifications sent by the Account to signal events.
-#[derive(Debug, Clone)]
-pub enum Notification {
-    /// Scanner is starting (sent immediately when start_scan() is called)
-    StartingScan,
-    /// Scan has started (sent when scan_blocks begins)
-    ScanStarted {
-        /// Start block of this scan
-        start: u32,
-        /// End block of this scan
-        end: u32,
-    },
-    /// Scanner failed to start (backend creation or block_height failure)
-    FailStartScanning {
-        /// Error message
-        message: String,
-    },
-    /// Scan failed during scanning (scan_blocks failure)
-    FailScan {
-        /// Error message
-        message: String,
-    },
-    /// Scanner is stopping (sent when stop_scan() is called)
-    StoppingScan,
-    /// Scanner has stopped
-    ScanStopped,
-    /// Scan progress update
-    ScanProgress {
-        /// Current block being scanned
-        current: u32,
-        /// End block of this scan
-        end: u32,
-    },
-    /// Scan completed successfully
-    ScanCompleted,
-    /// A new output was found
-    NewOutput(OutPoint),
-    /// An output was spent
-    OutputSpent(OutPoint),
-    /// Continuous mode: at chain tip, waiting for new blocks
-    WaitingForBlocks {
-        /// Current chain tip height
-        tip_height: u32,
-    },
-    /// Continuous mode: new block(s) detected
-    NewBlocksDetected {
-        /// Previous tip height
-        from_height: u32,
-        /// New tip height
-        to_height: u32,
-    },
-}
+// Re-use unified Notification from bwk
+pub use bwk::{Notification, SpNotification};
 
 // ScanMode
 
@@ -257,7 +205,7 @@ impl Account {
                 };
                 bwk_config.dir_name =
                     Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());
-                bwk::Account::new(bwk_config)
+                bwk::Account::new_with_sender(bwk_config, sender.clone())
             })
             .collect();
 
@@ -753,16 +701,20 @@ impl Account {
             self.scanner_stop.clone(),
         );
 
-        let _ = self.sender.send(Notification::ScanStarted {
-            start: start_height,
-            end: end_height,
-        });
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::ScanStarted {
+                start: start_height,
+                end: end_height,
+            }));
 
         scanner
             .scan_blocks(start, end, dust_limit, with_cutthrough)
             .map_err(|e| AccountError::Scan(e.to_string()))?;
 
-        let _ = self.sender.send(Notification::ScanCompleted);
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::ScanCompleted));
 
         Ok(())
     }
@@ -774,7 +726,9 @@ impl Account {
         }
 
         self.scanner_stop.store(false, Ordering::Relaxed);
-        let _ = self.sender.send(Notification::StartingScan);
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::StartingScan));
 
         let client = self.client.clone();
         let blindbit_url = self.config.blindbit_url.clone();
@@ -790,10 +744,10 @@ impl Account {
             let backend = match BlindbitBackend::new(blindbit_url.clone(), http_client) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = sender.send(Notification::FailStartScanning {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
                         message: e.to_string(),
-                    });
-                    let _ = sender.send(Notification::ScanStopped);
+                    }));
+                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
                     return;
                 }
             };
@@ -805,10 +759,10 @@ impl Account {
             let scan_backend = match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
                 Ok(b) => b,
                 Err(e) => {
-                    let _ = sender.send(Notification::FailStartScanning {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
                         message: e.to_string(),
-                    });
-                    let _ = sender.send(Notification::ScanStopped);
+                    }));
+                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
                     return;
                 }
             };
@@ -831,10 +785,10 @@ impl Account {
             ) {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = sender.send(Notification::FailStartScanning {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
                         message: e.to_string(),
-                    });
-                    let _ = sender.send(Notification::ScanStopped);
+                    }));
+                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
                     return;
                 }
             };
@@ -844,9 +798,9 @@ impl Account {
                     Ok(h) => h.to_consensus_u32(),
                     Err(e) => {
                         log::warn!("scanner: failed to get block height: {}", e);
-                        let _ = sender.send(Notification::FailStartScanning {
+                        let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
                             message: e.to_string(),
-                        });
+                        }));
                         break;
                     }
                 };
@@ -855,9 +809,9 @@ impl Account {
 
                 if start_height > chain_height {
                     if !waiting {
-                        let _ = sender.send(Notification::WaitingForBlocks {
+                        let _ = sender.send(Notification::Sp(SpNotification::WaitingForBlocks {
                             tip_height: chain_height,
-                        });
+                        }));
                         waiting = true;
                     }
                     thread::sleep(Duration::from_secs(2));
@@ -869,10 +823,10 @@ impl Account {
                 // New blocks detected - notify if we were previously waiting
                 if let Some(prev_tip) = last_notified_tip {
                     if chain_height > prev_tip {
-                        let _ = sender.send(Notification::NewBlocksDetected {
+                        let _ = sender.send(Notification::Sp(SpNotification::NewBlocksDetected {
                             from_height: prev_tip,
                             to_height: chain_height,
-                        });
+                        }));
                     }
                 }
 
@@ -885,20 +839,20 @@ impl Account {
                     Err(_) => continue,
                 };
 
-                let _ = sender.send(Notification::ScanStarted {
+                let _ = sender.send(Notification::Sp(SpNotification::ScanStarted {
                     start: start.to_consensus_u32(),
                     end: end.to_consensus_u32(),
-                });
+                }));
 
                 match scanner.scan_blocks(start, end, dust_limit, with_cutthrough) {
                     Ok(()) => {
-                        let _ = sender.send(Notification::ScanCompleted);
+                        let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
                         last_notified_tip = Some(chain_height);
                     }
                     Err(e) => {
-                        let _ = sender.send(Notification::FailScan {
+                        let _ = sender.send(Notification::Sp(SpNotification::FailScan {
                             message: e.to_string(),
-                        });
+                        }));
                         break;
                     }
                 }
@@ -907,7 +861,7 @@ impl Account {
                 thread::sleep(Duration::from_millis(500));
             }
 
-            let _ = sender.send(Notification::ScanStopped);
+            let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
         });
 
         self.scanner_handle = Some(handle);
@@ -918,7 +872,9 @@ impl Account {
     ///
     /// No-op if not running in continuous mode.
     pub fn stop_scan(&mut self) {
-        let _ = self.sender.send(Notification::StoppingScan);
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::StoppingScan));
         self.scanner_stop.store(true, Ordering::Relaxed);
         self.scanner_handle = None;
     }
@@ -983,7 +939,9 @@ impl Account {
             .scan_blocks(start, end, dust_limit, with_cutthrough)
             .map_err(|e| AccountError::Scan(e.to_string()))?;
 
-        let _ = self.sender.send(Notification::ScanCompleted);
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::ScanCompleted));
         Ok(())
     }
 
@@ -1248,10 +1206,12 @@ impl Updater for AccountUpdater {
         let current_u32 = current.to_consensus_u32();
         let end_u32 = end.to_consensus_u32();
         if current_u32 % 100 == 0 || current_u32 == end_u32 {
-            let _ = self.sender.send(Notification::ScanProgress {
-                current: current_u32,
-                end: end_u32,
-            });
+            let _ = self
+                .sender
+                .send(Notification::Sp(SpNotification::ScanProgress {
+                    current: current_u32,
+                    end: end_u32,
+                }));
         }
         Ok(())
     }
@@ -1274,7 +1234,9 @@ impl Updater for AccountUpdater {
             let mut store = self.coin_store.lock().expect("poisoned");
             for (outpoint, output) in found_outputs {
                 store.insert(outpoint, output);
-                let _ = self.sender.send(Notification::NewOutput(outpoint));
+                let _ = self
+                    .sender
+                    .send(Notification::Sp(SpNotification::NewOutput(outpoint)));
             }
             store.persist();
         }
@@ -1300,7 +1262,9 @@ impl Updater for AccountUpdater {
             let mut store = self.coin_store.lock().expect("poisoned");
             for outpoint in found_inputs {
                 store.mark_mined(&outpoint, *block_hash.as_byte_array());
-                let _ = self.sender.send(Notification::OutputSpent(outpoint));
+                let _ = self
+                    .sender
+                    .send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
             }
             store.persist();
         }
@@ -1400,46 +1364,58 @@ mod tests {
 
     #[test]
     fn test_notification_variants() {
-        let notif = Notification::StartingScan;
-        assert!(matches!(notif, Notification::StartingScan));
+        let notif = Notification::Sp(SpNotification::StartingScan);
+        assert!(matches!(
+            notif,
+            Notification::Sp(SpNotification::StartingScan)
+        ));
 
-        let notif = Notification::FailStartScanning {
+        let notif = Notification::Sp(SpNotification::FailStartScanning {
             message: "test error".to_string(),
-        };
-        if let Notification::FailStartScanning { message } = notif {
+        });
+        if let Notification::Sp(SpNotification::FailStartScanning { message }) = notif {
             assert_eq!(message, "test error");
         } else {
             panic!("expected FailStartScanning");
         }
 
-        let notif = Notification::FailScan {
+        let notif = Notification::Sp(SpNotification::FailScan {
             message: "scan error".to_string(),
-        };
-        if let Notification::FailScan { message } = notif {
+        });
+        if let Notification::Sp(SpNotification::FailScan { message }) = notif {
             assert_eq!(message, "scan error");
         } else {
             panic!("expected FailScan");
         }
 
-        let notif = Notification::StoppingScan;
-        assert!(matches!(notif, Notification::StoppingScan));
+        let notif = Notification::Sp(SpNotification::StoppingScan);
+        assert!(matches!(
+            notif,
+            Notification::Sp(SpNotification::StoppingScan)
+        ));
 
-        let notif = Notification::ScanStopped;
-        assert!(matches!(notif, Notification::ScanStopped));
+        let notif = Notification::Sp(SpNotification::ScanStopped);
+        assert!(matches!(
+            notif,
+            Notification::Sp(SpNotification::ScanStopped)
+        ));
 
-        let notif = Notification::ScanProgress {
+        let notif = Notification::Sp(SpNotification::ScanProgress {
             current: 100,
             end: 200,
-        };
-        if let Notification::ScanProgress { current, end } = notif {
+        });
+        if let Notification::Sp(SpNotification::ScanProgress { current, end }) = notif {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         } else {
             panic!("expected ScanProgress");
         }
 
-        let notif = Notification::ScanCompleted;
-        assert!(matches!(notif, Notification::ScanCompleted));
+        let notif = Notification::Sp(SpNotification::ScanCompleted);
+        assert!(matches!(
+            notif,
+            Notification::Sp(SpNotification::ScanCompleted)
+        ));
     }
 
     #[test]
@@ -1602,7 +1578,7 @@ mod tests {
         let drain = |rx: &mpsc::Receiver<Notification>| -> Vec<u32> {
             let mut v = Vec::new();
             while let Ok(notif) = rx.try_recv() {
-                if let Notification::ScanProgress { current, .. } = notif {
+                if let Notification::Sp(SpNotification::ScanProgress { current, .. }) = notif {
                     v.push(current);
                 }
             }
