@@ -984,6 +984,27 @@ impl Account {
         &mut self.sub_accounts
     }
 
+    /// Stop electrum on all sub-accounts.
+    pub fn stop_electrum(&mut self) {
+        for sub in &mut self.sub_accounts {
+            sub.stop_electrum();
+        }
+    }
+
+    /// Start electrum on all sub-accounts.
+    pub fn start_electrum(&mut self) {
+        for sub in &mut self.sub_accounts {
+            sub.start_electrum();
+        }
+    }
+
+    /// Set electrum URL and port on all sub-accounts without writing to file.
+    pub fn set_electrum_settings(&mut self, url: Option<String>, port: Option<u16>) {
+        for sub in &mut self.sub_accounts {
+            sub.set_electrum_config(url.clone(), port);
+        }
+    }
+
     /// Total balance across SP and all sub-accounts.
     pub fn total_balance(&self) -> u64 {
         let sp_balance = self.balance();

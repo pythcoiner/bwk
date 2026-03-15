@@ -520,8 +520,14 @@ impl Account {
         }
     }
 
+    /// Sets the Electrum URL and port in memory without writing to file.
+    pub fn set_electrum_config(&mut self, url: Option<String>, port: Option<u16>) {
+        self.config.electrum_url = url;
+        self.config.electrum_port = port;
+    }
+
     /// Starts the Electrum listener for the account.
-    fn start_electrum(&mut self) {
+    pub fn start_electrum(&mut self) {
         if let (None, Some(addr), Some(port)) = (
             &self.tx_listener,
             self.config.electrum_url.clone(),
