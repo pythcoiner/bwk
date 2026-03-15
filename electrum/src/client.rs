@@ -378,21 +378,35 @@ impl Client {
                     for r in r {
                         match r {
                             Response::SHSubscribe(SHSubscribeResponse { result: status, id }) => {
-                                let sh = watched_spks_sh.get(&id).expect("already inserted");
-                                let sbf = sh_sbf_map.get(sh).expect("already inserted");
+                                let Some(sh) = watched_spks_sh.get(&id) else {
+                                    log::warn!("Client::listen_txs() SHSubscribe: unknown id {id}");
+                                    continue;
+                                };
+                                let Some(sbf) = sh_sbf_map.get(sh) else {
+                                    log::warn!("Client::listen_txs() SHSubscribe: unknown sh {sh}");
+                                    continue;
+                                };
                                 statuses.insert(sbf.clone(), status);
                             }
                             Response::SHNotification(SHNotification {
                                 status: (sh, status),
                                 ..
                             }) => {
-                                let sbf = sh_sbf_map.get(&sh).expect("already inserted");
+                                let Some(sbf) = sh_sbf_map.get(&sh) else {
+                                    log::warn!(
+                                        "Client::listen_txs() SHNotification: unknown sh {sh}"
+                                    );
+                                    continue;
+                                };
                                 statuses.insert(sbf.clone(), status);
                             }
                             Response::SHGetHistory(SHGetHistoryResponse { history, id }) => {
-                                let spk =
-                                    req_id_spk_map.get(&id).expect("already inserted").clone();
-                                req_id_spk_map.remove(&id);
+                                let Some(spk) = req_id_spk_map.remove(&id) else {
+                                    log::warn!(
+                                        "Client::listen_txs() SHGetHistory: unknown id {id}"
+                                    );
+                                    continue;
+                                };
                                 let mut spk_hist = vec![];
                                 for tx in history {
                                     let HistoryResult { txid, height, .. } = tx;
