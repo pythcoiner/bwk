@@ -1,0 +1,20 @@
+[package]
+name = "bwk-hwi-cli"
+readme = "README.md"
+description = "HWI CLI"
+version = "0.0.23"
+edition.workspace = true
+authors.workspace = true
+license-file.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[[bin]]
+name = "bwkhwi"
+path = "src/bin/hwi.rs"
+
+[dependencies]
+clap = { version = "4.4.7", features = ["derive"] }
+bitcoin = "0.32"
+hex = "0.4"
+bwk-hwi = { path = "../" }

@@ -1,0 +1,91 @@
+use crate::error::Error;
+use crate::pb::{self, request::Request, response::Response};
+use crate::Keypath;
+use crate::PairedBitBox;
+
+/// Create a Shelley PaymentKeyHash/StakeKeyHash config.
+/// <https://github.com/cardano-foundation/CIPs/blob/6c249ef48f8f5b32efc0ec768fadf4321f3173f2/CIP-0019/CIP-0019.md#shelley-addresses>
+pub fn make_script_config_pkh_skh(
+    keypath_payment: &Keypath,
+    keypath_stake: &Keypath,
+) -> pb::CardanoScriptConfig {
+    pb::CardanoScriptConfig {
+        config: Some(pb::cardano_script_config::Config::PkhSkh(
+            pb::cardano_script_config::PkhSkh {
+                keypath_payment: keypath_payment.to_vec(),
+                keypath_stake: keypath_stake.to_vec(),
+            },
+        )),
+    }
+}
+
+impl PairedBitBox {
+    fn query_proto_cardano(
+        &self,
+        request: pb::cardano_request::Request,
+    ) -> Result<pb::cardano_response::Response, Error> {
+        self.validate_version(">=9.8.0")?; // Cardano since 9.8.0
+
+        match self.query_proto(Request::Cardano(pb::CardanoRequest {
+            request: Some(request),
+        }))? {
+            Response::Cardano(pb::CardanoResponse {
+                response: Some(response),
+            }) => Ok(response),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
+
+    /// Does this device support Cardano functionality? Currently this means BitBox02 Multi.
+    pub fn cardano_supported(&self) -> bool {
+        self.is_multi_edition()
+    }
+
+    /// Query the device for xpubs. The result contains one xpub per requested keypath. Each xpub is
+    /// 64 bytes: 32 byte chain code + 32 byte pubkey.
+    pub fn cardano_xpubs(&self, keypaths: &[Keypath]) -> Result<Vec<Vec<u8>>, Error> {
+        match self.query_proto_cardano(pb::cardano_request::Request::Xpubs(
+            pb::CardanoXpubsRequest {
+                keypaths: keypaths.iter().map(|kp| kp.into()).collect(),
+            },
+        ))? {
+            pb::cardano_response::Response::Xpubs(pb::CardanoXpubsResponse { xpubs }) => Ok(xpubs),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
+
+    /// Query the device for a Cardano address.
+    pub fn cardano_address(
+        &self,
+        network: pb::CardanoNetwork,
+        script_config: &pb::CardanoScriptConfig,
+        display: bool,
+    ) -> Result<String, Error> {
+        match self.query_proto_cardano(pb::cardano_request::Request::Address(
+            pb::CardanoAddressRequest {
+                network: network.into(),
+                display,
+                script_config: Some(script_config.clone()),
+            },
+        ))? {
+            pb::cardano_response::Response::Pub(pb::PubResponse { r#pub: address }) => Ok(address),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
+
+    /// Sign a Cardano transaction.
+    pub fn cardano_sign_transaction(
+        &self,
+        transaction: pb::CardanoSignTransactionRequest,
+    ) -> Result<pb::CardanoSignTransactionResponse, Error> {
+        if transaction.tag_cbor_sets {
+            self.validate_version(">=9.22.0")?;
+        }
+        match self
+            .query_proto_cardano(pb::cardano_request::Request::SignTransaction(transaction))?
+        {
+            pb::cardano_response::Response::SignTransaction(response) => Ok(response),
+            _ => Err(Error::UnexpectedResponse),
+        }
+    }
+}

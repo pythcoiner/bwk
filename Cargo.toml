@@ -8,6 +8,8 @@ members = [
     "backoff",
     "keys", "utils", "sign", "descriptor", "tx",
     "p2p",
+    "hwi", "hwi/cli",
+    "hwi/ledger-bitcoin-client", "hwi/ledger-transport-hidapi", "hwi/bitbox-api",
 ]
 
 [workspace.package]
@@ -20,8 +22,7 @@ readme = "README.md"
 
 [workspace.dependencies]
 crossbeam = "0.8"
-async-hwi = { version = "0.0.30", default-features = false }
-tokio = { version = "1.21", features = ["rt-multi-thread"] }
+bwk-hwi = { path = "hwi", default-features = false }
 base64ct = "=1.6.0"
 url = "=2.5.2"
 bip39 = "2.2.0"

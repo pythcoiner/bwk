@@ -23,11 +23,10 @@ serde_json.workspace = true
 miniscript.workspace = true
 log.workspace = true
 spdk-core = { workspace = true, features = ["sync", "bitcoin_32"], optional = true }
-async-hwi = { workspace = true, features = ["service"], optional = true }
-tokio = { workspace = true, optional = true }
+bwk-hwi = { workspace = true, features = ["service"], optional = true }
 
 [features]
 default = ["hwi", "sp"]
 test = ["bwk-utils/test"]
 sp = ["dep:spdk-core"]
-hwi = ["dep:async-hwi", "dep:tokio"]
+hwi = ["dep:bwk-hwi"]

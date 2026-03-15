@@ -11,10 +11,10 @@ pub use signer::{Signer, SignerNotif};
 pub use signing_manager::{SignerKind, SigningManager};
 
 // re-export
-#[cfg(feature = "hwi")]
-pub use async_hwi;
 pub use bip39;
 pub use bwk_descriptor;
+#[cfg(feature = "hwi")]
+pub use bwk_hwi;
 pub use bwk_keys;
 pub use bwk_utils;
 pub use crossbeam;

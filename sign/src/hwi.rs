@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use async_hwi::service::{SigningDeviceMsg, SupportedDevice};
+use bwk_hwi::service::{SigningDeviceMsg, SupportedDevice};
 use crossbeam::channel;
 use miniscript::{
     bitcoin::{

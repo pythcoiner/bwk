@@ -28,7 +28,7 @@ pub enum Error {
 pub enum SignerKind {
     Hot,
     #[cfg(feature = "hwi")]
-    External(async_hwi::DeviceKind),
+    External(bwk_hwi::DeviceKind),
 }
 
 #[cfg(feature = "hwi")]
@@ -60,7 +60,7 @@ pub struct SigningManager {
     signers: BTreeMap<bip32::Fingerprint, ExternalSigner>,
     persist: bool,
     #[cfg(feature = "hwi")]
-    hw_service: Option<async_hwi::service::HwiService<crate::hwi::HwMessage>>,
+    hw_service: Option<bwk_hwi::service::HwiService<crate::hwi::HwMessage>>,
     #[cfg(feature = "hwi")]
     hw_receiver: Option<channel::Receiver<crate::hwi::HwMessage>>,
 }
@@ -178,7 +178,7 @@ impl SigningManager {
 
     #[cfg(feature = "hwi")]
     fn convert_hw_message(&self, msg: crate::hwi::HwMessage) -> Option<SignerNotif> {
-        use async_hwi::service::SigningDeviceMsg;
+        use bwk_hwi::service::SigningDeviceMsg;
         use bwk_keys::OXpub;
         match msg {
             crate::hwi::HwMessage::Device(device_msg) => match device_msg {
@@ -304,7 +304,7 @@ impl SigningManager {
     #[cfg(feature = "hwi")]
     pub fn start_hw_service(&mut self, network: bitcoin::Network) {
         let (hw_sender, hw_receiver) = channel::unbounded();
-        let service = async_hwi::service::HwiService::new(network, None);
+        let service = bwk_hwi::service::HwiService::new(network);
         service.start(hw_sender);
         self.hw_service = Some(service);
         self.hw_receiver = Some(hw_receiver);
@@ -322,7 +322,7 @@ impl SigningManager {
     #[cfg(feature = "hwi")]
     pub fn hw_devices(
         &self,
-    ) -> BTreeMap<String, async_hwi::service::SigningDevice<crate::hwi::HwMessage>> {
+    ) -> BTreeMap<String, bwk_hwi::service::SigningDevice<crate::hwi::HwMessage>> {
         if let Some(ref service) = self.hw_service {
             service.list()
         } else {
@@ -335,7 +335,7 @@ impl SigningManager {
         let service = self.hw_service.as_ref()?;
         let devices = service.list();
         let device = devices.get(device_id)?;
-        if let async_hwi::service::SigningDevice::Supported(supported) = device {
+        if let bwk_hwi::service::SigningDevice::Supported(supported) = device {
             let fg = *supported.fingerprint();
             let kind = *supported.kind();
             let mut signer = crate::hwi::HwSigner::new(supported.clone(), device_id.to_string());
