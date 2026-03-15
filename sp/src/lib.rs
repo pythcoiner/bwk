@@ -16,6 +16,7 @@ pub use account::{
     backend_block_height, backend_info, Account, AccountError, Payment, PaymentType, ScanMode,
 };
 pub use backend_blindbit_native_non_async::InfoResponse;
+pub use bwk;
 pub use bwk::{Notification, SpNotification};
 pub use coin_store::{CoinState, CoinStoreError, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError, SubAccountConfig};
@@ -25,6 +26,8 @@ pub use tx_store::{SpTxEntry, SpTxStore, TxDirection, TxStoreError};
 
 // Re-export external types for convenience
 pub use bitcoin;
+pub use bwk_sign;
+pub use bwk_tx;
 pub use bwk_tx::{
     Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
 };
