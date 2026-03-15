@@ -332,16 +332,30 @@ impl HotSigner {
                 !psbt.inputs[index].tap_key_origins.is_empty(),
             ) {
                 (true, false, false) => {
-                    self.sign_input_segwit(psbt, index, &derivator, &mut cache)?;
-                    signed_any = true;
+                    match self.sign_input_segwit(psbt, index, &derivator, &mut cache) {
+                        Ok(()) => signed_any = true,
+                        Err(Error::SpkNotMatch) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
                 (false, false, true) => {
-                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?;
-                    signed_any = true;
+                    match self.sign_input_taptree(psbt, index, &derivator, &mut cache) {
+                        Ok(()) => signed_any = true,
+                        Err(Error::SpkNotMatch) => continue,
+                        Err(e) => return Err(e),
+                    }
                 }
                 (false, true, true) => {
-                    self.sign_input_tapkey(psbt, index, &derivator, &mut cache)?;
-                    self.sign_input_taptree(psbt, index, &derivator, &mut cache)?;
+                    match self.sign_input_tapkey(psbt, index, &derivator, &mut cache) {
+                        Ok(()) => {}
+                        Err(Error::SpkNotMatch) => continue,
+                        Err(e) => return Err(e),
+                    }
+                    match self.sign_input_taptree(psbt, index, &derivator, &mut cache) {
+                        Ok(()) => {}
+                        Err(Error::SpkNotMatch) => continue,
+                        Err(e) => return Err(e),
+                    }
                     signed_any = true;
                 }
                 (false, false, false) => continue,
