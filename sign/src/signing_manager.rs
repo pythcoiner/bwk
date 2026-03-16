@@ -259,6 +259,14 @@ impl SigningManager {
         }
     }
 
+    /// Returns master xprivs from all BIP32 hot signers, keyed by fingerprint.
+    pub fn master_xprivs(&self) -> BTreeMap<bip32::Fingerprint, bip32::Xpriv> {
+        self.bip32_signers
+            .iter()
+            .map(|(fg, signer)| (*fg, signer.master_xpriv()))
+            .collect()
+    }
+
     pub fn list_signers(&self) -> Vec<(bip32::Fingerprint, SignerKind)> {
         #[cfg_attr(not(feature = "hwi"), allow(unused_mut))]
         let mut result: Vec<_> = self

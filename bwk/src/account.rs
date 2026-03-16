@@ -262,6 +262,11 @@ impl Account {
     pub fn sign_psbt(&self, psbt: &mut bitcoin::Psbt) {
         self.signing_manager.sign_psbt(psbt);
     }
+
+    /// Returns master xprivs from all BIP32 hot signers, keyed by fingerprint.
+    pub fn master_xprivs(&self) -> BTreeMap<bitcoin::bip32::Fingerprint, bitcoin::bip32::Xpriv> {
+        self.signing_manager.master_xprivs()
+    }
 }
 
 // Locking API

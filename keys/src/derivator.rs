@@ -112,6 +112,11 @@ impl KeyDerivator {
         self.fingerprint
     }
 
+    /// Returns the master extended private key.
+    pub fn master_xpriv(&self) -> Xpriv {
+        self.master_xpriv
+    }
+
     /// Retrieves the extended private key at the specified derivation path.
     ///
     /// # Arguments

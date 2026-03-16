@@ -26,7 +26,7 @@ use spdk_core::account::SpAccount;
 use spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
 
 use crate::{
-    coin_store::{MergedCoinSource, SpCoinSource},
+    coin_store::{KeyedBip32Source, MergedCoinSource, SpCoinSource},
     recipient::{SpChangeRecipientProvider, SpSecretProvider},
     CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpLabelStore, SpTxEntry,
     SpTxStore,
@@ -1038,16 +1038,30 @@ impl Account {
         ));
 
         let sp_source = SpCoinSource::new(self.coin_store.clone());
+
+        // Collect master xprivs from all sub-accounts for BIP32 key derivation
+        let mut all_xprivs = std::collections::BTreeMap::new();
+        for sub in &self.sub_accounts {
+            all_xprivs.extend(sub.master_xprivs());
+        }
+
         let sp_provider = Box::new(SpSecretProvider::new(
             self.coin_store.clone(),
             self.client.clone(),
+            all_xprivs.clone(),
         ));
 
-        // Merge coin sources from all sub-accounts
+        // Merge coin sources from all sub-accounts, enriching BIP32 coins
+        // with their secret keys for SP partial secret computation.
         let bip32_sources: Vec<Box<dyn bwk_tx::CoinSource>> = self
             .sub_accounts
             .iter()
-            .map(|a| Box::new(a.coin_source()) as Box<dyn bwk_tx::CoinSource>)
+            .map(|a| {
+                Box::new(KeyedBip32Source::new(
+                    Box::new(a.coin_source()),
+                    a.master_xprivs(),
+                )) as Box<dyn bwk_tx::CoinSource>
+            })
             .collect();
         let merged_source = Box::new(MergedCoinSource::new(sp_source, bip32_sources));
 

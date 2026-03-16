@@ -385,6 +385,7 @@ impl TxBuilder {
                             spend_info: crate::CoinSpendInfo::Bip32 {
                                 coin_path: origin,
                                 descriptor,
+                                secret_key: None,
                             },
                         };
                         source.add_coin(coin);
@@ -475,6 +476,7 @@ impl TxBuilder {
             spend_info: crate::CoinSpendInfo::Bip32 {
                 coin_path: (KeyChain::Receive, index as u32),
                 descriptor: self.derivator().descriptor(),
+                secret_key: None,
             },
         };
         self.receive_coin(coin.clone());
@@ -556,6 +558,7 @@ pub mod test {
             spend_info: CoinSpendInfo::Bip32 {
                 coin_path: (KeyChain::Receive, index),
                 descriptor,
+                secret_key: None,
             },
         }
     }
@@ -694,6 +697,7 @@ pub mod test {
             spend_info: CoinSpendInfo::Bip32 {
                 coin_path: (KeyChain::Receive, index),
                 descriptor,
+                secret_key: None,
             },
         }
     }

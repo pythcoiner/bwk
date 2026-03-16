@@ -599,6 +599,11 @@ impl HotSigner {
         self.derivator.fingerprint()
     }
 
+    /// Returns the master extended private key.
+    pub fn master_xpriv(&self) -> bip32::Xpriv {
+        self.derivator.master_xpriv()
+    }
+
     /// Return the secp context of this signer
     pub fn secp(&self) -> &secp256k1::Secp256k1<All> {
         self.derivator.secp()

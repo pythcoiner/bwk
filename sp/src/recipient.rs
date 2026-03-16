@@ -5,14 +5,12 @@
 
 use spdk_core::bitcoin::{key::TapTweak, script::PushBytesBuf, ScriptBuf, TxOut, Weight};
 use spdk_core::silentpayments::SilentPaymentAddress;
-use spdk_core::{OwnedOutput, RecipientAddress};
+use spdk_core::RecipientAddress;
 
 use bwk_tx::{
-    transaction::Amount, Coin, Error as TxError, FinalizationContext, PsbtOutputInfo,
-    RecipientProvider, SpPartialSecretProvider,
+    coin::CoinSpendInfo, transaction::Amount, Coin, Error as TxError, FinalizationContext,
+    PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
 };
-
-use spdk_core::bitcoin::OutPoint;
 
 const TR_OUTPUT_WEIGHT: u64 = 172;
 
@@ -384,15 +382,64 @@ fn batch_derive_sp_scripts(
 /// [`TxBuilder`](bwk_tx::TxBuilder).
 ///
 /// Holds a cloned [`SpClient`] and a shared coin store reference to look up
-/// `OwnedOutput` tweaks for selected inputs.
+/// `OwnedOutput` tweaks for selected inputs. Also stores master xprivs from
+/// BIP32 sub-accounts so it can derive secret keys for mixed-input transactions.
 pub struct SpSecretProvider {
     coin_store: Arc<Mutex<SpCoinStore>>,
     client: SpClient,
+    xprivs: std::collections::BTreeMap<
+        spdk_core::bitcoin::bip32::Fingerprint,
+        spdk_core::bitcoin::bip32::Xpriv,
+    >,
+    secp: spdk_core::bitcoin::secp256k1::Secp256k1<spdk_core::bitcoin::secp256k1::All>,
 }
 
 impl SpSecretProvider {
-    pub fn new(coin_store: Arc<Mutex<SpCoinStore>>, client: SpClient) -> Self {
-        Self { coin_store, client }
+    pub fn new(
+        coin_store: Arc<Mutex<SpCoinStore>>,
+        client: SpClient,
+        xprivs: std::collections::BTreeMap<
+            spdk_core::bitcoin::bip32::Fingerprint,
+            spdk_core::bitcoin::bip32::Xpriv,
+        >,
+    ) -> Self {
+        Self {
+            coin_store,
+            client,
+            xprivs,
+            secp: spdk_core::bitcoin::secp256k1::Secp256k1::new(),
+        }
+    }
+
+    /// Derive the secret key for a BIP32 coin if not already set.
+    fn derive_bip32_secret_key(
+        &self,
+        coin: &Coin,
+    ) -> Option<spdk_core::bitcoin::secp256k1::SecretKey> {
+        let psbt_input = coin.to_psbt_input().ok()?;
+
+        if !psbt_input.bip32_derivation.is_empty() {
+            psbt_input.bip32_derivation.values().find_map(|(fg, path)| {
+                let xpriv = self.xprivs.get(fg)?;
+                xpriv
+                    .derive_priv(&self.secp, path)
+                    .ok()
+                    .map(|k| k.private_key)
+            })
+        } else if !psbt_input.tap_key_origins.is_empty() {
+            psbt_input
+                .tap_key_origins
+                .values()
+                .find_map(|(_, (fg, path))| {
+                    let xpriv = self.xprivs.get(fg)?;
+                    xpriv
+                        .derive_priv(&self.secp, path)
+                        .ok()
+                        .map(|k| k.private_key)
+                })
+        } else {
+            None
+        }
     }
 }
 
@@ -401,17 +448,40 @@ impl SpPartialSecretProvider for SpSecretProvider {
         &self,
         inputs: &[Coin],
     ) -> Result<spdk_core::bitcoin::secp256k1::SecretKey, TxError> {
-        let store = self.coin_store.lock().expect("poisoned");
-        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = inputs
-            .iter()
-            .map(|coin| {
-                let entry = store.get(&coin.outpoint).ok_or(TxError::CoinNotFound)?;
-                Ok((coin.outpoint, entry.owned_output().clone()))
-            })
-            .collect::<Result<Vec<_>, TxError>>()?;
+        use spdk_core::bitcoin::secp256k1::SecretKey;
 
-        self.client
-            .get_partial_secret_for_selected_utxos(&selected_utxos)
+        let b_spend = self
+            .client
+            .try_get_secret_spend_key()
+            .map_err(|_| TxError::SpPartialSecret)?;
+
+        let store = self.coin_store.lock().expect("poisoned");
+        let mut input_keys = Vec::with_capacity(inputs.len());
+        let mut outpoints = Vec::with_capacity(inputs.len());
+
+        for coin in inputs {
+            outpoints.push((coin.outpoint.txid.to_string(), coin.outpoint.vout));
+
+            match &coin.spend_info {
+                CoinSpendInfo::Sp { tweak, .. } => {
+                    let sk = SecretKey::from_slice(tweak).map_err(|_| TxError::SpPartialSecret)?;
+                    let signing_key = b_spend
+                        .add_tweak(&sk.into())
+                        .map_err(|_| TxError::SpPartialSecret)?;
+                    input_keys.push((signing_key, true));
+                }
+                CoinSpendInfo::Bip32 { secret_key, .. } => {
+                    let sk = secret_key
+                        .or_else(|| self.derive_bip32_secret_key(coin))
+                        .ok_or(TxError::CoinNotFound)?;
+                    let is_taproot = coin.txout.script_pubkey.is_p2tr();
+                    input_keys.push((sk, is_taproot));
+                }
+            }
+        }
+
+        drop(store);
+        spdk_core::silentpayments::utils::sending::calculate_partial_secret(&input_keys, &outpoints)
             .map_err(|_| TxError::SpPartialSecret)
     }
 
@@ -428,21 +498,75 @@ impl SpPartialSecretProvider for SpSecretProvider {
 
 use crate::Account;
 
+/// Derive a BIP32 coin's secret key from the sub-accounts' master xprivs.
+fn derive_bip32_key_from_sub_accounts(
+    coin: &Coin,
+    sub_accounts: &[bwk::Account],
+) -> Option<spdk_core::bitcoin::secp256k1::SecretKey> {
+    let secp = spdk_core::bitcoin::secp256k1::Secp256k1::new();
+    let psbt_input = coin.to_psbt_input().ok()?;
+
+    // Collect xprivs from all sub-accounts
+    let mut xprivs = std::collections::BTreeMap::new();
+    for sub in sub_accounts {
+        xprivs.extend(sub.master_xprivs());
+    }
+
+    if !psbt_input.bip32_derivation.is_empty() {
+        psbt_input.bip32_derivation.values().find_map(|(fg, path)| {
+            let xpriv = xprivs.get(fg)?;
+            xpriv.derive_priv(&secp, path).ok().map(|k| k.private_key)
+        })
+    } else if !psbt_input.tap_key_origins.is_empty() {
+        psbt_input
+            .tap_key_origins
+            .values()
+            .find_map(|(_, (fg, path))| {
+                let xpriv = xprivs.get(fg)?;
+                xpriv.derive_priv(&secp, path).ok().map(|k| k.private_key)
+            })
+    } else {
+        None
+    }
+}
+
 impl SpPartialSecretProvider for Account {
     fn compute_partial_secret(
         &self,
         inputs: &[Coin],
     ) -> Result<spdk_core::bitcoin::secp256k1::SecretKey, TxError> {
-        let selected_utxos: Vec<(OutPoint, OwnedOutput)> = inputs
-            .iter()
-            .map(|coin| {
-                let entry = self.get_coin(&coin.outpoint).ok_or(TxError::CoinNotFound)?;
-                Ok((coin.outpoint, entry.owned_output().clone()))
-            })
-            .collect::<Result<Vec<_>, TxError>>()?;
+        use spdk_core::bitcoin::secp256k1::SecretKey;
 
-        self.sp_client()
-            .get_partial_secret_for_selected_utxos(&selected_utxos)
+        let b_spend = self
+            .sp_client()
+            .try_get_secret_spend_key()
+            .map_err(|_| TxError::SpPartialSecret)?;
+
+        let mut input_keys = Vec::with_capacity(inputs.len());
+        let mut outpoints = Vec::with_capacity(inputs.len());
+
+        for coin in inputs {
+            outpoints.push((coin.outpoint.txid.to_string(), coin.outpoint.vout));
+
+            match &coin.spend_info {
+                CoinSpendInfo::Sp { tweak, .. } => {
+                    let sk = SecretKey::from_slice(tweak).map_err(|_| TxError::SpPartialSecret)?;
+                    let signing_key = b_spend
+                        .add_tweak(&sk.into())
+                        .map_err(|_| TxError::SpPartialSecret)?;
+                    input_keys.push((signing_key, true));
+                }
+                CoinSpendInfo::Bip32 { secret_key, .. } => {
+                    let sk = secret_key
+                        .or_else(|| derive_bip32_key_from_sub_accounts(coin, self.sub_accounts()))
+                        .ok_or(TxError::CoinNotFound)?;
+                    let is_taproot = coin.txout.script_pubkey.is_p2tr();
+                    input_keys.push((sk, is_taproot));
+                }
+            }
+        }
+
+        spdk_core::silentpayments::utils::sending::calculate_partial_secret(&input_keys, &outpoints)
             .map_err(|_| TxError::SpPartialSecret)
     }
 

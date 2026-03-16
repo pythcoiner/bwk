@@ -1,8 +1,9 @@
 //! Transaction building and signing tests for bwk-sp.
 //!
-//! Covers 14 spending scenarios:
+//! Covers 16 spending scenarios:
 //! - SP-only inputs (to SP, taproot, segwit, and mixed outputs)
 //! - Mixed SP + BIP32 inputs (to standard outputs)
+//! - Mixed SP + BIP32 inputs (to SP outputs — regression for partial secret)
 
 mod common;
 
@@ -477,4 +478,45 @@ fn test_sp_to_sp_other_and_self() {
         "receiver must detect exactly 1 output"
     );
     assert!(receiver.balance() >= 50_000);
+}
+
+/// SP + taproot → SP address (drain, triggers partial secret with mixed inputs).
+///
+/// Regression test: before the fix, `compute_partial_secret()` failed with
+/// `CoinNotFound` because it tried to look up BIP32 coins in the SP coin store.
+#[test]
+fn test_mixed_sp_taproot_to_sp() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test");
+    env.fund_sp(&mut account, 0.1);
+    env.add_taproot_sub_account(&mut account);
+    let tr_coin = env.create_taproot_coin(0.1);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to_sp(account.sp_address(), 50_000);
+    builder.drain_inputs();
+    builder.add_input(tr_coin);
+    let mut psbt = builder.generate().unwrap();
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    env.broadcast_and_mine(&tx);
+}
+
+/// SP + segwit → SP address (drain, triggers partial secret with mixed inputs).
+///
+/// Regression test: same as above but with segwit BIP32 coins.
+#[test]
+fn test_mixed_sp_segwit_to_sp() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test");
+    env.fund_sp(&mut account, 0.1);
+    env.add_segwit_sub_account(&mut account);
+    let sw_coin = env.create_segwit_coin(0.1);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to_sp(account.sp_address(), 50_000);
+    builder.drain_inputs();
+    builder.add_input(sw_coin);
+    let mut psbt = builder.generate().unwrap();
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    env.broadcast_and_mine(&tx);
 }
