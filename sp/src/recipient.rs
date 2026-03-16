@@ -475,7 +475,18 @@ impl SpPartialSecretProvider for SpSecretProvider {
                         .or_else(|| self.derive_bip32_secret_key(coin))
                         .ok_or(TxError::CoinNotFound)?;
                     let is_taproot = coin.txout.script_pubkey.is_p2tr();
-                    input_keys.push((sk, is_taproot));
+                    if is_taproot {
+                        // BIP32 P2TR outputs have a standard BIP341 taproot tweak.
+                        // The scanner extracts the tweaked output key from scriptPubKey,
+                        // so we must use the tweaked private key for partial secret.
+                        let kp = spdk_core::bitcoin::secp256k1::Keypair::from_secret_key(
+                            &self.secp, &sk,
+                        );
+                        let tweaked = kp.tap_tweak(&self.secp, None).to_keypair();
+                        input_keys.push((tweaked.secret_key(), true));
+                    } else {
+                        input_keys.push((sk, false));
+                    }
                 }
             }
         }
@@ -564,7 +575,15 @@ impl SpPartialSecretProvider for Account {
                         .or_else(|| derive_bip32_key(coin, self))
                         .ok_or(TxError::CoinNotFound)?;
                     let is_taproot = coin.txout.script_pubkey.is_p2tr();
-                    input_keys.push((sk, is_taproot));
+                    if is_taproot {
+                        let secp = spdk_core::bitcoin::secp256k1::Secp256k1::new();
+                        let kp =
+                            spdk_core::bitcoin::secp256k1::Keypair::from_secret_key(&secp, &sk);
+                        let tweaked = kp.tap_tweak(&secp, None).to_keypair();
+                        input_keys.push((tweaked.secret_key(), true));
+                    } else {
+                        input_keys.push((sk, false));
+                    }
                 }
             }
         }

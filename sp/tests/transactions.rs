@@ -190,6 +190,17 @@ fn test_sp_to_mixed_sp_taproot() {
     let mut psbt = builder.generate().unwrap();
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == tx.compute_txid())
+        .collect();
+    assert!(
+        !new_outputs.is_empty(),
+        "scanner must detect SP output from self-send"
+    );
 }
 
 /// SP → SP + segwit (mixed outputs).
@@ -209,6 +220,17 @@ fn test_sp_to_mixed_sp_segwit() {
     let mut psbt = builder.generate().unwrap();
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == tx.compute_txid())
+        .collect();
+    assert!(
+        !new_outputs.is_empty(),
+        "scanner must detect SP output from self-send"
+    );
 }
 
 /// 2 SP → SP + taproot (multiple SP inputs, mixed outputs).
@@ -229,6 +251,17 @@ fn test_multi_sp_to_mixed_sp_taproot() {
 
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == tx.compute_txid())
+        .collect();
+    assert!(
+        !new_outputs.is_empty(),
+        "scanner must detect SP output from self-send"
+    );
 }
 
 /// 2 SP → taproot (drain to standard output).
@@ -499,6 +532,17 @@ fn test_mixed_sp_taproot_to_sp() {
     let mut psbt = builder.generate().unwrap();
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == tx.compute_txid())
+        .collect();
+    assert!(
+        !new_outputs.is_empty(),
+        "scanner must detect SP output from mixed SP+taproot send"
+    );
 }
 
 /// SP + segwit → SP address (drain, triggers partial secret with mixed inputs).
@@ -519,4 +563,15 @@ fn test_mixed_sp_segwit_to_sp() {
     let mut psbt = builder.generate().unwrap();
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
+
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    let new_outputs: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(op, _)| op.txid == tx.compute_txid())
+        .collect();
+    assert!(
+        !new_outputs.is_empty(),
+        "scanner must detect SP output from mixed SP+segwit send"
+    );
 }
