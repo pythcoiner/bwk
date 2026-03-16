@@ -7,6 +7,7 @@
 //! - Background scanning thread for continuous blockchain monitoring
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -984,6 +985,19 @@ impl Account {
         &mut self.sub_accounts
     }
 
+    /// Derive the BIP32 master xpriv from this account's mnemonic, if available.
+    pub(crate) fn sp_master_xpriv(
+        &self,
+    ) -> Option<(bitcoin::bip32::Fingerprint, bitcoin::bip32::Xpriv)> {
+        let mnemonic_str = self.config.mnemonic.as_ref()?;
+        let mnemonic = bip39::Mnemonic::from_str(mnemonic_str).ok()?;
+        let seed = mnemonic.to_seed("");
+        let xpriv = bitcoin::bip32::Xpriv::new_master(self.config.network, &seed).ok()?;
+        let secp = Secp256k1::new();
+        let fg = xpriv.fingerprint(&secp);
+        Some((fg, xpriv))
+    }
+
     /// Stop electrum on all sub-accounts.
     pub fn stop_electrum(&mut self) {
         for sub in &mut self.sub_accounts {
@@ -1039,8 +1053,11 @@ impl Account {
 
         let sp_source = SpCoinSource::new(self.coin_store.clone());
 
-        // Collect master xprivs from all sub-accounts for BIP32 key derivation
+        // Collect master xprivs from SP account and all sub-accounts for BIP32 key derivation
         let mut all_xprivs = std::collections::BTreeMap::new();
+        if let Some((fg, xpriv)) = self.sp_master_xpriv() {
+            all_xprivs.insert(fg, xpriv);
+        }
         for sub in &self.sub_accounts {
             all_xprivs.extend(sub.master_xprivs());
         }

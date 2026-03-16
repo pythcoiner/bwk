@@ -498,17 +498,20 @@ impl SpPartialSecretProvider for SpSecretProvider {
 
 use crate::Account;
 
-/// Derive a BIP32 coin's secret key from the sub-accounts' master xprivs.
-fn derive_bip32_key_from_sub_accounts(
+/// Derive a BIP32 coin's secret key from the SP account's and sub-accounts' master xprivs.
+fn derive_bip32_key(
     coin: &Coin,
-    sub_accounts: &[bwk::Account],
+    account: &Account,
 ) -> Option<spdk_core::bitcoin::secp256k1::SecretKey> {
     let secp = spdk_core::bitcoin::secp256k1::Secp256k1::new();
     let psbt_input = coin.to_psbt_input().ok()?;
 
-    // Collect xprivs from all sub-accounts
+    // Collect xprivs from SP account and all sub-accounts
     let mut xprivs = std::collections::BTreeMap::new();
-    for sub in sub_accounts {
+    if let Some((fg, xpriv)) = account.sp_master_xpriv() {
+        xprivs.insert(fg, xpriv);
+    }
+    for sub in account.sub_accounts() {
         xprivs.extend(sub.master_xprivs());
     }
 
@@ -558,7 +561,7 @@ impl SpPartialSecretProvider for Account {
                 }
                 CoinSpendInfo::Bip32 { secret_key, .. } => {
                     let sk = secret_key
-                        .or_else(|| derive_bip32_key_from_sub_accounts(coin, self.sub_accounts()))
+                        .or_else(|| derive_bip32_key(coin, self))
                         .ok_or(TxError::CoinNotFound)?;
                     let is_taproot = coin.txout.script_pubkey.is_p2tr();
                     input_keys.push((sk, is_taproot));
