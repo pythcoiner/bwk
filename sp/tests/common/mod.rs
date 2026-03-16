@@ -715,6 +715,7 @@ impl TestEnv {
             mnemonic: Some(bip32_mnemonic().to_string()),
             descriptor,
             persist: false,
+            skip_labels: true,
         });
         account.add_sub_account(sub);
     }
@@ -739,6 +740,7 @@ impl TestEnv {
             mnemonic: Some(bip32_mnemonic().to_string()),
             descriptor,
             persist: false,
+            skip_labels: true,
         });
         account.add_sub_account(sub);
     }

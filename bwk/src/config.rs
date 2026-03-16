@@ -74,6 +74,10 @@ pub struct Config {
     pub mnemonic: Option<String>,
     pub descriptor: Descriptor<DescriptorPublicKey>,
     pub persist: bool,
+    /// When true, the label store is not loaded from or persisted to disk.
+    /// Used by sp::Account to delegate label management to the parent's SpLabelStore.
+    #[serde(skip)]
+    pub skip_labels: bool,
 }
 
 impl Config {
@@ -120,6 +124,7 @@ impl Config {
             descriptor,
             persist,
             offline: None,
+            skip_labels: false,
         })
     }
     /// Allow to disable persistance of data, useful for tests

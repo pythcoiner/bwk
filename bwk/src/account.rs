@@ -182,9 +182,11 @@ impl Account {
         } else {
             (0, 0)
         };
-        let label_store = Arc::new(Mutex::new(
-            LabelStore::from_file(config.clone()).enable_persist(config.persist),
-        ));
+        let label_store = Arc::new(Mutex::new(if config.skip_labels {
+            LabelStore::new().enable_persist(false)
+        } else {
+            LabelStore::from_file(config.clone()).enable_persist(config.persist)
+        }));
         let coin_store = Arc::new(Mutex::new(CoinStore::new(
             config.network,
             config.descriptor.clone(),

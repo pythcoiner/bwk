@@ -204,6 +204,7 @@ impl Account {
                     mnemonic: config.mnemonic.clone(),
                     descriptor: sub_cfg.descriptor.clone(),
                     persist: config.persist,
+                    skip_labels: true,
                 };
                 bwk_config.dir_name =
                     Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());
