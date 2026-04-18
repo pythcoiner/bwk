@@ -1,0 +1,77 @@
+name: Test each commit
+on:
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  test-each-commit:
+    # Single-commit PRs are already fully covered by main.yml, so there's
+    # nothing new to verify.
+    if: github.event.pull_request.commits > 1
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch base branch
+        run: |
+          git fetch --no-tags --prune --depth=1 origin \
+            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+          override: true
+          profile: minimal
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Run checks on each commit (excluding PR tip)
+        run: |
+          # Stage the CI tooling outside the work tree so it survives the
+          # per-commit checkouts -- intermediate commits may predate the
+          # introduction of scripts/ci-checks.sh.
+          mkdir -p "$RUNNER_TEMP/ci-scripts"
+          cp -p scripts/ci-checks.sh "$RUNNER_TEMP/ci-scripts/"
+
+          # HEAD is the PR tip -- already covered by main.yml. Walk every
+          # intermediate commit in origin/${GITHUB_BASE_REF}..HEAD~ in
+          # chronological order and run the script on each. Don't fail fast:
+          # collect every failing commit and report them all at the end.
+          failed=()
+          passed=()
+          range="origin/${GITHUB_BASE_REF}..HEAD~"
+          commits=$(git rev-list --reverse "$range")
+          if [ -z "$commits" ]; then
+            echo "No intermediate commits to test."
+            exit 0
+          fi
+          for sha in $commits; do
+            echo "::group::Checking $(git log -1 --oneline "$sha")"
+            git checkout --detach "$sha"
+            if "$RUNNER_TEMP/ci-scripts/ci-checks.sh"; then
+              passed+=("$sha")
+            else
+              failed+=("$sha")
+              echo "::error::ci-checks.sh failed on $sha"
+            fi
+            echo "::endgroup::"
+          done
+
+          echo "=== Summary ==="
+          echo "Passed: ${#passed[@]}"
+          echo "Failed: ${#failed[@]}"
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "Failing commits:"
+            for sha in "${failed[@]}"; do
+              echo "  - $(git log -1 --oneline "$sha")"
+            done
+            exit 1
+          fi
