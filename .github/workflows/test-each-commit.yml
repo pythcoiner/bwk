@@ -1,19 +1,19 @@
-name: Test each commit
+name: Commit history check
 on:
   pull_request:
     branches:
       - master
 
 jobs:
-  test-each-commit:
-    # Single-commit PRs are already fully covered by main.yml, so there's
-    # nothing new to verify.
+  # first we list all commits
+  list-commits:
+    # Single-commit PRs are already fully covered by main.yml.
     if: github.event.pull_request.commits > 1
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      commits: ${{ steps.list.outputs.commits }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
@@ -22,6 +22,44 @@ jobs:
         run: |
           git fetch --no-tags --prune --depth=1 origin \
             "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
+
+      - id: list
+        name: List intermediate commits
+        run: |
+          # HEAD is the PR tip -- already covered by main.yml.
+          # Emit {sha, label} objects so the matrix job name in the GH UI
+          # shows "<short sha> <subject>" instead of a raw 40-char SHA.
+          range="origin/${GITHUB_BASE_REF}..HEAD~"
+          commits=$(git log --reverse --pretty=format:'%H%x09%h %s' "$range" \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))
+                | map(split("\t") | {sha: .[0], label: .[1]})')
+          echo "Intermediate commits: $commits"
+          echo "commits=$commits" >> "$GITHUB_OUTPUT"
+
+  # second we start one CI task per commit
+  check-commit:
+    needs: list-commits
+    if: needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
+    name: ${{ matrix.commit.label }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list-commits.outputs.commits) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.commit.sha }}
+
+      - name: Stage ci-checks.sh from PR tip
+        run: |
+          # Intermediate commits may predate scripts/ci-checks.sh, so pull
+          # the script from the PR tip and run it from $RUNNER_TEMP.
+          git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
+            > "$RUNNER_TEMP/ci-checks.sh"
+          chmod +x "$RUNNER_TEMP/ci-checks.sh"
 
       - uses: actions-rs/toolchain@v1
         with:
@@ -33,45 +71,5 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
-      - name: Run checks on each commit (excluding PR tip)
-        run: |
-          # Stage the CI tooling outside the work tree so it survives the
-          # per-commit checkouts -- intermediate commits may predate the
-          # introduction of scripts/ci-checks.sh.
-          mkdir -p "$RUNNER_TEMP/ci-scripts"
-          cp -p scripts/ci-checks.sh "$RUNNER_TEMP/ci-scripts/"
-
-          # HEAD is the PR tip -- already covered by main.yml. Walk every
-          # intermediate commit in origin/${GITHUB_BASE_REF}..HEAD~ in
-          # chronological order and run the script on each. Don't fail fast:
-          # collect every failing commit and report them all at the end.
-          failed=()
-          passed=()
-          range="origin/${GITHUB_BASE_REF}..HEAD~"
-          commits=$(git rev-list --reverse "$range")
-          if [ -z "$commits" ]; then
-            echo "No intermediate commits to test."
-            exit 0
-          fi
-          for sha in $commits; do
-            echo "::group::Checking $(git log -1 --oneline "$sha")"
-            git checkout --detach "$sha"
-            if "$RUNNER_TEMP/ci-scripts/ci-checks.sh"; then
-              passed+=("$sha")
-            else
-              failed+=("$sha")
-              echo "::error::ci-checks.sh failed on $sha"
-            fi
-            echo "::endgroup::"
-          done
-
-          echo "=== Summary ==="
-          echo "Passed: ${#passed[@]}"
-          echo "Failed: ${#failed[@]}"
-          if [ "${#failed[@]}" -gt 0 ]; then
-            echo "Failing commits:"
-            for sha in "${failed[@]}"; do
-              echo "  - $(git log -1 --oneline "$sha")"
-            done
-            exit 1
-          fi
+      - name: Run CI checks
+        run: "$RUNNER_TEMP/ci-checks.sh"
