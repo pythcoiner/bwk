@@ -150,9 +150,10 @@ pub struct SpTxStore {
     /// The internal store mapping txids to transaction entries
     store: BTreeMap<Txid, SpTxEntry>,
 
-    /// Path for persistence (not serialized)
+    /// Directory containing the JSON file, if persistence is enabled (not
+    /// serialized).
     #[serde(skip)]
-    path: Option<PathBuf>,
+    dir: Option<PathBuf>,
 
     /// Whether persistence is enabled (not serialized)
     #[serde(skip)]
@@ -160,37 +161,43 @@ pub struct SpTxStore {
 }
 
 impl SpTxStore {
+    /// Filename used under the account directory for this store's JSON.
+    pub const FILENAME: &'static str = "txs.json";
+
     // Constructors
 
     /// Create a new empty transaction store.
     pub fn new() -> Self {
         Self {
             store: BTreeMap::new(),
-            path: None,
+            dir: None,
             persist: false,
         }
     }
 
-    /// Create a new transaction store with a persistence path.
-    pub fn with_path(path: PathBuf) -> Self {
+    /// Create a new transaction store rooted at the given directory.
+    ///
+    /// The store persists to `{dir}/{FILENAME}`.
+    pub fn with_path(dir: PathBuf) -> Self {
         Self {
             store: BTreeMap::new(),
-            path: Some(path),
+            dir: Some(dir),
             persist: false,
         }
     }
 
-    /// Load a transaction store from a JSON file.
+    /// Load a transaction store from `{dir}/{FILENAME}`.
     ///
-    /// The loaded store will have its path set but persist disabled.
+    /// The loaded store will have its dir set but persist disabled.
     /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(path: PathBuf) -> Result<Self, TxStoreError> {
+    pub fn from_file(dir: PathBuf) -> Result<Self, TxStoreError> {
+        let path = dir.join(Self::FILENAME);
         let content = fs::read_to_string(&path).map_err(|e| {
             TxStoreError::Io(format!("failed to read txs from {}: {}", path.display(), e))
         })?;
         let mut store: SpTxStore = serde_json::from_str(&content)
             .map_err(|e| TxStoreError::Parse(format!("failed to parse txs: {}", e)))?;
-        store.path = Some(path);
+        store.dir = Some(dir);
         store.persist = false;
         Ok(store)
     }
@@ -252,24 +259,22 @@ impl SpTxStore {
         self.store.is_empty()
     } // Persistence
 
-    /// Persist the store to disk.
+    /// Persist the store to `{dir}/{FILENAME}`.
     ///
-    /// Does nothing if persistence is disabled or no path is set.
+    /// Does nothing if persistence is disabled or no directory is set.
     pub fn persist(&self) {
         if !self.persist {
             return;
         }
-        let Some(path) = &self.path else {
+        let Some(dir) = &self.dir else {
             return;
         };
-
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let _ = fs::create_dir_all(dir);
+        let path = dir.join(Self::FILENAME);
 
         match serde_json::to_string_pretty(self) {
             Ok(content) => {
-                if let Err(e) = fs::write(path, content) {
+                if let Err(e) = fs::write(&path, content) {
                     log::error!("SpTxStore::persist() failed to write: {}", e);
                 }
             }
@@ -487,17 +492,17 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("txs.json");
-
         // Create and populate store
-        let mut store = SpTxStore::with_path(path.clone()).enable_persist(true);
+        let mut store = SpTxStore::with_path(temp_dir.clone()).enable_persist(true);
         let mut entry = test_entry(test_txid(), 50000, TxDirection::Incoming);
         entry.height = Some(800000);
         store.insert(entry);
         store.persist();
 
-        // Load from file
-        let loaded = SpTxStore::from_file(path).expect("load");
+        assert!(temp_dir.join(SpTxStore::FILENAME).exists());
+
+        // Load from dir
+        let loaded = SpTxStore::from_file(temp_dir.clone()).expect("load");
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.get(&test_txid()).unwrap().amount(), 50000);
@@ -515,15 +520,13 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("txs.json");
-
         // Create store with persist disabled
-        let mut store = SpTxStore::with_path(path.clone()).enable_persist(false);
+        let mut store = SpTxStore::with_path(temp_dir.clone()).enable_persist(false);
         store.insert(test_entry(test_txid(), 50000, TxDirection::Incoming));
         store.persist();
 
         // File should not exist
-        assert!(!path.exists());
+        assert!(!temp_dir.join(SpTxStore::FILENAME).exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
@@ -531,7 +534,8 @@ mod tests {
 
     #[test]
     fn test_tx_store_from_file_not_found() {
-        let result = SpTxStore::from_file(PathBuf::from("/nonexistent/path/txs.json"));
+        // Directory has no txs.json under it, so load must fail with Io.
+        let result = SpTxStore::from_file(PathBuf::from("/nonexistent/path"));
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(matches!(e, TxStoreError::Io(_)));

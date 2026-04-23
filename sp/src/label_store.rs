@@ -142,9 +142,10 @@ pub struct SpLabelStore {
     #[serde(with = "label_map_serde", default)]
     store: BTreeMap<LabelKey, String>,
 
-    /// Path for persistence (not serialized)
+    /// Directory containing the JSON file, if persistence is enabled (not
+    /// serialized).
     #[serde(skip)]
-    path: Option<PathBuf>,
+    dir: Option<PathBuf>,
 
     /// Whether persistence is enabled (not serialized)
     #[serde(skip)]
@@ -152,31 +153,37 @@ pub struct SpLabelStore {
 }
 
 impl SpLabelStore {
+    /// Filename used under the account directory for this store's JSON.
+    pub const FILENAME: &'static str = "labels.json";
+
     // Constructors
 
     /// Create a new empty label store.
     pub fn new() -> Self {
         Self {
             store: BTreeMap::new(),
-            path: None,
+            dir: None,
             persist: false,
         }
     }
 
-    /// Create a new label store with a persistence path.
-    pub fn with_path(path: PathBuf) -> Self {
+    /// Create a new label store rooted at the given directory.
+    ///
+    /// The store persists to `{dir}/{FILENAME}`.
+    pub fn with_path(dir: PathBuf) -> Self {
         Self {
             store: BTreeMap::new(),
-            path: Some(path),
+            dir: Some(dir),
             persist: false,
         }
     }
 
-    /// Load a label store from a JSON file.
+    /// Load a label store from `{dir}/{FILENAME}`.
     ///
-    /// The loaded store will have its path set but persist disabled.
+    /// The loaded store will have its dir set but persist disabled.
     /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(path: PathBuf) -> Result<Self, LabelStoreError> {
+    pub fn from_file(dir: PathBuf) -> Result<Self, LabelStoreError> {
+        let path = dir.join(Self::FILENAME);
         let content = fs::read_to_string(&path).map_err(|e| {
             LabelStoreError::Io(format!(
                 "failed to read labels from {}: {}",
@@ -186,7 +193,7 @@ impl SpLabelStore {
         })?;
         let mut store: SpLabelStore = serde_json::from_str(&content)
             .map_err(|e| LabelStoreError::Parse(format!("failed to parse labels: {}", e)))?;
-        store.path = Some(path);
+        store.dir = Some(dir);
         store.persist = false;
         Ok(store)
     }
@@ -246,24 +253,22 @@ impl SpLabelStore {
         self.store.is_empty()
     } // Persistence
 
-    /// Persist the store to disk.
+    /// Persist the store to `{dir}/{FILENAME}`.
     ///
-    /// Does nothing if persistence is disabled or no path is set.
+    /// Does nothing if persistence is disabled or no directory is set.
     pub fn persist(&self) {
         if !self.persist {
             return;
         }
-        let Some(path) = &self.path else {
+        let Some(dir) = &self.dir else {
             return;
         };
-
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let _ = fs::create_dir_all(dir);
+        let path = dir.join(Self::FILENAME);
 
         match serde_json::to_string_pretty(self) {
             Ok(content) => {
-                if let Err(e) = fs::write(path, content) {
+                if let Err(e) = fs::write(&path, content) {
                     log::error!("SpLabelStore::persist() failed to write: {}", e);
                 }
             }
@@ -444,16 +449,16 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("labels.json");
-
         // Create and populate store
-        let mut store = SpLabelStore::with_path(path.clone()).enable_persist(true);
+        let mut store = SpLabelStore::with_path(temp_dir.clone()).enable_persist(true);
         store.set_outpoint(test_outpoint(), "my utxo".to_string());
         store.set_transaction(test_txid(), "my tx".to_string());
         store.persist();
 
-        // Load from file
-        let loaded = SpLabelStore::from_file(path).expect("load");
+        assert!(temp_dir.join(SpLabelStore::FILENAME).exists());
+
+        // Load from dir
+        let loaded = SpLabelStore::from_file(temp_dir.clone()).expect("load");
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(
@@ -474,15 +479,13 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("labels.json");
-
         // Create store with persist disabled
-        let mut store = SpLabelStore::with_path(path.clone()).enable_persist(false);
+        let mut store = SpLabelStore::with_path(temp_dir.clone()).enable_persist(false);
         store.set_outpoint(test_outpoint(), "label".to_string());
         store.persist();
 
         // File should not exist
-        assert!(!path.exists());
+        assert!(!temp_dir.join(SpLabelStore::FILENAME).exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
@@ -490,7 +493,8 @@ mod tests {
 
     #[test]
     fn test_label_store_from_file_not_found() {
-        let result = SpLabelStore::from_file(PathBuf::from("/nonexistent/path/labels.json"));
+        // Directory has no labels.json under it, so load must fail with Io.
+        let result = SpLabelStore::from_file(PathBuf::from("/nonexistent/path"));
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(matches!(e, LabelStoreError::Io(_)));

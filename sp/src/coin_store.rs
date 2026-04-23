@@ -141,9 +141,10 @@ pub struct SpCoinStore {
     /// The internal store mapping outpoints to coin entries
     store: BTreeMap<OutPoint, SpCoinEntry>,
 
-    /// Path for persistence (not serialized)
+    /// Directory containing the JSON file, if persistence is enabled (not
+    /// serialized).
     #[serde(skip)]
-    path: Option<PathBuf>,
+    dir: Option<PathBuf>,
 
     /// Whether persistence is enabled (not serialized)
     #[serde(skip)]
@@ -151,31 +152,37 @@ pub struct SpCoinStore {
 }
 
 impl SpCoinStore {
+    /// Filename used under the account directory for this store's JSON.
+    pub const FILENAME: &'static str = "coins.json";
+
     // Constructors
 
     /// Create a new empty coin store.
     pub fn new() -> Self {
         Self {
             store: BTreeMap::new(),
-            path: None,
+            dir: None,
             persist: false,
         }
     }
 
-    /// Create a new coin store with a persistence path.
-    pub fn with_path(path: PathBuf) -> Self {
+    /// Create a new coin store rooted at the given directory.
+    ///
+    /// The store persists to `{dir}/{FILENAME}`.
+    pub fn with_path(dir: PathBuf) -> Self {
         Self {
             store: BTreeMap::new(),
-            path: Some(path),
+            dir: Some(dir),
             persist: false,
         }
     }
 
-    /// Load a coin store from a JSON file.
+    /// Load a coin store from `{dir}/{FILENAME}`.
     ///
-    /// The loaded store will have its path set but persist disabled.
+    /// The loaded store will have its dir set but persist disabled.
     /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(path: PathBuf) -> Result<Self, CoinStoreError> {
+    pub fn from_file(dir: PathBuf) -> Result<Self, CoinStoreError> {
+        let path = dir.join(Self::FILENAME);
         let content = fs::read_to_string(&path).map_err(|e| {
             CoinStoreError::Io(format!(
                 "failed to read coins from {}: {}",
@@ -185,7 +192,7 @@ impl SpCoinStore {
         })?;
         let mut store: SpCoinStore = serde_json::from_str(&content)
             .map_err(|e| CoinStoreError::Parse(format!("failed to parse coins: {}", e)))?;
-        store.path = Some(path);
+        store.dir = Some(dir);
         store.persist = false;
         Ok(store)
     }
@@ -288,24 +295,22 @@ impl SpCoinStore {
         Amount::from_sat(sats)
     } // Persistence
 
-    /// Persist the store to disk.
+    /// Persist the store to `{dir}/{FILENAME}`.
     ///
-    /// Does nothing if persistence is disabled or no path is set.
+    /// Does nothing if persistence is disabled or no directory is set.
     pub fn persist(&self) {
         if !self.persist {
             return;
         }
-        let Some(path) = &self.path else {
+        let Some(dir) = &self.dir else {
             return;
         };
-
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let _ = fs::create_dir_all(dir);
+        let path = dir.join(Self::FILENAME);
 
         match serde_json::to_string_pretty(self) {
             Ok(content) => {
-                if let Err(e) = fs::write(path, content) {
+                if let Err(e) = fs::write(&path, content) {
                     log::error!("SpCoinStore::persist() failed to write: {}", e);
                 }
             }
@@ -718,16 +723,17 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("coins.json");
-
         // Create and populate store
-        let mut store = SpCoinStore::with_path(path.clone()).enable_persist(true);
+        let mut store = SpCoinStore::with_path(temp_dir.clone()).enable_persist(true);
         store.insert(test_outpoint(), test_owned_output(10000));
         store.insert(test_outpoint_2(), test_owned_output(20000));
         store.persist();
 
-        // Load from file
-        let loaded = SpCoinStore::from_file(path).expect("load");
+        // File is laid down under the account dir with the canonical name.
+        assert!(temp_dir.join(SpCoinStore::FILENAME).exists());
+
+        // Load from dir
+        let loaded = SpCoinStore::from_file(temp_dir.clone()).expect("load");
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get(&test_outpoint()).unwrap().amount_sat(), 10000);
@@ -745,15 +751,13 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("coins.json");
-
         // Create store with persist disabled
-        let mut store = SpCoinStore::with_path(path.clone()).enable_persist(false);
+        let mut store = SpCoinStore::with_path(temp_dir.clone()).enable_persist(false);
         store.insert(test_outpoint(), test_owned_output(10000));
         store.persist();
 
         // File should not exist
-        assert!(!path.exists());
+        assert!(!temp_dir.join(SpCoinStore::FILENAME).exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
@@ -788,7 +792,8 @@ mod tests {
 
     #[test]
     fn test_coin_store_from_file_not_found() {
-        let result = SpCoinStore::from_file(PathBuf::from("/nonexistent/path/coins.json"));
+        // Directory has no coins.json under it, so load must fail with Io.
+        let result = SpCoinStore::from_file(PathBuf::from("/nonexistent/path"));
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(matches!(e, CoinStoreError::Io(_)));

@@ -39,9 +39,10 @@ pub struct ScanState {
     /// The wallet's birthday height (where scanning should start)
     birthday_height: u32,
 
-    /// Path for persistence (not serialized)
+    /// Directory containing the JSON file, if persistence is enabled (not
+    /// serialized).
     #[serde(skip)]
-    path: Option<PathBuf>,
+    dir: Option<PathBuf>,
 
     /// Whether persistence is enabled (not serialized, defaults to true)
     #[serde(skip)]
@@ -49,6 +50,9 @@ pub struct ScanState {
 }
 
 impl ScanState {
+    /// Filename used under the account directory for this store's JSON.
+    pub const FILENAME: &'static str = "state.json";
+
     // Constructors
 
     /// Create a new scan state with the given birthday height.
@@ -57,27 +61,30 @@ impl ScanState {
             last_scanned_height: None,
             last_block_hash: None,
             birthday_height,
-            path: None,
+            dir: None,
             persist: true,
         }
     }
 
-    /// Create a new scan state with a persistence path.
-    pub fn with_path(birthday_height: u32, path: PathBuf) -> Self {
+    /// Create a new scan state rooted at the given directory.
+    ///
+    /// The state persists to `{dir}/{FILENAME}`.
+    pub fn with_path(birthday_height: u32, dir: PathBuf) -> Self {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
             birthday_height,
-            path: Some(path),
+            dir: Some(dir),
             persist: true,
         }
     }
 
-    /// Load a scan state from a JSON file.
+    /// Load a scan state from `{dir}/{FILENAME}`.
     ///
-    /// The loaded state will have its path set but persist disabled.
+    /// The loaded state will have its dir set but persist disabled.
     /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(path: PathBuf) -> Result<Self, ScanStateError> {
+    pub fn from_file(dir: PathBuf) -> Result<Self, ScanStateError> {
+        let path = dir.join(Self::FILENAME);
         let content = fs::read_to_string(&path).map_err(|e| {
             ScanStateError::Io(format!(
                 "failed to read scan state from {}: {}",
@@ -87,7 +94,7 @@ impl ScanState {
         })?;
         let mut state: ScanState = serde_json::from_str(&content)
             .map_err(|e| ScanStateError::Parse(format!("failed to parse scan state: {}", e)))?;
-        state.path = Some(path);
+        state.dir = Some(dir);
         state.persist = false;
         Ok(state)
     }
@@ -113,9 +120,9 @@ impl ScanState {
         self.birthday_height
     }
 
-    /// Returns the persistence path, if set.
+    /// Returns the persistence directory, if set.
     pub fn path(&self) -> Option<&PathBuf> {
-        self.path.as_ref()
+        self.dir.as_ref()
     }
 
     /// Returns whether persistence is enabled.
@@ -149,20 +156,18 @@ impl ScanState {
             .unwrap_or(self.birthday_height)
     } // Persistence
 
-    /// Persist the state to disk.
+    /// Persist the state to `{dir}/{FILENAME}`.
     ///
-    /// Does nothing if persistence is disabled or no path is set.
+    /// Does nothing if persistence is disabled or no directory is set.
     pub fn persist(&self) {
         if !self.persist {
             return;
         }
-        let Some(path) = &self.path else {
+        let Some(dir) = &self.dir else {
             return;
         };
-
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        let _ = fs::create_dir_all(dir);
+        let path = dir.join(Self::FILENAME);
 
         match serde_json::to_string_pretty(self) {
             Ok(content) => {
@@ -189,16 +194,16 @@ mod tests {
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
         assert!(state.persist); // Default is true
-        assert!(state.path.is_none());
+        assert!(state.dir.is_none());
     }
 
     #[test]
     fn test_scan_state_with_path() {
-        let path = PathBuf::from("/tmp/test_scan_state.json");
-        let state = ScanState::with_path(200, path.clone());
+        let dir = PathBuf::from("/tmp/test_scan_state_dir");
+        let state = ScanState::with_path(200, dir.clone());
 
         assert_eq!(state.birthday_height(), 200);
-        assert_eq!(state.path, Some(path));
+        assert_eq!(state.dir, Some(dir));
         assert!(state.persist); // Default is true
     }
 
@@ -249,7 +254,7 @@ mod tests {
         assert_eq!(loaded.last_block_hash(), Some(block_hash));
 
         // Skipped fields should be defaults
-        assert!(loaded.path.is_none());
+        assert!(loaded.dir.is_none());
         assert!(!loaded.persist); // Default for bool is false
     }
 
@@ -261,19 +266,18 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("scan_state.json");
         let block_hash = [0x12; 32];
 
         // Create and populate state
-        let mut state = ScanState::with_path(300, path.clone()).enable_persist(true);
+        let mut state = ScanState::with_path(300, temp_dir.clone()).enable_persist(true);
         state.update(350, block_hash);
         state.persist();
 
-        // File should exist
-        assert!(path.exists());
+        // File should exist under the account dir with the canonical name.
+        assert!(temp_dir.join(ScanState::FILENAME).exists());
 
-        // Load from file
-        let loaded = ScanState::from_file(path).expect("load");
+        // Load from dir
+        let loaded = ScanState::from_file(temp_dir.clone()).expect("load");
 
         assert_eq!(loaded.birthday_height(), 300);
         assert_eq!(loaded.last_scanned_height(), Some(350));
@@ -291,15 +295,13 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        let path = temp_dir.join("scan_state.json");
-
         // Create state with persist disabled
-        let mut state = ScanState::with_path(100, path.clone()).enable_persist(false);
+        let mut state = ScanState::with_path(100, temp_dir.clone()).enable_persist(false);
         state.update(150, [0xAA; 32]);
         state.persist();
 
         // File should NOT exist
-        assert!(!path.exists());
+        assert!(!temp_dir.join(ScanState::FILENAME).exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
@@ -307,7 +309,8 @@ mod tests {
 
     #[test]
     fn test_scan_state_from_file_not_found() {
-        let result = ScanState::from_file(PathBuf::from("/nonexistent/path/scan_state.json"));
+        // Directory has no state.json under it, so load must fail with Io.
+        let result = ScanState::from_file(PathBuf::from("/nonexistent/path"));
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(matches!(e, ScanStateError::Io(_)));
@@ -339,7 +342,7 @@ mod tests {
         assert_eq!(state.birthday_height(), 0);
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
-        assert!(state.path.is_none());
+        assert!(state.dir.is_none());
         assert!(!state.persist); // Default for bool is false
     }
 

@@ -235,34 +235,6 @@ impl Config {
             .map_err(|e| ConfigError::Io(format!("failed to remove {}: {}", dir.display(), e)))
     }
 
-    /// Returns the path for the coins store file.
-    ///
-    /// Format: `{account_dir}/coins.json`
-    pub fn coins_path(&self) -> PathBuf {
-        self.account_dir().join("coins.json")
-    }
-
-    /// Returns the path for the labels store file.
-    ///
-    /// Format: `{account_dir}/labels.json`
-    pub fn labels_path(&self) -> PathBuf {
-        self.account_dir().join("labels.json")
-    }
-
-    /// Returns the path for the transactions store file.
-    ///
-    /// Format: `{account_dir}/txs.json`
-    pub fn txs_path(&self) -> PathBuf {
-        self.account_dir().join("txs.json")
-    }
-
-    /// Returns the path for the scan state file.
-    ///
-    /// Format: `{account_dir}/state.json`
-    pub fn state_path(&self) -> PathBuf {
-        self.account_dir().join("state.json")
-    }
-
     /// Returns the path for the config file.
     ///
     /// Format: `{account_dir}/config.json`
@@ -466,13 +438,6 @@ mod tests {
         );
 
         assert_eq!(config.account_dir(), Path::new("/tmp/test/alice"));
-        assert_eq!(config.coins_path(), Path::new("/tmp/test/alice/coins.json"));
-        assert_eq!(
-            config.labels_path(),
-            Path::new("/tmp/test/alice/labels.json")
-        );
-        assert_eq!(config.txs_path(), Path::new("/tmp/test/alice/txs.json"));
-        assert_eq!(config.state_path(), Path::new("/tmp/test/alice/state.json"));
         assert_eq!(
             config.config_path(),
             Path::new("/tmp/test/alice/config.json")

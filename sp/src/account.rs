@@ -324,47 +324,44 @@ impl Account {
         let birthday = config
             .birthday_height
             .unwrap_or_else(|| config.min_birthday_height());
+        let dir = config.account_dir();
 
         // Coin store
-        let coin_store = if config.persist && config.coins_path().exists() {
-            SpCoinStore::from_file(config.coins_path())
+        let coin_store = if config.persist && dir.join(SpCoinStore::FILENAME).exists() {
+            SpCoinStore::from_file(dir.clone())
                 .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| {
-                    SpCoinStore::with_path(config.coins_path()).enable_persist(true)
-                })
+                .unwrap_or_else(|_| SpCoinStore::with_path(dir.clone()).enable_persist(true))
         } else {
-            SpCoinStore::with_path(config.coins_path()).enable_persist(config.persist)
+            SpCoinStore::with_path(dir.clone()).enable_persist(config.persist)
         };
 
         // Label store
-        let label_store = if config.persist && config.labels_path().exists() {
-            SpLabelStore::from_file(config.labels_path())
+        let label_store = if config.persist && dir.join(SpLabelStore::FILENAME).exists() {
+            SpLabelStore::from_file(dir.clone())
                 .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| {
-                    SpLabelStore::with_path(config.labels_path()).enable_persist(true)
-                })
+                .unwrap_or_else(|_| SpLabelStore::with_path(dir.clone()).enable_persist(true))
         } else {
-            SpLabelStore::with_path(config.labels_path()).enable_persist(config.persist)
+            SpLabelStore::with_path(dir.clone()).enable_persist(config.persist)
         };
 
         // Transaction store
-        let tx_store = if config.persist && config.txs_path().exists() {
-            SpTxStore::from_file(config.txs_path())
+        let tx_store = if config.persist && dir.join(SpTxStore::FILENAME).exists() {
+            SpTxStore::from_file(dir.clone())
                 .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| SpTxStore::with_path(config.txs_path()).enable_persist(true))
+                .unwrap_or_else(|_| SpTxStore::with_path(dir.clone()).enable_persist(true))
         } else {
-            SpTxStore::with_path(config.txs_path()).enable_persist(config.persist)
+            SpTxStore::with_path(dir.clone()).enable_persist(config.persist)
         };
 
         // Scan state
-        let scan_state = if config.persist && config.state_path().exists() {
-            ScanState::from_file(config.state_path())
+        let scan_state = if config.persist && dir.join(ScanState::FILENAME).exists() {
+            ScanState::from_file(dir.clone())
                 .map(|s| s.enable_persist(true))
                 .unwrap_or_else(|_| {
-                    ScanState::with_path(birthday, config.state_path()).enable_persist(true)
+                    ScanState::with_path(birthday, dir.clone()).enable_persist(true)
                 })
         } else {
-            ScanState::with_path(birthday, config.state_path()).enable_persist(config.persist)
+            ScanState::with_path(birthday, dir).enable_persist(config.persist)
         };
 
         (

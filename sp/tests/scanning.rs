@@ -908,8 +908,9 @@ fn test_persistence_after_scan() {
 
     // 4. Create Account with persist=true
     let (mut account, config, _dir) = test_account_persistent(&bbd.url());
-    let coins_path = config.coins_path();
-    let state_path = config.state_path();
+    let account_dir = config.account_dir();
+    let coins_path = account_dir.join(bwk_sp::SpCoinStore::FILENAME);
+    let state_path = account_dir.join(bwk_sp::ScanState::FILENAME);
 
     // 5. Scan and drop (persists on drop)
     account.scan_blocks(Some(1), Some(100)).unwrap();
@@ -1200,13 +1201,13 @@ fn test_label_transaction() {
     drop(account);
 
     // 6. Verify label persists by checking the label file directly
-    let labels_path = config.labels_path();
+    let account_dir = config.account_dir();
     assert!(
-        labels_path.exists(),
+        account_dir.join(SpLabelStore::FILENAME).exists(),
         "Labels file should exist after persist"
     );
 
-    let label_store = SpLabelStore::from_file(labels_path).expect("load labels");
+    let label_store = SpLabelStore::from_file(account_dir).expect("load labels");
     assert_eq!(
         label_store.transaction(&txid),
         Some(&"groceries".to_string()),

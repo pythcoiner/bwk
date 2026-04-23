@@ -34,17 +34,16 @@ fn test_stores_independent_persistence() {
 
     // Create and populate stores
     {
-        let mut coin_store =
-            SpCoinStore::with_path(dir.path().join("coins.json")).enable_persist(true);
+        let mut coin_store = SpCoinStore::with_path(dir.path().to_path_buf()).enable_persist(true);
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
         let mut label_store =
-            SpLabelStore::with_path(dir.path().join("labels.json")).enable_persist(true);
+            SpLabelStore::with_path(dir.path().to_path_buf()).enable_persist(true);
         label_store.set_outpoint(test_outpoint(), "test label".to_string());
         label_store.persist();
 
-        let mut tx_store = SpTxStore::with_path(dir.path().join("txs.json")).enable_persist(true);
+        let mut tx_store = SpTxStore::with_path(dir.path().to_path_buf()).enable_persist(true);
         tx_store.insert(bwk_sp::SpTxEntry {
             txid: test_outpoint().txid,
             tx: None,
@@ -60,18 +59,17 @@ fn test_stores_independent_persistence() {
 
     // Load and verify stores
     {
-        let coin_store = SpCoinStore::from_file(dir.path().join("coins.json")).expect("load coins");
+        let coin_store = SpCoinStore::from_file(dir.path().to_path_buf()).expect("load coins");
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_store =
-            SpLabelStore::from_file(dir.path().join("labels.json")).expect("load labels");
+        let label_store = SpLabelStore::from_file(dir.path().to_path_buf()).expect("load labels");
         assert_eq!(
             label_store.outpoint(&test_outpoint()),
             Some(&"test label".to_string())
         );
 
-        let tx_store = SpTxStore::from_file(dir.path().join("txs.json")).expect("load txs");
+        let tx_store = SpTxStore::from_file(dir.path().to_path_buf()).expect("load txs");
         assert_eq!(tx_store.transactions().len(), 1);
     }
 }
@@ -1134,7 +1132,7 @@ fn test_scan_state_consistent_after_crash() {
     // 4. Create Account with persist=true and scan some blocks
     let (mut account, config, _dir) =
         test_account_persistent_named("test-crash-recovery", &bbd.url());
-    let state_path = config.state_path();
+    let state_path = config.account_dir().join(bwk_sp::ScanState::FILENAME);
 
     // 5. Scan and persist
     account.scan_blocks(Some(1), Some(50)).unwrap();
@@ -3523,7 +3521,7 @@ fn test_no_persist_on_empty_scan() {
     // 4. Create Account with persist=true
     let (mut account, config, _dir) =
         test_account_persistent_named("test-no-persist-empty", &bbd.url());
-    let coins_path = config.coins_path();
+    let account_dir = config.account_dir();
 
     // 5. Scan empty blocks
     account.scan_blocks(Some(1), Some(100)).unwrap();
@@ -3533,8 +3531,8 @@ fn test_no_persist_on_empty_scan() {
 
     // 6. Check coin file contents
     // The coin file may be created (empty store), but should have no coins
-    if coins_path.exists() {
-        let store = SpCoinStore::from_file(coins_path.clone()).unwrap();
+    if account_dir.join(SpCoinStore::FILENAME).exists() {
+        let store = SpCoinStore::from_file(account_dir.clone()).unwrap();
         assert_eq!(
             store.len(),
             0,
