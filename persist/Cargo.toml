@@ -14,9 +14,12 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 temp-dir.workspace = true
 
 [features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
 test = []

@@ -1,8 +1,15 @@
 //! Backend layer — byte-level KV persistence.
 //!
 //! A [`PersistenceBackend`] is the narrow interface that every concrete
-//! on-disk (or no-op) store implements. Its rows are opaque bytes;
-//! typed encoding is the caller's job.
+//! on-disk (or no-op) store implements. Its rows are opaque bytes; the
+//! typed [`Store`](crate::Store) layer (in [`crate::storage`]) sits on
+//! top and handles encoding.
+//!
+//! Concrete backends ship in their own submodule:
+//! - [`NoopBackend`] — discards all writes, reads as absent.
+//! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`SqliteBackend`] — a single SQLite file per account (requires the
+//!   `sqlite` Cargo feature).
 
 use std::sync::Arc;
 
@@ -13,6 +20,11 @@ pub use noop::NoopBackend;
 
 mod json;
 pub use json::JsonBackend;
+
+#[cfg(feature = "sqlite")]
+mod sqlite;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteBackend;
 
 /// Trait abstracting where a store's rows live.
 ///
@@ -26,8 +38,8 @@ pub use json::JsonBackend;
 /// flushing a set of dirty / removed entries in one shot), use
 /// [`flush_batch`](Self::flush_batch) — its default impl loops the row
 /// primitives, but backends override it when they can do better (e.g.
-/// a JSON backend rewrites the per-store file in one I/O; a SQLite
-/// backend folds every row into a single transaction).
+/// [`JsonBackend`] rewrites the per-store file in one I/O; the SQLite
+/// impl folds every row into a single transaction).
 pub trait PersistenceBackend: Send + Sync + std::fmt::Debug {
     /// Reject `store` names that aren't in [`KNOWN_STORES`].
     ///

@@ -2,9 +2,11 @@
 //!
 //! Stores (tx, label, coin, scan state, etc.) in `bwk` and `bwk-sp` do not
 //! write files themselves — they hand their serialized bytes to a
-//! [`PersistenceBackend`]. The default backend is [`JsonBackend`]: one
-//! `{store}.json` file per logical store under an account directory, with
-//! a dedicated `version` file stamped with [`DB_VERSION`].
+//! [`PersistenceBackend`]. Two backends are provided:
+//!
+//! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`SqliteBackend`] — a single SQLite file per account, behind the
+//!   `sqlite` Cargo feature.
 //!
 //! [`NoopBackend`] replaces the old `persist: bool = false` escape hatch.
 //!
@@ -18,9 +20,9 @@
 //!
 //! # The DB is always a pure key-value store
 //!
-//! On-disk layouts are treated as opaque key-value stores. Each store
-//! has rows keyed by a primary-key string (`key`) with bytes as the
-//! value holding serde-encoded data. There are **no typed columns, no
+//! Both on-disk layouts are treated as opaque key-value stores. Each
+//! store has rows keyed by a primary-key string (`key`) with a BLOB value
+//! holding serde-encoded bytes. There are **no typed columns, no
 //! relational structure, no schema migrations** — ever.
 //!
 //! The reason this is safe: bwk holds the whole account state in RAM at
@@ -35,7 +37,8 @@
 //! No `ALTER TABLE`, no versioned SQL migrations. If a write-format
 //! change would break older binaries, bump [`DB_VERSION`]; any DB whose
 //! recorded version is greater than the running binary's [`DB_VERSION`]
-//! is refused at open time with a [`PersistError::DbVersionTooNew`].
+//! is refused at [`SqliteBackend::open`] / [`JsonBackend::open`] time
+//! with a [`PersistError::DbVersionTooNew`].
 //!
 //! Backends MUST:
 //! - Record the current [`DB_VERSION`] the first time they initialise
@@ -48,11 +51,13 @@ use std::sync::Arc;
 pub mod backend;
 pub mod storage;
 
+#[cfg(feature = "sqlite")]
+pub use backend::SqliteBackend;
 pub use backend::{JsonBackend, NoopBackend, PersistenceBackend};
 pub use storage::{RamStore, Store};
 
-/// Monotonic integer stamped into every persistence medium by the
-/// running binary.
+/// Monotonic integer stamped into every persistence medium (both JSON
+/// and SQLite) by the running binary.
 ///
 /// Bump this only when introducing a write-format that older binaries
 /// cannot parse. A DB whose recorded version is greater than the
@@ -147,8 +152,9 @@ pub enum PersistenceKind {
 /// - `None` → [`NoopBackend`] (persistence disabled).
 /// - `Some(Json)` → [`JsonBackend`] rooted at `account_dir` (opened
 ///   with a version check).
-/// - `Some(Sqlite)` → [`PersistError::SqliteDisabled`] (no SQLite
-///   backend in this build).
+/// - `Some(Sqlite)` → [`SqliteBackend`] at `{account_dir}/account.sqlite`.
+///   Returns [`PersistError::SqliteDisabled`] when the `sqlite` feature is
+///   off.
 pub fn build_backend(
     kind: Option<PersistenceKind>,
     account_dir: std::path::PathBuf,
@@ -157,8 +163,17 @@ pub fn build_backend(
         None => Ok(Arc::new(NoopBackend)),
         Some(PersistenceKind::Json) => Ok(Arc::new(JsonBackend::open(account_dir)?)),
         Some(PersistenceKind::Sqlite) => {
-            let _ = account_dir;
-            Err(PersistError::SqliteDisabled)
+            #[cfg(feature = "sqlite")]
+            {
+                let mut path = account_dir;
+                path.push("account.sqlite");
+                Ok(Arc::new(SqliteBackend::open(path)?))
+            }
+            #[cfg(not(feature = "sqlite"))]
+            {
+                let _ = account_dir;
+                Err(PersistError::SqliteDisabled)
+            }
         }
     }
 }
