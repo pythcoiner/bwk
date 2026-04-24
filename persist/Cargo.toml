@@ -17,3 +17,6 @@ log.workspace = true
 
 [dev-dependencies]
 temp-dir.workspace = true
+
+[features]
+test = []
