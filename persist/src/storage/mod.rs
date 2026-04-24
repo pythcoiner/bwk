@@ -2,21 +2,27 @@
 //! [`PersistenceBackend`](crate::PersistenceBackend).
 //!
 //! The [`Store`] trait is the shared surface every caching / write-back /
-//! write-through strategy exposes. Concrete impls (RAM-cached, DB-per-op,
-//! online) satisfy the same trait without changing callers.
+//! write-through strategy exposes. The only concrete impl today is
+//! [`RamStore`], a RAM-cached + write-back implementation generic over
+//! any backend; future strategies (DB-per-op, online) satisfy the same
+//! trait without changing callers.
 
 use crate::PersistError;
 
+mod ram;
+pub use ram::RamStore;
+
 /// A typed keyed store over `(Key, Value)` entries.
 ///
-/// Implementations choose their storage strategy: a RAM-cached +
-/// write-back impl over a
-/// [`PersistenceBackend`](crate::PersistenceBackend), a DB query-per-op
-/// strategy, an online service, an LRU layer — all satisfy the same
-/// trait without callers changing.
+/// Implementations choose their storage strategy: the [`RamStore`]
+/// provided here is a RAM-cached + write-back impl parameterised on a
+/// [`PersistenceBackend`](crate::PersistenceBackend). Future impls
+/// could back a network service, a DB query-per-op strategy, or an LRU
+/// layer — they'd satisfy the same trait without callers changing.
 ///
 /// Every method returns `Result` so strategies whose reads can fail
-/// (DB, online) are expressible without a later surface change.
+/// (DB, online) are expressible without a later surface change;
+/// today's RAM impl always returns `Ok(_)` on read paths.
 pub trait Store {
     type Key: Ord + Clone;
     type Value: Clone;
@@ -81,6 +87,7 @@ pub trait Store {
 
     /// Flush any pending in-memory changes through to the underlying
     /// storage. A pure write-through impl treats this as a no-op; a
-    /// write-back impl emits the accumulated dirty / removed sets.
+    /// write-back impl (like [`RamStore`]) emits the accumulated
+    /// dirty / removed sets.
     fn flush(&mut self) -> Result<(), PersistError>;
 }

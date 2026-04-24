@@ -2,10 +2,15 @@
 //!
 //! Stores (tx, label, coin, scan state, etc.) in `bwk` and `bwk-sp` do not
 //! write files themselves — they hand their serialized bytes to a
-//! [`PersistenceBackend`]. Concrete backends land in subsequent
-//! commits; this module defines the trait surface plus the shared
-//! error type, stamped [`DB_VERSION`], and set of logical store names
-//! the ecosystem uses.
+//! [`PersistenceBackend`]. The default backend is [`JsonBackend`]: one
+//! `{store}.json` file per logical store under an account directory, with
+//! a dedicated `version` file stamped with [`DB_VERSION`].
+//!
+//! [`NoopBackend`] replaces the old `persist: bool = false` escape hatch.
+//!
+//! The typed, cache-or-no-cache [`Store`] trait sits on top of a
+//! backend; [`RamStore`] is the RAM-cached + write-back reference
+//! implementation.
 //!
 //! # The DB is always a pure key-value store
 //!
@@ -38,7 +43,7 @@ pub mod backend;
 pub mod storage;
 
 pub use backend::{JsonBackend, NoopBackend, PersistenceBackend};
-pub use storage::Store;
+pub use storage::{RamStore, Store};
 
 /// Monotonic integer stamped into every persistence medium by the
 /// running binary.
