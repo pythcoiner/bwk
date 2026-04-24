@@ -132,7 +132,7 @@ pub enum TxListenerNotif {
 #[derive(Debug)]
 pub struct Account {
     coin_store: Arc<Mutex<CoinStore>>,
-    label_store: Arc<Mutex<LabelStore>>,
+    label_store: Arc<Mutex<LabelStore<P>>>,
     receiver: Option<mpsc::Receiver<Notification>>,
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,

@@ -97,7 +97,7 @@ impl CoinSource for CoinStoreSource {
 /// keys (SPKs).
 pub struct CoinStore {
     store: BTreeMap<OutPoint, CoinEntry>,
-    label_store: Arc<Mutex<LabelStore>>,
+    label_store: Arc<Mutex<LabelStore<P>>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
     address_store: Arc<Mutex<AddressStore>>,
     tx_store: TxStore<P>,
@@ -209,7 +209,7 @@ impl CoinStore {
         change_tip: u32,
         look_ahead: u32,
         tx_store: TxStore<P>,
-        label_store: Arc<Mutex<LabelStore>>,
+        label_store: Arc<Mutex<LabelStore<P>>>,
         config: Config,
     ) -> Self {
         let derivator = SpkDerivator::new(descriptor, network).unwrap();

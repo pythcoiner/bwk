@@ -298,13 +298,6 @@ impl Config {
         path
     }
 
-    /// Returns the path to the labels file for the current account.
-    pub fn labels_path(&self) -> PathBuf {
-        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
-        path.push("labels.json");
-        path
-    }
-
     /// Persists the tip information to a file for the current account.
     ///
     /// # Arguments
