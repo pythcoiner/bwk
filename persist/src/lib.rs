@@ -12,6 +12,10 @@
 //! backend; [`RamStore`] is the RAM-cached + write-back reference
 //! implementation.
 //!
+//! [`PersistenceKind`] and [`build_backend`] close the surface: config
+//! picks `Json` / `Sqlite`, the factory hands back the concrete
+//! backend wrapped in an `Arc<dyn PersistenceBackend>`.
+//!
 //! # The DB is always a pure key-value store
 //!
 //! On-disk layouts are treated as opaque key-value stores. Each store
@@ -38,6 +42,8 @@
 //!   a fresh account directory / sqlite file.
 //! - On subsequent opens, read the recorded version and refuse to
 //!   proceed if it's greater than [`DB_VERSION`] in the running binary.
+
+use std::sync::Arc;
 
 pub mod backend;
 pub mod storage;
@@ -123,4 +129,56 @@ pub enum PersistError {
     /// for fear of truncating data whose shape we don't understand.
     #[error("persistence file is at version {found} but this binary only supports up to {max_supported}")]
     DbVersionTooNew { found: u32, max_supported: u32 },
+}
+
+/// How a wallet config wants its account-scoped data persisted.
+///
+/// `Json` (default) keeps each store in its own `{store}.json` file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PersistenceKind {
+    #[default]
+    Json,
+    Sqlite,
+}
+
+/// Build a concrete backend from `(kind, account_dir)`.
+///
+/// - `None` → [`NoopBackend`] (persistence disabled).
+/// - `Some(Json)` → [`JsonBackend`] rooted at `account_dir` (opened
+///   with a version check).
+/// - `Some(Sqlite)` → [`PersistError::SqliteDisabled`] (no SQLite
+///   backend in this build).
+pub fn build_backend(
+    kind: Option<PersistenceKind>,
+    account_dir: std::path::PathBuf,
+) -> Result<Arc<dyn PersistenceBackend>, PersistError> {
+    match kind {
+        None => Ok(Arc::new(NoopBackend)),
+        Some(PersistenceKind::Json) => Ok(Arc::new(JsonBackend::open(account_dir)?)),
+        Some(PersistenceKind::Sqlite) => {
+            let _ = account_dir;
+            Err(PersistError::SqliteDisabled)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn persistence_kind_default_is_json() {
+        assert_eq!(PersistenceKind::default(), PersistenceKind::Json);
+    }
+
+    #[test]
+    fn persistence_kind_serde_roundtrip() {
+        let json = serde_json::to_string(&PersistenceKind::Json).unwrap();
+        assert_eq!(json, "\"json\"");
+        let sqlite = serde_json::to_string(&PersistenceKind::Sqlite).unwrap();
+        assert_eq!(sqlite, "\"sqlite\"");
+        let back: PersistenceKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PersistenceKind::Json);
+    }
 }
