@@ -99,7 +99,7 @@ pub struct CoinStore {
     store: BTreeMap<OutPoint, CoinEntry>,
     label_store: Arc<Mutex<LabelStore<P>>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
-    address_store: Arc<Mutex<AddressStore>>,
+    address_store: Arc<Mutex<AddressStore<P>>>,
     tx_store: TxStore<P>,
     spk_history: BTreeMap<ScriptBuf, SpkHistory>,
     updates: Vec<Update>,
@@ -211,15 +211,17 @@ impl CoinStore {
         tx_store: TxStore<P>,
         label_store: Arc<Mutex<LabelStore<P>>>,
         config: Config,
+        account_store: Arc<Mutex<P::AccountStore>>,
     ) -> Self {
         let derivator = SpkDerivator::new(descriptor, network).unwrap();
-        let address_store = Arc::new(Mutex::new(AddressStore::new(
+        let address_store = Arc::new(Mutex::new(AddressStore::with_account_store(
             derivator.clone(),
             notification.clone(),
             recv_tip,
             change_tip,
             look_ahead,
             config.clone(),
+            account_store,
         )));
         Self {
             store: BTreeMap::new(),
@@ -797,7 +799,7 @@ impl CoinStore {
         Ok(())
     }
 
-    pub fn address_store(&self) -> Arc<Mutex<AddressStore>> {
+    pub fn address_store(&self) -> Arc<Mutex<AddressStore<P>>> {
         self.address_store.clone()
     }
 }

@@ -7,7 +7,11 @@ use std::{
     sync::{mpsc, Arc, Mutex},
 };
 
-use crate::{account::Notification, config::Config};
+use crate::{
+    account::Notification,
+    config::{Config, Tip},
+    profile::{DefaultBackend, RamProfile, StorageProfile},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum AddressStatus {
@@ -28,16 +32,23 @@ pub struct AddressTip {
     pub change: u32,
 }
 
-#[derive(Clone)]
-pub struct ChangeTipUpdater(Arc<Mutex<AddressStore>>);
+pub struct ChangeTipUpdater<P: StorageProfile = RamProfile<DefaultBackend>>(
+    Arc<Mutex<AddressStore<P>>>,
+);
 
-impl ChangeTipUpdater {
-    pub fn new(store: Arc<Mutex<AddressStore>>) -> Self {
+impl<P: StorageProfile> Clone for ChangeTipUpdater<P> {
+    fn clone(&self) -> Self {
+        ChangeTipUpdater(self.0.clone())
+    }
+}
+
+impl<P: StorageProfile> ChangeTipUpdater<P> {
+    pub fn new(store: Arc<Mutex<AddressStore<P>>>) -> Self {
         ChangeTipUpdater(store)
     }
 }
 
-impl ChangeTip for ChangeTipUpdater {
+impl<P: StorageProfile> ChangeTip for ChangeTipUpdater<P> {
     fn next_index(&mut self) -> u32 {
         let mut store = self.0.lock().expect("poisoned");
         store.change_generated_tip += 1;
@@ -61,8 +72,7 @@ impl ChangeTip for ChangeTipUpdater {
 ///   tips changes.
 /// - `tx_listener`: Optional channel for sending address tip changes.
 /// - `look_ahead`: Number of addresses to generate ahead of the current tip.
-#[derive(Debug)]
-pub struct AddressStore {
+pub struct AddressStore<P: StorageProfile = RamProfile<DefaultBackend>> {
     store: BTreeMap<ScriptBuf, AddressEntry>,
     recv_generated_tip: u32,
     change_generated_tip: u32,
@@ -71,22 +81,24 @@ pub struct AddressStore {
     tx_listener: Option<mpsc::Sender<AddressTip>>,
     look_ahead: u32,
     config: Config,
+    account_store: Arc<Mutex<P::AccountStore>>,
 }
 
-impl AddressStore {
-    /// Creates a new `AddressStore`.
-    ///
-    /// # Parameters
-    /// - `signer`: The signer used to generate new addresses.
-    /// - `notification`: A channel for sending notifications about address
-    ///   tip changes.
-    /// - `recv_tip`: The initial index for receiving address generation.
-    /// - `change_tip`: The initial index for change address generation.
-    /// - `look_ahead`: The number of addresses to generate ahead of the
-    ///   current tip.
-    ///
-    /// # Returns
-    /// A new instance of `AddressStore`.
+impl<P: StorageProfile> std::fmt::Debug for AddressStore<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddressStore")
+            .field("store_len", &self.store.len())
+            .field("recv_generated_tip", &self.recv_generated_tip)
+            .field("change_generated_tip", &self.change_generated_tip)
+            .field("look_ahead", &self.look_ahead)
+            .finish()
+    }
+}
+
+impl AddressStore<RamProfile<DefaultBackend>> {
+    /// Convenience constructor for the default RAM profile: wraps a
+    /// noop-backed [`RamStore`] as the `AccountStore` so tests can use
+    /// `AddressStore::new(...)` without threading a full profile.
     pub fn new(
         derivator: SpkDerivator,
         notification: mpsc::Sender<Notification>,
@@ -94,6 +106,40 @@ impl AddressStore {
         change_tip: u32,
         look_ahead: u32,
         config: Config,
+    ) -> Self {
+        use bwk_persist::{NoopBackend, RamStore};
+        use std::sync::Arc;
+        let noop: Arc<dyn bwk_persist::PersistenceBackend> = Arc::new(NoopBackend);
+        let account_store = Arc::new(Mutex::new(RamStore::empty(
+            noop,
+            bwk_persist::ACCOUNT_STORE_KEY,
+            crate::profile::encode_account_key,
+            crate::profile::encode_account_value,
+        )));
+        Self::with_account_store(
+            derivator,
+            notification,
+            recv_tip,
+            change_tip,
+            look_ahead,
+            config,
+            account_store,
+        )
+    }
+}
+
+impl<P: StorageProfile> AddressStore<P> {
+    /// Creates a new `AddressStore` wrapping the given account-store
+    /// `Arc<Mutex<_>>` (used to persist the `Tip` singleton).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_account_store(
+        derivator: SpkDerivator,
+        notification: mpsc::Sender<Notification>,
+        recv_tip: u32,
+        change_tip: u32,
+        look_ahead: u32,
+        config: Config,
+        account_store: Arc<Mutex<P::AccountStore>>,
     ) -> Self {
         let mut store = Self {
             derivator,
@@ -104,6 +150,7 @@ impl AddressStore {
             tx_listener: None,
             look_ahead,
             config,
+            account_store,
         };
         store.populate_maybe();
         store.update_watch_tip();
@@ -132,8 +179,13 @@ impl AddressStore {
             // fail to connect to electrum
             let _ = tx_listener.send(AddressTip { recv, change });
         }
-        self.config
-            .persist_tip(self.recv_generated_tip, self.change_generated_tip);
+        let _ = &self.config;
+        let mut store = self.account_store.lock().expect("poisoned");
+        Tip::persist(
+            &mut *store,
+            self.recv_generated_tip,
+            self.change_generated_tip,
+        );
     }
 
     /// Processes a received coin at the specified script public key.
