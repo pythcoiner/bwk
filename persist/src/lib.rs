@@ -2,10 +2,10 @@
 //!
 //! Stores (tx, label, coin, scan state, etc.) in `bwk` and `bwk-sp` do not
 //! write files themselves — they hand their serialized bytes to a
-//! persistence backend. The trait surface and concrete backends land in
-//! subsequent commits; this module currently exposes only the shared
-//! error type, the stamped [`DB_VERSION`], and the set of logical
-//! store names the ecosystem uses.
+//! [`PersistenceBackend`]. Concrete backends land in subsequent
+//! commits; this module defines the trait surface plus the shared
+//! error type, stamped [`DB_VERSION`], and set of logical store names
+//! the ecosystem uses.
 //!
 //! # The DB is always a pure key-value store
 //!
@@ -33,6 +33,10 @@
 //!   a fresh account directory / sqlite file.
 //! - On subsequent opens, read the recorded version and refuse to
 //!   proceed if it's greater than [`DB_VERSION`] in the running binary.
+
+pub mod backend;
+
+pub use backend::PersistenceBackend;
 
 /// Monotonic integer stamped into every persistence medium by the
 /// running binary.
@@ -76,10 +80,10 @@ pub const SIGNERS_STORE_KEY: &str = "signers";
 
 /// The complete set of logical store names the bwk ecosystem uses.
 ///
-/// Persistence backends consult this list to reject typos and
-/// arbitrary caller-supplied strings (which would otherwise become a
-/// SQL-injection surface for a SQLite backend and a path-traversal
-/// surface for a JSON backend).
+/// [`PersistenceBackend::validate_store_name`] consults this list to
+/// reject typos and arbitrary caller-supplied strings (which would
+/// otherwise become a SQL-injection surface for a SQLite backend and
+/// a path-traversal surface for a JSON backend).
 pub const KNOWN_STORES: &[&str] = &[
     ACCOUNT_STORE_KEY,
     TRANSACTIONS_STORE_KEY,
@@ -93,7 +97,7 @@ pub const KNOWN_STORES: &[&str] = &[
 /// Row key in the `account` store holding the stamped [`DB_VERSION`].
 pub const VERSION_ROW_KEY: &str = "version";
 
-/// Errors returned by persistence backend implementations.
+/// Errors returned by [`PersistenceBackend`] implementations.
 #[derive(Debug, thiserror::Error)]
 pub enum PersistError {
     #[error("io error: {0}")]
