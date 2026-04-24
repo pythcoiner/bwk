@@ -129,7 +129,7 @@ pub struct Account {
     /// Store for user-facing labels
     label_store: Arc<Mutex<SpLabelStore>>,
     /// Store for transactions
-    tx_store: Arc<Mutex<SpTxStore>>,
+    tx_store: Arc<Mutex<SpTxStore<P>>>,
     /// Scan state tracking
     scan_state: Arc<Mutex<ScanState>>,
     /// Account configuration
@@ -1214,7 +1214,7 @@ impl Drop for Account {
 /// Internal struct that implements the Updater trait for scanning.
 struct AccountUpdater<P: crate::profile::SpStorageProfile> {
     coin_store: Arc<Mutex<SpCoinStore<P>>>,
-    tx_store: Arc<Mutex<SpTxStore>>,
+    tx_store: Arc<Mutex<SpTxStore<P>>>,
     scan_state: Arc<Mutex<ScanState>>,
     sender: mpsc::Sender<Notification>,
 }

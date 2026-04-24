@@ -25,7 +25,7 @@ pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError, SubAccountConfig};
 pub use label_store::{LabelKey, LabelStoreError, SpLabelStore};
 pub use scan_state::{ScanState, ScanStateError};
-pub use tx_store::{SpTxEntry, SpTxStore, TxDirection, TxStoreError};
+pub use tx_store::{SpTxEntry, SpTxStore, TxDirection};
 
 // Re-export external types for convenience
 pub use bitcoin;

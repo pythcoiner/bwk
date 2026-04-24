@@ -23,7 +23,7 @@ use common::{
     test_owned_output, wait_for_sync_and_index, MockBackend, MockBlock, TempDir,
 };
 
-use bwk::persist::{JsonBackend, PersistenceBackend, COINS_STORE_KEY};
+use bwk::persist::{JsonBackend, PersistenceBackend, COINS_STORE_KEY, TXS_STORE_KEY};
 use bwk_sp::{Config, SpCoinStore, SpLabelStore, SpTxStore};
 
 // Store Integration Tests
@@ -46,7 +46,9 @@ fn test_stores_independent_persistence() {
         label_store.set_outpoint(test_outpoint(), "test label".to_string());
         label_store.persist();
 
-        let mut tx_store = SpTxStore::with_path(dir.path().to_path_buf()).enable_persist(true);
+        let tx_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
+        let mut tx_store = SpTxStore::with_backend(tx_backend, TXS_STORE_KEY);
         tx_store.insert(bwk_sp::SpTxEntry {
             txid: test_outpoint().txid,
             tx: None,
@@ -74,7 +76,9 @@ fn test_stores_independent_persistence() {
             Some(&"test label".to_string())
         );
 
-        let tx_store = SpTxStore::from_file(dir.path().to_path_buf()).expect("load txs");
+        let tx_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
+        let tx_store = SpTxStore::load_from_backend(tx_backend, TXS_STORE_KEY);
         assert_eq!(tx_store.transactions().len(), 1);
     }
 }
