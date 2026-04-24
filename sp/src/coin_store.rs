@@ -4,14 +4,24 @@
 //! `OwnedOutput` from spdk-core with additional metadata. This provides a
 //! similar interface to bwk's CoinStore but for silent payment outputs.
 
-use std::collections::{BTreeMap, HashSet};
-use std::fs;
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, HashSet},
+    str::FromStr,
+    sync::Arc,
+};
 
 use bitcoin::{Amount, OutPoint, ScriptBuf};
+use bwk::persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
 use serde::{Deserialize, Serialize};
 use silentpayments::receiving::Label;
 use spdk_core::{OutputSpendStatus, OwnedOutput};
+
+use crate::profile::{DefaultBackend, SpRamProfile, SpStorageProfile};
+
+/// Logical store name used by [`PersistenceBackend`] implementations for
+/// the silent-payment coin store. Re-export of the canonical constant
+/// in [`bwk::persist`] so callers keep a single source of truth.
+pub const STORE_KEY: &str = bwk::persist::COINS_STORE_KEY;
 
 // SpCoinEntry
 
@@ -117,224 +127,186 @@ pub struct CoinState {
     pub unconfirmed_balance: u64,
 }
 
-// CoinStoreError
-
-/// Errors that can occur in the coin store.
-#[derive(Debug, thiserror::Error)]
-pub enum CoinStoreError {
-    /// IO error (file not found, permission denied, etc.)
-    #[error("io error: {0}")]
-    Io(String),
-    /// JSON parsing error
-    #[error("parse error: {0}")]
-    Parse(String),
-}
-
 // SpCoinStore
 
-/// Storage for silent payment coins.
-///
-/// This store maintains a map of OutPoint to SpCoinEntry, providing
-/// methods for CRUD operations, queries, and persistence.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SpCoinStore {
-    /// The internal store mapping outpoints to coin entries
-    store: BTreeMap<OutPoint, SpCoinEntry>,
-
-    /// Directory containing the JSON file, if persistence is enabled (not
-    /// serialized).
-    #[serde(skip)]
-    dir: Option<PathBuf>,
-
-    /// Whether persistence is enabled (not serialized)
-    #[serde(skip)]
-    persist: bool,
+pub fn encode_outpoint(k: &OutPoint) -> String {
+    k.to_string()
+}
+pub fn decode_outpoint(s: &str) -> Result<OutPoint, PersistError> {
+    OutPoint::from_str(s).map_err(|e| PersistError::Serde(format!("bad OutPoint pk {s:?}: {e}")))
+}
+pub fn encode_coin(v: &SpCoinEntry) -> Result<Vec<u8>, PersistError> {
+    serde_json::to_vec(v).map_err(|e| PersistError::Serde(format!("encode SpCoinEntry: {e}")))
+}
+pub fn decode_coin(bytes: &[u8]) -> Result<SpCoinEntry, PersistError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| PersistError::Serde(format!("decode SpCoinEntry: {e}")))
 }
 
-impl SpCoinStore {
-    /// Filename used under the account directory for this store's JSON.
-    pub const FILENAME: &'static str = "coins.json";
+/// Storage for silent payment coins. Generic over any
+/// `S: Store<Key = OutPoint, Value = SpCoinEntry>`.
+pub struct SpCoinStore<P: SpStorageProfile = SpRamProfile<DefaultBackend>> {
+    store: P::CoinStore,
+}
 
-    // Constructors
+impl Default for SpCoinStore<SpRamProfile<DefaultBackend>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    /// Create a new empty coin store.
+impl<P: SpStorageProfile> std::fmt::Debug for SpCoinStore<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpCoinStore")
+            .field("len", &self.store.len().ok())
+            .finish()
+    }
+}
+
+impl SpCoinStore<SpRamProfile<DefaultBackend>> {
     pub fn new() -> Self {
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
         Self {
-            store: BTreeMap::new(),
-            dir: None,
-            persist: false,
+            store: RamStore::empty(backend, STORE_KEY, encode_outpoint, encode_coin),
         }
     }
 
-    /// Create a new coin store rooted at the given directory.
-    ///
-    /// The store persists to `{dir}/{FILENAME}`.
-    pub fn with_path(dir: PathBuf) -> Self {
+    pub fn with_backend(backend: Arc<dyn PersistenceBackend>, store_key: &'static str) -> Self {
         Self {
-            store: BTreeMap::new(),
-            dir: Some(dir),
-            persist: false,
+            store: RamStore::empty(backend, store_key, encode_outpoint, encode_coin),
         }
     }
 
-    /// Load a coin store from `{dir}/{FILENAME}`.
-    ///
-    /// The loaded store will have its dir set but persist disabled.
-    /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(dir: PathBuf) -> Result<Self, CoinStoreError> {
-        let path = dir.join(Self::FILENAME);
-        let content = fs::read_to_string(&path).map_err(|e| {
-            CoinStoreError::Io(format!(
-                "failed to read coins from {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-        let mut store: SpCoinStore = serde_json::from_str(&content)
-            .map_err(|e| CoinStoreError::Parse(format!("failed to parse coins: {}", e)))?;
-        store.dir = Some(dir);
-        store.persist = false;
-        Ok(store)
+    pub fn load_from_backend(
+        backend: Arc<dyn PersistenceBackend>,
+        store_key: &'static str,
+    ) -> Self {
+        let store = RamStore::open(
+            backend.clone(),
+            store_key,
+            encode_outpoint,
+            decode_outpoint,
+            encode_coin,
+            decode_coin,
+        )
+        .unwrap_or_else(|e| {
+            log::error!("SpCoinStore::load_from_backend: {e}");
+            let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
+            RamStore::empty(noop, store_key, encode_outpoint, encode_coin)
+        });
+        Self { store }
+    }
+}
+
+impl<P: SpStorageProfile> SpCoinStore<P> {
+    /// Wrap any `Store<Key = OutPoint, Value = SpCoinEntry>` impl.
+    pub fn from_store(store: P::CoinStore) -> Self {
+        Self { store }
     }
 
-    /// Enable or disable persistence (builder pattern).
-    pub fn enable_persist(mut self, persist: bool) -> Self {
-        self.persist = persist;
-        self
-    } // Getters
-
-    /// Returns a reference to a coin entry by outpoint.
-    pub fn get(&self, outpoint: &OutPoint) -> Option<&SpCoinEntry> {
-        self.store.get(outpoint)
+    /// Get an owned copy of a coin entry by outpoint.
+    pub fn get(&self, outpoint: &OutPoint) -> Option<SpCoinEntry> {
+        self.store.get(outpoint).ok().flatten()
     }
-
-    /// Returns a mutable reference to a coin entry by outpoint.
-    pub fn get_mut(&mut self, outpoint: &OutPoint) -> Option<&mut SpCoinEntry> {
-        self.store.get_mut(outpoint)
-    } // Mutators
 
     /// Insert a new coin entry from an outpoint and owned output.
     pub fn insert(&mut self, outpoint: OutPoint, output: OwnedOutput) {
         let entry = SpCoinEntry::new(outpoint, output);
-        self.store.insert(outpoint, entry);
+        if let Err(e) = self.store.insert(outpoint, entry) {
+            log::error!("SpCoinStore::insert: {e}");
+        }
     }
 
-    /// Insert multiple coin entries at once.
     pub fn insert_batch(&mut self, outputs: BTreeMap<OutPoint, OwnedOutput>) {
         for (outpoint, output) in outputs {
             self.insert(outpoint, output);
         }
     }
 
-    /// Remove a coin entry by outpoint.
     pub fn remove(&mut self, outpoint: &OutPoint) -> Option<SpCoinEntry> {
-        self.store.remove(outpoint)
+        self.store.remove(outpoint).unwrap_or_default()
     }
 
-    /// Mark a coin as spent by a transaction.
-    ///
-    /// Updates the spend status to `Spent(spending_txid)`.
     pub fn mark_spent(&mut self, outpoint: &OutPoint, spending_txid: [u8; 32]) {
-        if let Some(entry) = self.store.get_mut(outpoint) {
+        if let Err(e) = self.store.modify(outpoint, |entry| {
             entry.output.spend_status = OutputSpendStatus::Spent(spending_txid);
+        }) {
+            log::error!("SpCoinStore::mark_spent: {e}");
         }
     }
 
-    /// Mark a coin's spending transaction as mined.
-    ///
-    /// Updates the spend status to `Mined(block_hash)`.
     pub fn mark_mined(&mut self, outpoint: &OutPoint, block_hash: [u8; 32]) {
-        if let Some(entry) = self.store.get_mut(outpoint) {
+        if let Err(e) = self.store.modify(outpoint, |entry| {
             entry.output.spend_status = OutputSpendStatus::Mined(block_hash);
+        }) {
+            log::error!("SpCoinStore::mark_mined: {e}");
         }
-    } // Queries
+    }
 
-    /// Returns a reference to the internal coin map.
-    pub fn coins(&self) -> &BTreeMap<OutPoint, SpCoinEntry> {
-        &self.store
+    /// Returns a snapshot of every coin as a fresh `BTreeMap`.
+    pub fn coins(&self) -> BTreeMap<OutPoint, SpCoinEntry> {
+        self.store
+            .iter()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default()
     }
 
     /// Returns a CoinState with only spendable (unspent) coins.
     pub fn spendable_coins(&self) -> CoinState {
         let mut state = CoinState::default();
-
-        for (outpoint, entry) in &self.store {
-            if entry.is_spendable() {
-                state.coins.insert(*outpoint, entry.clone());
-                state.confirmed_coins += 1;
-                state.confirmed_balance += entry.amount_sat();
+        if let Ok(iter) = self.store.iter() {
+            for (outpoint, entry) in iter {
+                if entry.is_spendable() {
+                    state.confirmed_coins += 1;
+                    state.confirmed_balance += entry.amount_sat();
+                    state.coins.insert(outpoint, entry);
+                }
             }
         }
-
         state
     }
 
-    /// Returns a set of all outpoints in the store.
     pub fn all_outpoints(&self) -> HashSet<OutPoint> {
-        self.store.keys().copied().collect()
+        self.store
+            .keys()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default()
     }
 
-    /// Returns the number of coins in the store.
     pub fn len(&self) -> usize {
-        self.store.len()
+        self.store.len().unwrap_or(0)
     }
 
-    /// Returns true if the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.store.is_empty()
+        self.len() == 0
     }
 
-    /// Returns the total balance of spendable coins.
     pub fn balance(&self) -> Amount {
         let sats: u64 = self
             .store
             .values()
-            .filter(|entry| entry.is_spendable())
-            .map(|entry| entry.amount_sat())
-            .sum();
+            .ok()
+            .map(|it| {
+                it.filter(|entry| entry.is_spendable())
+                    .map(|entry| entry.amount_sat())
+                    .sum()
+            })
+            .unwrap_or(0);
         Amount::from_sat(sats)
-    } // Persistence
-
-    /// Persist the store to `{dir}/{FILENAME}`.
-    ///
-    /// Does nothing if persistence is disabled or no directory is set.
-    pub fn persist(&self) {
-        if !self.persist {
-            return;
-        }
-        let Some(dir) = &self.dir else {
-            return;
-        };
-        let _ = fs::create_dir_all(dir);
-        let path = dir.join(Self::FILENAME);
-
-        match serde_json::to_string_pretty(self) {
-            Ok(content) => {
-                if let Err(e) = fs::write(&path, content) {
-                    log::error!("SpCoinStore::persist() failed to write: {}", e);
-                }
-            }
-            Err(e) => log::error!("SpCoinStore::persist() failed to serialize: {}", e),
-        }
     }
 
-    /// Serialize the store to a JSON value.
-    pub fn dump(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
-    }
-
-    /// Restore the store from a JSON value.
-    pub fn restore(&mut self, value: serde_json::Value) -> Result<(), CoinStoreError> {
-        let restored: SpCoinStore = serde_json::from_value(value)
-            .map_err(|e| CoinStoreError::Parse(format!("failed to restore coins: {}", e)))?;
-        self.store = restored.store;
-        Ok(())
+    pub fn persist(&mut self) {
+        if let Err(e) = self.store.flush() {
+            log::error!("SpCoinStore::persist() flush: {e}");
+        }
     }
 }
 
 // SpCoinSource (CoinSource for TxBuilder)
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use bwk_tx::coin::{CoinSpendInfo, CoinStatus};
 use bwk_tx::tx_builder::CoinSource;
@@ -347,16 +319,18 @@ use bitcoin::secp256k1::{All, Secp256k1};
 const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
 
 /// Implements [`CoinSource`] for the SP coin store, providing spendable coins
-/// to [`TxBuilder`](bwk_tx::TxBuilder).
-pub struct SpCoinSource(Arc<Mutex<SpCoinStore>>);
+/// to [`TxBuilder`](bwk_tx::TxBuilder). Generic over any `SpCoinStore<S>`.
+pub struct SpCoinSource<P: SpStorageProfile = SpRamProfile<DefaultBackend>>(
+    Arc<Mutex<SpCoinStore<P>>>,
+);
 
-impl SpCoinSource {
-    pub fn new(store: Arc<Mutex<SpCoinStore>>) -> Self {
+impl<P: SpStorageProfile> SpCoinSource<P> {
+    pub fn new(store: Arc<Mutex<SpCoinStore<P>>>) -> Self {
         Self(store)
     }
 }
 
-impl CoinSource for SpCoinSource {
+impl<P: SpStorageProfile + Send + Sync + 'static> CoinSource for SpCoinSource<P> {
     fn spendable_coins(&self) -> Vec<Coin> {
         let store = self.0.lock().expect("poisoned");
         store
@@ -387,13 +361,13 @@ impl CoinSource for SpCoinSource {
 
 /// A [`CoinSource`] that merges coins from the SP coin store and zero or more
 /// BIP32 sub-account coin sources (segwit, taproot, etc.).
-pub struct MergedCoinSource {
-    sp_source: SpCoinSource,
+pub struct MergedCoinSource<P: SpStorageProfile = SpRamProfile<DefaultBackend>> {
+    sp_source: SpCoinSource<P>,
     bip32_sources: Vec<Box<dyn CoinSource>>,
 }
 
-impl MergedCoinSource {
-    pub fn new(sp_source: SpCoinSource, bip32_sources: Vec<Box<dyn CoinSource>>) -> Self {
+impl<P: SpStorageProfile> MergedCoinSource<P> {
+    pub fn new(sp_source: SpCoinSource<P>, bip32_sources: Vec<Box<dyn CoinSource>>) -> Self {
         Self {
             sp_source,
             bip32_sources,
@@ -401,7 +375,7 @@ impl MergedCoinSource {
     }
 }
 
-impl CoinSource for MergedCoinSource {
+impl<P: SpStorageProfile + Send + Sync + 'static> CoinSource for MergedCoinSource<P> {
     fn spendable_coins(&self) -> Vec<Coin> {
         let mut coins = self.sp_source.spendable_coins();
         for source in &self.bip32_sources {
@@ -492,6 +466,8 @@ mod tests {
     use bitcoin::absolute::Height;
     use bitcoin::hashes::Hash;
     use bitcoin::Txid;
+    use bwk::persist::JsonBackend;
+    use std::fs;
 
     fn test_outpoint() -> OutPoint {
         OutPoint {
@@ -688,34 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn test_coin_store_serde_roundtrip() {
-        let mut store = SpCoinStore::new();
-        store.insert(test_outpoint(), test_owned_output(10000));
-        store.insert(test_outpoint_2(), test_owned_output(20000));
-
-        let json = serde_json::to_string(&store).expect("serialize");
-        let loaded: SpCoinStore = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get(&test_outpoint()).unwrap().amount_sat(), 10000);
-        assert_eq!(loaded.get(&test_outpoint_2()).unwrap().amount_sat(), 20000);
-    }
-
-    #[test]
-    fn test_coin_store_dump_restore() {
-        let mut store = SpCoinStore::new();
-        store.insert(test_outpoint(), test_owned_output(10000));
-
-        let dumped = store.dump();
-
-        let mut new_store = SpCoinStore::new();
-        new_store.restore(dumped).expect("restore");
-
-        assert_eq!(new_store.len(), 1);
-        assert_eq!(new_store.get(&test_outpoint()).unwrap().amount_sat(), 10000);
-    }
-
-    #[test]
     fn test_coin_store_persistence() {
         use std::env;
 
@@ -724,16 +672,18 @@ mod tests {
         let _ = fs::create_dir_all(&temp_dir);
 
         // Create and populate store
-        let mut store = SpCoinStore::with_path(temp_dir.clone()).enable_persist(true);
+        let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+        let coins_path = backend.path_for(STORE_KEY);
+        let mut store = SpCoinStore::with_backend(Arc::new(backend), STORE_KEY);
         store.insert(test_outpoint(), test_owned_output(10000));
         store.insert(test_outpoint_2(), test_owned_output(20000));
         store.persist();
 
-        // File is laid down under the account dir with the canonical name.
-        assert!(temp_dir.join(SpCoinStore::FILENAME).exists());
+        assert!(coins_path.exists());
 
         // Load from dir
-        let loaded = SpCoinStore::from_file(temp_dir.clone()).expect("load");
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let loaded = SpCoinStore::load_from_backend(backend, STORE_KEY);
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get(&test_outpoint()).unwrap().amount_sat(), 10000);
@@ -751,30 +701,34 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        // Create store with persist disabled
-        let mut store = SpCoinStore::with_path(temp_dir.clone()).enable_persist(false);
+        // Compute the would-be on-disk path via the backend, then drop
+        // the backend before exercising the no-persist path.
+        let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+        let coins_path = backend.path_for(STORE_KEY);
+        drop(backend);
+
+        // Create store with persist disabled (NoopBackend via SpCoinStore::new)
+        let mut store = SpCoinStore::new();
         store.insert(test_outpoint(), test_owned_output(10000));
         store.persist();
 
         // File should not exist
-        assert!(!temp_dir.join(SpCoinStore::FILENAME).exists());
+        assert!(!coins_path.exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
-    fn test_coin_store_get_mut() {
+    fn test_coin_store_mark_spent_api() {
         let mut store = SpCoinStore::new();
         let outpoint = test_outpoint();
         store.insert(outpoint, test_owned_output(10000));
 
-        // Modify through get_mut
-        if let Some(entry) = store.get_mut(&outpoint) {
-            entry.owned_output_mut().spend_status = OutputSpendStatus::Spent([1u8; 32]);
-        }
+        // Modify through mark_spent (the closure-based `modify` that
+        // replaces the old `get_mut`).
+        store.mark_spent(&outpoint, [1u8; 32]);
 
-        // Verify modification
         let entry = store.get(&outpoint).unwrap();
         assert!(!entry.is_spendable());
     }
@@ -791,16 +745,6 @@ mod tests {
     }
 
     #[test]
-    fn test_coin_store_from_file_not_found() {
-        // Directory has no coins.json under it, so load must fail with Io.
-        let result = SpCoinStore::from_file(PathBuf::from("/nonexistent/path"));
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(matches!(e, CoinStoreError::Io(_)));
-        }
-    }
-
-    #[test]
     fn test_coin_store_coins_reference() {
         let mut store = SpCoinStore::new();
         store.insert(test_outpoint(), test_owned_output(10000));
@@ -808,20 +752,5 @@ mod tests {
         let coins = store.coins();
         assert_eq!(coins.len(), 1);
         assert!(coins.contains_key(&test_outpoint()));
-    }
-
-    #[test]
-    fn test_coin_store_error_display() {
-        // Test Io error variant
-        let err = CoinStoreError::Io("permission denied".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("io error"));
-        assert!(msg.contains("permission denied"));
-
-        // Test Parse error variant
-        let err = CoinStoreError::Parse("invalid json structure".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("parse error"));
-        assert!(msg.contains("invalid json structure"));
     }
 }

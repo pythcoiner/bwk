@@ -21,7 +21,7 @@ pub use account::{
 pub use backend_blindbit_native_non_async::InfoResponse;
 pub use bwk;
 pub use bwk::{Notification, SpNotification};
-pub use coin_store::{CoinState, CoinStoreError, SpCoinEntry, SpCoinStore};
+pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError, SubAccountConfig};
 pub use label_store::{LabelKey, LabelStoreError, SpLabelStore};
 pub use scan_state::{ScanState, ScanStateError};

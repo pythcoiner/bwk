@@ -125,7 +125,7 @@ pub struct Account {
     /// Blindbit backend for blockchain data
     backend: BlindbitBackend<UreqClient>,
     /// Store for owned outputs
-    coin_store: Arc<Mutex<SpCoinStore>>,
+    coin_store: Arc<Mutex<SpCoinStore<P>>>,
     /// Store for user-facing labels
     label_store: Arc<Mutex<SpLabelStore>>,
     /// Store for transactions
@@ -693,7 +693,7 @@ impl Account {
         let mut scanner = SpAccount::new(
             scan_backend,
             self.client.clone(),
-            AccountUpdater {
+            AccountUpdater::<P> {
                 coin_store: self.coin_store.clone(),
                 tx_store: self.tx_store.clone(),
                 scan_state: self.scan_state.clone(),
@@ -776,7 +776,7 @@ impl Account {
             let mut scanner = match SpAccount::restore(
                 scan_backend,
                 client.clone(),
-                AccountUpdater {
+                AccountUpdater::<P> {
                     coin_store: coin_store.clone(),
                     tx_store: tx_store.clone(),
                     scan_state: scan_state.clone(),
@@ -927,7 +927,7 @@ impl Account {
         let mut scanner = SpAccount::new(
             scan_backend,
             self.client.clone(),
-            AccountUpdater {
+            AccountUpdater::<P> {
                 coin_store: self.coin_store.clone(),
                 tx_store: self.tx_store.clone(),
                 scan_state: self.scan_state.clone(),
@@ -1212,14 +1212,14 @@ impl Drop for Account {
 // AccountUpdater - Implements Updater trait for Account
 
 /// Internal struct that implements the Updater trait for scanning.
-struct AccountUpdater {
-    coin_store: Arc<Mutex<SpCoinStore>>,
+struct AccountUpdater<P: crate::profile::SpStorageProfile> {
+    coin_store: Arc<Mutex<SpCoinStore<P>>>,
     tx_store: Arc<Mutex<SpTxStore>>,
     scan_state: Arc<Mutex<ScanState>>,
     sender: mpsc::Sender<Notification>,
 }
 
-impl Updater for AccountUpdater {
+impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
     fn record_scan_progress(
         &mut self,
         _start: Height,
@@ -1604,12 +1604,13 @@ mod tests {
         let tx_store = Arc::new(Mutex::new(SpTxStore::new()));
         let (sender, receiver) = mpsc::channel();
 
-        let mut updater = AccountUpdater {
-            coin_store,
-            tx_store,
-            scan_state,
-            sender,
-        };
+        let mut updater =
+            AccountUpdater::<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
+                coin_store,
+                tx_store,
+                scan_state,
+                sender,
+            };
 
         // Helper to collect all ScanProgress current values from the channel
         let drain = |rx: &mpsc::Receiver<Notification>| -> Vec<u32> {

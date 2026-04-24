@@ -23,6 +23,7 @@ use common::{
     test_owned_output, wait_for_sync_and_index, MockBackend, MockBlock, TempDir,
 };
 
+use bwk::persist::{JsonBackend, PersistenceBackend, COINS_STORE_KEY};
 use bwk_sp::{Config, SpCoinStore, SpLabelStore, SpTxStore};
 
 // Store Integration Tests
@@ -34,7 +35,9 @@ fn test_stores_independent_persistence() {
 
     // Create and populate stores
     {
-        let mut coin_store = SpCoinStore::with_path(dir.path().to_path_buf()).enable_persist(true);
+        let coin_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
+        let mut coin_store = SpCoinStore::with_backend(coin_backend, COINS_STORE_KEY);
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
@@ -59,7 +62,9 @@ fn test_stores_independent_persistence() {
 
     // Load and verify stores
     {
-        let coin_store = SpCoinStore::from_file(dir.path().to_path_buf()).expect("load coins");
+        let coin_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
+        let coin_store = SpCoinStore::load_from_backend(coin_backend, COINS_STORE_KEY);
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
@@ -3532,7 +3537,9 @@ fn test_no_persist_on_empty_scan() {
     // 6. Check coin file contents
     // The coin file may be created (empty store), but should have no coins
     if account_dir.join(SpCoinStore::FILENAME).exists() {
-        let store = SpCoinStore::from_file(account_dir.clone()).unwrap();
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(account_dir.clone()).unwrap());
+        let store = SpCoinStore::load_from_backend(backend, COINS_STORE_KEY);
         assert_eq!(
             store.len(),
             0,
