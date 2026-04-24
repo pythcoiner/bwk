@@ -35,8 +35,10 @@
 //!   proceed if it's greater than [`DB_VERSION`] in the running binary.
 
 pub mod backend;
+pub mod storage;
 
 pub use backend::{JsonBackend, NoopBackend, PersistenceBackend};
+pub use storage::Store;
 
 /// Monotonic integer stamped into every persistence medium by the
 /// running binary.
