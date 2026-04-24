@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use crate::{PersistError, KNOWN_STORES};
 
+mod lock;
+
 mod noop;
 pub use noop::NoopBackend;
 

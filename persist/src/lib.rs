@@ -134,6 +134,12 @@ pub enum PersistError {
     /// for fear of truncating data whose shape we don't understand.
     #[error("persistence file is at version {found} but this binary only supports up to {max_supported}")]
     DbVersionTooNew { found: u32, max_supported: u32 },
+    /// Another process (or another instance in this process) already
+    /// holds the advisory lock on the account directory. Callers
+    /// should surface this to the user rather than retry silently —
+    /// wallet state has a single owner.
+    #[error("account directory {path:?} is already opened by another instance")]
+    AlreadyOpen { path: std::path::PathBuf },
 }
 
 /// How a wallet config wants its account-scoped data persisted.
