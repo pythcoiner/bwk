@@ -7,6 +7,8 @@ pub mod log;
 pub mod profile;
 pub mod tx_store;
 
+pub use profile::{RamProfile, StorageProfile};
+
 #[cfg(feature = "sp")]
 pub use account::SpNotification;
 pub use account::{Account, Error, Notification, TxListenerNotif};
@@ -17,6 +19,7 @@ pub use bwk_backoff;
 pub use bwk_descriptor;
 pub use bwk_electrum;
 pub use bwk_keys;
+pub use bwk_persist as persist;
 pub use bwk_sign;
 pub use bwk_tx;
 pub use bwk_utils;

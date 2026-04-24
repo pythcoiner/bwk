@@ -205,6 +205,7 @@ impl Account {
                     descriptor: sub_cfg.descriptor.clone(),
                     persist: config.persist,
                     skip_labels: true,
+                    persist_kind: bwk::persist::PersistenceKind::default(),
                 };
                 bwk_config.dir_name =
                     Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());

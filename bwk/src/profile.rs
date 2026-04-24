@@ -11,20 +11,21 @@
 //! [`PersistenceBackend`]. Future profiles (DB-through, online, LRU, …)
 //! plug in without touching `Account<P>` or any caller that works
 //! through the `Store` trait.
-//!
-//! The store traits land here first; per-store migrations in the
-//! next few commits flip `TxStore`/`LabelStore`/address_store over
-//! to `RamStore`-backed `Store` shapes, and the `RamStores` bundle
-//! and `open_ram_stores` factory show up once all the stores
-//! expose their encode/decode helpers.
 
 use std::{marker::PhantomData, sync::Arc};
 
 use bwk_persist::{PersistError, PersistenceBackend, RamStore, Store};
+use bwk_sign::signing_manager::{
+    decode_fingerprint, decode_json_signer, encode_fingerprint, encode_json_signer,
+};
 use bwk_sign::JsonSigner;
 use miniscript::bitcoin::{bip32, ScriptBuf, Txid};
 
-use crate::{config::Tip, label_store::LabelKey, tx_store::TxEntry};
+use crate::{
+    config::Tip,
+    label_store::{self, LabelKey},
+    tx_store::{self, TxEntry},
+};
 
 /// Convenient alias for the runtime-dispatched backend variant.
 pub type DefaultBackend = Arc<dyn PersistenceBackend>;
@@ -158,5 +159,214 @@ impl Tip {
             receive: read(TIP_RECEIVE_ROW),
             change: read(TIP_CHANGE_ROW),
         }
+    }
+}
+
+/// Convenience bundle used by `Account::open_ram_stores` to hand the
+/// caller every store opened against the same backend, in one shot.
+pub struct RamStores<B: PersistenceBackend + Clone + 'static> {
+    pub tx: RamStore<B, Txid, TxEntry>,
+    pub label: RamStore<B, LabelKey, String>,
+    pub statuses: RamStore<B, ScriptBuf, (Option<String>, u32, u32)>,
+    pub account: RamStore<B, String, Vec<u8>>,
+    pub signers: RamStore<B, bip32::Fingerprint, JsonSigner>,
+}
+
+/// Profile-generic counterpart of [`RamStores`]: the typed stores a
+/// [`StorageProfile`] declares, opened and ready to be handed to
+/// `Account::from_stores`.
+pub struct Stores<P: StorageProfile> {
+    pub tx: P::TxStore,
+    pub label: P::LabelStore,
+    pub statuses: P::StatusesStore,
+    pub account: P::AccountStore,
+    pub signers: P::SignerStore,
+}
+
+/// Profiles that know how to open their store bundle from a pair of
+/// runtime-dispatched [`PersistenceBackend`]s. Required by
+/// `Account::new` so the constructor can be generic over `P`.
+///
+/// `secrets_backend` only carries hot-signer material (mnemonics +
+/// per-signer descriptor sets). When an `Account` is opened under
+/// [`bwk_persist::PersistenceKind::Sqlite`], the caller passes
+/// [`bwk_persist::NoopBackend`] as `secrets_backend` so signer state
+/// never reaches the SQLite DB; otherwise both arguments are the same
+/// backend handle.
+pub trait OpenFromBackend: StorageProfile + Sized {
+    fn open(
+        backend: Arc<dyn PersistenceBackend>,
+        secrets_backend: Arc<dyn PersistenceBackend>,
+    ) -> Result<Stores<Self>, PersistError>;
+}
+
+impl OpenFromBackend for RamProfile<DefaultBackend> {
+    fn open(
+        backend: Arc<dyn PersistenceBackend>,
+        secrets_backend: Arc<dyn PersistenceBackend>,
+    ) -> Result<Stores<Self>, PersistError> {
+        let ram = open_ram_stores_split(backend, secrets_backend)?;
+        Ok(Stores {
+            tx: ram.tx,
+            label: ram.label,
+            statuses: ram.statuses,
+            account: ram.account,
+            signers: ram.signers,
+        })
+    }
+}
+
+/// Open every `RamStore` a [`RamProfile`]-backed `Account` needs,
+/// sharing a single backend instance across all stores including the
+/// `signers` slot.
+pub fn open_ram_stores<B: PersistenceBackend + Clone + 'static>(
+    backend: B,
+) -> Result<RamStores<B>, PersistError> {
+    open_ram_stores_split(backend.clone(), backend)
+}
+
+/// Open every `RamStore` a [`RamProfile`]-backed `Account` needs,
+/// routing the `signers` slot through `secrets_backend` and the rest
+/// through `backend`. When secrets-stripping is not required, both
+/// arguments are the same backend; see [`open_ram_stores`] for that
+/// case.
+pub fn open_ram_stores_split<B: PersistenceBackend + Clone + 'static>(
+    backend: B,
+    secrets_backend: B,
+) -> Result<RamStores<B>, PersistError> {
+    Ok(RamStores {
+        tx: RamStore::open(
+            backend.clone(),
+            bwk_persist::TRANSACTIONS_STORE_KEY,
+            tx_store::encode_txid,
+            tx_store::decode_txid,
+            tx_store::encode_entry,
+            tx_store::decode_entry,
+        )?,
+        label: RamStore::open(
+            backend.clone(),
+            bwk_persist::LABELS_STORE_KEY,
+            label_store::encode_key,
+            label_store::decode_key,
+            label_store::encode_label,
+            label_store::decode_label,
+        )?,
+        statuses: RamStore::open(
+            backend.clone(),
+            bwk_persist::STATUSES_STORE_KEY,
+            encode_status_key,
+            decode_status_key,
+            encode_status_value,
+            decode_status_value,
+        )?,
+        account: RamStore::open(
+            backend,
+            bwk_persist::ACCOUNT_STORE_KEY,
+            encode_account_key,
+            decode_account_key,
+            encode_account_value,
+            decode_account_value,
+        )?,
+        signers: RamStore::open(
+            secrets_backend,
+            bwk_persist::SIGNERS_STORE_KEY,
+            encode_fingerprint,
+            decode_fingerprint,
+            encode_json_signer,
+            decode_json_signer,
+        )?,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression coverage for the `Tip::persist` / `JsonBackend`
+    //! round-trip. Before the fix, `Tip::persist` wrote
+    //! `u32::to_le_bytes`, which the JSON backend rejects when it
+    //! parses the value as `serde_json::Value`. The tip would silently
+    //! stay dirty in the `RamStore` and never hit disk.
+    //!
+    //! These tests would fail with the pre-fix `Tip::persist` body.
+    use super::*;
+    use bwk_persist::{JsonBackend, ACCOUNT_STORE_KEY};
+
+    fn open_account_store(
+        backend: Arc<dyn PersistenceBackend>,
+    ) -> RamStore<Arc<dyn PersistenceBackend>, String, Vec<u8>> {
+        RamStore::open(
+            backend,
+            ACCOUNT_STORE_KEY,
+            encode_account_key,
+            decode_account_key,
+            encode_account_value,
+            decode_account_value,
+        )
+        .expect("open account RamStore")
+    }
+
+    #[test]
+    fn tip_persist_flush_ok_through_json_backend() {
+        // Under the old implementation this flush returned
+        // `Err(Serde("decode row value …"))` because JsonBackend parsed
+        // the raw 4 LE bytes as serde_json::Value and rejected them.
+        let dir = temp_dir::TempDir::new().expect("tempdir");
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).expect("open JsonBackend"));
+        let mut store = open_account_store(backend);
+
+        Tip::persist(&mut store, 7, 3);
+        store.flush().expect("flush must succeed under JsonBackend");
+    }
+
+    #[test]
+    fn tip_persist_roundtrip_through_json_backend() {
+        // Persist, drop, reopen: the tip values must survive because
+        // the flush actually hit disk.
+        let dir = temp_dir::TempDir::new().expect("tempdir");
+
+        {
+            let backend: Arc<dyn PersistenceBackend> =
+                Arc::new(JsonBackend::open(dir.path().to_path_buf()).expect("open JsonBackend"));
+            let mut store = open_account_store(backend);
+            Tip::persist(&mut store, 42, 19);
+            store.flush().expect("flush");
+        }
+
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).expect("reopen JsonBackend"));
+        let store = open_account_store(backend);
+        let tip = Tip::from_account_store(&store);
+        assert_eq!(tip.receive, 42);
+        assert_eq!(tip.change, 19);
+    }
+
+    #[test]
+    fn tip_persist_on_disk_file_is_valid_json() {
+        // The account-store file must be parseable as JSON and carry
+        // the tip rows as JSON numbers — the whole point of JsonBackend
+        // is human-readable on-disk files.
+        let dir = temp_dir::TempDir::new().expect("tempdir");
+        let typed_backend = JsonBackend::open(dir.path().to_path_buf()).expect("open JsonBackend");
+        let account_path = typed_backend.path_for(ACCOUNT_STORE_KEY);
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(typed_backend);
+        let mut store = open_account_store(backend);
+
+        Tip::persist(&mut store, 5, 11);
+        store.flush().expect("flush");
+
+        let on_disk = std::fs::read_to_string(&account_path)
+            .expect("account store file must exist after flush");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&on_disk).expect("account store file must be valid JSON");
+        assert_eq!(
+            parsed.get(TIP_RECEIVE_ROW).and_then(|v| v.as_u64()),
+            Some(5),
+            "receive_index must be stored as a JSON number, got {on_disk}"
+        );
+        assert_eq!(
+            parsed.get(TIP_CHANGE_ROW).and_then(|v| v.as_u64()),
+            Some(11),
+            "change_index must be stored as a JSON number, got {on_disk}"
+        );
     }
 }

@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,8 +11,10 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
+use bwk_persist::{PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
+
 use miniscript::{
     bitcoin::{self, OutPoint, ScriptBuf},
     Descriptor, DescriptorPublicKey,
@@ -25,6 +26,7 @@ use crate::{
     coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
     config::{Config, Tip},
     label_store::{LabelKey, LabelStore},
+    profile::{self, DefaultBackend, OpenFromBackend, RamProfile, StorageProfile, Stores},
     tx_store::{TxEntry, TxStore},
 };
 
@@ -129,19 +131,27 @@ pub enum TxListenerNotif {
     Stopped,
 }
 
-#[derive(Debug)]
-pub struct Account {
-    coin_store: Arc<Mutex<CoinStore>>,
+pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
+    coin_store: Arc<Mutex<CoinStore<P>>>,
     label_store: Arc<Mutex<LabelStore<P>>>,
     receiver: Option<mpsc::Receiver<Notification>>,
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,
     config: Config,
     electrum_stop: Option<Arc<AtomicBool>>,
-    signing_manager: SigningManager,
+    signing_manager: SigningManager<P::SignerStore>,
+    /// Owned by the Electrum listener thread once it spawns; `take()`-n
+    /// in `start_listen_txs` and moved into `listen_txs`.
+    statuses_store: Option<P::StatusesStore>,
 }
 
-impl Drop for Account {
+impl<P: StorageProfile> std::fmt::Debug for Account<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Account").finish()
+    }
+}
+
+impl<P: StorageProfile> Drop for Account<P> {
     fn drop(&mut self) {
         if let Some(stop) = self.electrum_stop.as_mut() {
             stop.store(true, Ordering::Relaxed);
@@ -149,9 +159,39 @@ impl Drop for Account {
     }
 }
 
-// Constructor
-impl Account {
+// RAM-specific adapter for callers that already hold a `RamStores<B>`
+// bundle. Forwards to the generic `from_stores`.
+impl Account<RamProfile<DefaultBackend>> {
+    #[allow(dead_code)]
+    fn from_ram_stores(
+        config: Config,
+        sender: mpsc::Sender<Notification>,
+        ram: profile::RamStores<DefaultBackend>,
+    ) -> Self {
+        Self::from_stores(
+            config,
+            sender,
+            Stores {
+                tx: ram.tx,
+                label: ram.label,
+                statuses: ram.statuses,
+                account: ram.account,
+                signers: ram.signers,
+            },
+        )
+    }
+}
+
+// Generic constructors over any profile that knows how to open its
+// store bundle from a single `Arc<dyn PersistenceBackend>`.
+impl<P: OpenFromBackend> Account<P> {
     /// Creates a new `Account` instance with the given configuration.
+    ///
+    /// Opens the profile's stores against whatever backend the config
+    /// selects ([`JsonBackend`][bwk_persist::JsonBackend] by default,
+    /// `SqliteBackend` under `PersistenceKind::Sqlite`). Defaults to
+    /// the [`RamProfile<DefaultBackend>`] storage strategy via the
+    /// `Account` struct's default type parameter.
     pub fn new(config: Config) -> Self {
         let (sender, receiver) = mpsc::channel();
         let mut account = Self::new_inner(config, sender);
@@ -160,33 +200,48 @@ impl Account {
     }
 
     /// Creates a new `Account` using an external notification sender.
-    ///
-    /// The account will send notifications through the provided sender.
-    /// No receiver is created; `receiver()` will return `None`.
     pub fn new_with_sender(config: Config, sender: mpsc::Sender<Notification>) -> Self {
         Self::new_inner(config, sender)
     }
 
     fn new_inner(config: Config, sender: mpsc::Sender<Notification>) -> Self {
         assert!(!config.account.is_empty());
-        let tx_data = if config.persist {
-            TxStore::store_from_file(config.transactions_path())
-        } else {
-            BTreeMap::new()
+        let backend: Arc<dyn PersistenceBackend> = config
+            .build_backend()
+            .expect("Account::new: failed to build persistence backend");
+        // Hot-signer material must not land on the SQLite DB; route the
+        // SignerStore slot through a NoopBackend in that case.
+        let secrets_backend: Arc<dyn PersistenceBackend> =
+            if matches!(config.persist_kind, bwk_persist::PersistenceKind::Sqlite) {
+                Arc::new(bwk_persist::NoopBackend)
+            } else {
+                backend.clone()
+            };
+        let stores =
+            P::open(backend, secrets_backend).expect("Account::new: failed to open stores");
+        Self::from_stores(config, sender, stores)
+    }
+
+    /// Recreate the Account with the same config, online.
+    pub fn restart_electrum(&mut self) {
+        let mut new_account = Account::<P>::new(self.config.clone());
+        new_account.config.set_offline(false);
+        new_account.config.persist();
+        *self = new_account;
+    }
+}
+
+impl<P: StorageProfile> Account<P> {
+    fn from_stores(config: Config, sender: mpsc::Sender<Notification>, stores: Stores<P>) -> Self {
+        let tx_store = TxStore::from_store(stores.tx);
+        let label_store = Arc::new(Mutex::new(LabelStore::from_store(stores.label)));
+        let account_store = Arc::new(Mutex::new(stores.account));
+        // Tip is loaded from the account_store.
+        let tip = {
+            let store = account_store.lock().expect("poisoned");
+            Tip::from_account_store(&*store)
         };
-        let tx_store =
-            TxStore::new(tx_data, Some(config.transactions_path())).enable_persist(config.persist);
-        let (receive, change) = if config.persist {
-            let Tip { receive, change } = config.tip_from_file();
-            (receive, change)
-        } else {
-            (0, 0)
-        };
-        let label_store = Arc::new(Mutex::new(if config.skip_labels {
-            LabelStore::new().enable_persist(false)
-        } else {
-            LabelStore::from_file(config.clone()).enable_persist(config.persist)
-        }));
+        let Tip { receive, change } = tip;
         let coin_store = Arc::new(Mutex::new(CoinStore::new(
             config.network,
             config.descriptor.clone(),
@@ -197,14 +252,15 @@ impl Account {
             tx_store,
             label_store.clone(),
             config.clone(),
+            account_store.clone(),
         )));
         coin_store.lock().expect("poisoned").generate();
-        let mut signing_manager =
-            SigningManager::new(PathBuf::new(), config.dir_name()).enable_persist(config.persist);
+        let mut signing_manager = SigningManager::from_store(stores.signers);
         if let Some(mnemo) = config.mnemonic.clone() {
             signing_manager.new_bip32_signer_from_mnemonic(config.network(), mnemo);
             signing_manager.register_bip32_descriptor(config.descriptor.clone());
         }
+        let _ = account_store; // owned by CoinStore→AddressStore; not stored on Account
         let mut account = Account {
             coin_store,
             label_store,
@@ -214,6 +270,7 @@ impl Account {
             sender,
             config,
             signing_manager,
+            statuses_store: Some(stores.statuses),
         };
         if !account.config.offline() {
             account.start_electrum();
@@ -223,7 +280,7 @@ impl Account {
 }
 
 // Non (b)locking API
-impl Account {
+impl<P: StorageProfile> Account<P> {
     pub fn network(&self) -> bitcoin::Network {
         self.config.network()
     }
@@ -253,8 +310,8 @@ impl Account {
         self.config.clone()
     }
 
-    pub fn coin_source(&self) -> CoinStoreSource {
-        CoinStoreSource::new(self.coin_store.clone())
+    pub fn coin_source(&self) -> CoinStoreSource<P> {
+        CoinStoreSource::<P>::new(self.coin_store.clone())
     }
 
     pub fn sign(&self, psbt: String) {
@@ -272,7 +329,7 @@ impl Account {
 }
 
 // Locking API
-impl Account {
+impl<P: StorageProfile> Account<P> {
     pub fn tx_builder(&self) -> TxBuilder {
         let tip_updater =
             ChangeTipUpdater::new(self.coin_store.lock().expect("poisoned").address_store());
@@ -377,7 +434,7 @@ impl Account {
 }
 
 // Derivation specific implementation
-impl Account {
+impl<P: StorageProfile> Account<P> {
     /// Returns the derivator associated with the account.
     ///
     /// # Returns
@@ -439,7 +496,7 @@ impl Account {
 }
 
 // Electrum specific implementation
-impl Account {
+impl<P: StorageProfile> Account<P> {
     /// Re-generate coin_store from tx_store
     pub fn generate_coins(&mut self) {
         self.coin_store.lock().expect("poisoned").generate();
@@ -470,7 +527,6 @@ impl Account {
         &mut self,
         addr: String,
         port: u16,
-        config: Config,
     ) -> (mpsc::Sender<AddressTip>, Arc<AtomicBool>) {
         log::debug!("Account::start_poll_txs()");
         let (sender, address_tip) = mpsc::channel();
@@ -479,6 +535,10 @@ impl Account {
         let derivator = self.derivator();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_request = stop.clone();
+        let statuses_store = self
+            .statuses_store
+            .take()
+            .expect("statuses store available when starting Electrum listener");
 
         let poller = thread::spawn(move || {
             let client = match bwk_electrum::client::Client::new(&addr, port) {
@@ -503,7 +563,7 @@ impl Account {
                 stop_request,
                 request,
                 response,
-                Some(config),
+                statuses_store,
             );
         });
         self.tx_listener = Some(poller);
@@ -519,7 +579,7 @@ impl Account {
         if let Ok(port) = port.parse::<u16>() {
             self.config.electrum_url = Some(url);
             self.config.electrum_port = Some(port);
-            self.config.to_file();
+            self.config.persist();
         } else {
             self.sender
                 .send(Notification::InvalidElectrumConfig)
@@ -540,22 +600,14 @@ impl Account {
             self.config.electrum_url.clone(),
             self.config.electrum_port,
         ) {
-            let (tx_listener, electrum_stop) =
-                self.start_listen_txs(addr, port, self.config.clone());
+            let (tx_listener, electrum_stop) = self.start_listen_txs(addr, port);
             self.coin_store.lock().expect("poisoned").init(tx_listener);
             self.electrum_stop = Some(electrum_stop);
             if self.config.offline() {
                 self.config.set_offline(false);
-                self.config.to_file();
+                self.config.persist();
             }
         }
-    }
-
-    pub fn restart_electrum(&mut self) {
-        let mut new_account = Account::new(self.config.clone());
-        new_account.config.set_offline(false);
-        new_account.config.to_file();
-        *self = new_account;
     }
 
     /// Stops the Electrum listener for the account.
@@ -566,7 +618,7 @@ impl Account {
         self.electrum_stop = None;
         self.tx_listener = None;
         self.config.set_offline(true);
-        self.config.to_file();
+        self.config.persist();
     }
 
     pub fn electrum_offline(&self) -> bool {
@@ -581,7 +633,7 @@ impl Account {
     pub fn set_look_ahead(&mut self, look_ahead: String) {
         if let Ok(la) = look_ahead.parse::<u32>() {
             self.config.look_ahead = la;
-            self.config.to_file();
+            self.config.persist();
         } else {
             self.sender
                 .send(Notification::InvalidLookAhead)
@@ -638,36 +690,36 @@ macro_rules! send_electrum {
 /// * `address_tip` - The receiver for address tips.
 /// * `stop_request` - The stop flag for the listener.
 #[allow(clippy::too_many_arguments)]
-fn listen_txs<T: From<TxListenerNotif>>(
-    coin_store: Arc<Mutex<CoinStore>>,
+fn listen_txs<T, P>(
+    coin_store: Arc<Mutex<CoinStore<P>>>,
     derivator: SpkDerivator,
     notification: mpsc::Sender<T>,
     address_tip: mpsc::Receiver<AddressTip>,
     stop_request: Arc<AtomicBool>,
     request: mpsc::Sender<CoinRequest>,
     response: mpsc::Receiver<CoinResponse>,
-    config: Option<Config>,
-) {
+    mut statuses: P::StatusesStore,
+) where
+    T: From<TxListenerNotif>,
+    P: StorageProfile,
+{
     log::info!("listen_txs(): started");
     send_notif!(notification, request, TxListenerNotif::Started);
 
-    let mut statuses = if let Some(config) = &config {
-        config.statuses_from_file()
-    } else {
-        BTreeMap::<ScriptBuf, (Option<String>, u32, u32)>::new()
+    let initial_keys: Vec<ScriptBuf> = match statuses.keys() {
+        Ok(it) => it.collect(),
+        Err(e) => {
+            log::error!("listen_txs(): statuses keys: {e}");
+            Vec::new()
+        }
     };
-
-    if !statuses.is_empty() {
-        let sub: Vec<_> = statuses.keys().cloned().collect();
-        send_electrum!(request, notification, CoinRequest::Subscribe(sub));
+    if !initial_keys.is_empty() {
+        send_electrum!(request, notification, CoinRequest::Subscribe(initial_keys));
     }
 
-    fn persist_status(
-        config: &Option<Config>,
-        statuses: &BTreeMap<ScriptBuf, (Option<String>, u32, u32)>,
-    ) {
-        if let Some(cfg) = config.as_ref() {
-            cfg.persist_statuses(statuses);
+    fn flush_statuses<S: bwk_persist::Store>(statuses: &mut S) {
+        if let Err(e) = statuses.flush() {
+            log::error!("listen_txs(): statuses flush: {e}");
         }
     }
 
@@ -690,30 +742,35 @@ fn listen_txs<T: From<TxListenerNotif>>(
                 received = true;
                 let mut sub = vec![];
                 let r_spk = derivator.receive_at(recv).script_pubkey();
-                if !statuses.contains_key(&r_spk) {
+                if !statuses.contains_key(&r_spk).unwrap_or(false) {
                     // FIXME: here we can be smart an not start at 0 but at `actual_tip`
                     for i in 0..recv {
                         let spk = derivator.receive_at(i).script_pubkey();
-                        if !statuses.contains_key(&spk) {
-                            statuses.insert(spk.clone(), (None, 0, i));
-                            persist_status(&config, &statuses);
+                        if !statuses.contains_key(&spk).unwrap_or(false) {
+                            if let Err(e) = statuses.insert(spk.clone(), (None, 0, i)) {
+                                log::error!("listen_txs(): statuses insert: {e}");
+                                continue;
+                            }
                             sub.push(spk);
                         }
                     }
                 }
                 let c_spk = derivator.change_at(recv).script_pubkey();
-                if !statuses.contains_key(&c_spk) {
+                if !statuses.contains_key(&c_spk).unwrap_or(false) {
                     // FIXME: here we can be smart an not start at 0 but at `actual_tip`
                     for i in 0..change {
                         let spk = derivator.change_at(i).script_pubkey();
-                        if !statuses.contains_key(&spk) {
-                            statuses.insert(spk.clone(), (None, 1, i));
-                            persist_status(&config, &statuses);
+                        if !statuses.contains_key(&spk).unwrap_or(false) {
+                            if let Err(e) = statuses.insert(spk.clone(), (None, 1, i)) {
+                                log::error!("listen_txs(): statuses insert: {e}");
+                                continue;
+                            }
                             sub.push(spk);
                         }
                     }
                 }
                 if !sub.is_empty() {
+                    flush_statuses(&mut statuses);
                     send_electrum!(request, notification, CoinRequest::Subscribe(sub));
                 }
             }
@@ -741,43 +798,55 @@ fn listen_txs<T: From<TxListenerNotif>>(
                 match rsp {
                     CoinResponse::Status(elct_status) => {
                         let mut history = vec![];
+                        let mut dirty = false;
                         for (spk, status) in elct_status {
-                            if let Some((s, _, _)) = statuses.get_mut(&spk) {
-                                // status is registered
-                                if *s != status {
-                                    // status changed
+                            match statuses.get(&spk) {
+                                Ok(Some((s, _, _))) => {
+                                    // status is registered
+                                    if s != status {
+                                        // status changed
+                                        if status.is_some() {
+                                            // not empty: ask for tx changes
+                                            history.push(spk.clone());
+                                        } else {
+                                            // Some(_) -> None: clear coin_store
+                                            let mut store = coin_store.lock().expect("poisoned");
+                                            let mut map = BTreeMap::new();
+                                            map.insert(spk.clone(), vec![]);
+                                            let _ = store.handle_history_response(map);
+                                            store.generate();
+                                        }
+                                        // record the local status change
+                                        let new_status = status.clone();
+                                        match statuses.modify(&spk, |v| v.0 = new_status.clone()) {
+                                            Ok(true) => dirty = true,
+                                            Ok(false) => {
+                                                // race-free under single-listener thread:
+                                                // we just observed the entry above
+                                            }
+                                            Err(e) => {
+                                                log::error!("listen_txs(): statuses modify: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    // not registered: previous behaviour was an
+                                    // `entry(spk).and_modify(...)`, which is a no-op
+                                    // for vacant entries. Preserve that — only the
+                                    // history-side effect remains.
                                     if status.is_some() {
-                                        // status is not empty so we ask for txs changes
                                         history.push(spk);
                                     } else {
-                                        // status change from Some(_) to None we directly update
-                                        // coin_store
                                         let mut store = coin_store.lock().expect("poisoned");
                                         let mut map = BTreeMap::new();
                                         map.insert(spk.clone(), vec![]);
                                         let _ = store.handle_history_response(map);
-                                        store.generate();
                                     }
-                                    // record the local status change
-                                    *s = status;
                                 }
-                            } else if status.is_some() {
-                                // status is not None & not registered
-                                statuses.entry(spk.clone()).and_modify(|s| s.0 = status);
-                                persist_status(&config, &statuses);
-                                history.push(spk);
-                            } else {
-                                // status is None & not registered
-
-                                // record local status
-                                statuses.entry(spk.clone()).and_modify(|s| s.0 = status);
-                                persist_status(&config, &statuses);
-
-                                // update coin_store
-                                let mut store = coin_store.lock().expect("poisoned");
-                                let mut map = BTreeMap::new();
-                                map.insert(spk.clone(), vec![]);
-                                let _ = store.handle_history_response(map);
+                                Err(e) => {
+                                    log::error!("listen_txs(): statuses get: {e}");
+                                }
                             }
                         }
                         if !history.is_empty() {
@@ -785,7 +854,9 @@ fn listen_txs<T: From<TxListenerNotif>>(
                             log::debug!("listen_txs() send {:#?}", hist);
                             send_electrum!(request, notification, hist);
                         }
-                        persist_status(&config, &statuses);
+                        if dirty {
+                            flush_statuses(&mut statuses);
+                        }
                     }
                     CoinResponse::History(map) => {
                         let mut store = coin_store.lock().expect("poisoned");
@@ -836,11 +907,12 @@ mod tests {
     use crate::tx_store::TxStore;
     use bip39::Mnemonic;
     use bwk_descriptor::descriptor::{wpkh, ScriptType};
+    use bwk_persist::NoopBackend;
     use bwk_sign::hot_signer::HotSigner;
     use bwk_tx::CoinStatus;
     use bwk_utils::test::{funding_tx, setup_logger, spending_tx};
     use miniscript::bitcoin::{bip32::ChildNumber, Network};
-    use std::{str::FromStr, sync::mpsc::TryRecvError, time::Duration};
+    use std::{path::PathBuf, str::FromStr, sync::mpsc::TryRecvError, time::Duration};
     use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
     struct CoinStoreMock {
@@ -887,8 +959,24 @@ mod tests {
             let derivator =
                 SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
 
-            let tx_store = TxStore::new(Default::default(), None);
+            let tx_store = TxStore::new();
             let label_store = Arc::new(Mutex::new(LabelStore::new()));
+            let mock_backend: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
+            let account_store = Arc::new(Mutex::new(bwk_persist::RamStore::empty(
+                mock_backend.clone(),
+                bwk_persist::ACCOUNT_STORE_KEY,
+                crate::profile::encode_account_key,
+                crate::profile::encode_account_value,
+            )));
+            let statuses_store = bwk_persist::RamStore::open(
+                mock_backend,
+                bwk_persist::STATUSES_STORE_KEY,
+                crate::profile::encode_status_key,
+                crate::profile::decode_status_key,
+                crate::profile::encode_status_value,
+                crate::profile::decode_status_value,
+            )
+            .expect("open statuses RamStore");
             let coin_store = Arc::new(Mutex::new(CoinStore::new(
                 bitcoin::Network::Regtest,
                 descriptor.clone(),
@@ -899,6 +987,7 @@ mod tests {
                 tx_store,
                 label_store,
                 dummy_config,
+                account_store,
             )));
             coin_store.lock().expect("poisoned").init(tip_sender);
             let store = coin_store.clone();
@@ -906,7 +995,7 @@ mod tests {
             let cloned_derivator = derivator.clone();
 
             let listener_handle = thread::spawn(move || {
-                listen_txs(
+                listen_txs::<Notification, RamProfile<DefaultBackend>>(
                     coin_store,
                     cloned_derivator,
                     notif_sender,
@@ -914,7 +1003,7 @@ mod tests {
                     stop,
                     req_sender,
                     resp_receiver,
-                    None,
+                    statuses_store,
                 );
             });
 
@@ -1406,7 +1495,7 @@ mod integration_tests {
         config.set_electrum_url(url);
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
-        let mut account = Account::new(config);
+        let mut account: Account = Account::new(config);
         sleep(Duration::from_millis(300));
 
         let recv_addr = account.new_recv_addr();
@@ -1528,7 +1617,7 @@ mod integration_tests {
         config.set_electrum_url(url);
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
-        let mut account = Account::new(config);
+        let mut account: Account = Account::new(config);
         sleep(Duration::from_millis(300));
 
         let recv_addr = account.new_recv_addr();
@@ -1797,9 +1886,105 @@ mod integration_tests {
         assert_eq!(payments.len(), 16);
         drop(account);
 
-        let account = Account::new(saved_config);
+        let account: Account = Account::new(saved_config);
         sleep(Duration::from_millis(300));
         let payments = account.payment_history();
         assert_eq!(payments.len(), 16);
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod sqlite_signer_exclusion {
+    use super::*;
+    use crate::config::Config;
+    use bip39::Mnemonic;
+    use bwk_descriptor::descriptor::ScriptType;
+    use bwk_persist::PersistenceKind;
+    use miniscript::bitcoin::{bip32::ChildNumber, Network};
+    use temp_dir::TempDir;
+
+    /// Recursively scan all files under `dir` and assert `needle` is not
+    /// present in any of their bytes (text or binary).
+    fn assert_needle_absent(dir: &std::path::Path, needle: &str) {
+        let needle_bytes = needle.as_bytes();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(p) = stack.pop() {
+            for entry in std::fs::read_dir(&p).expect("read_dir") {
+                let entry = entry.expect("dir entry");
+                let path = entry.path();
+                let ft = entry.file_type().expect("file_type");
+                if ft.is_dir() {
+                    stack.push(path);
+                } else if ft.is_file() {
+                    let bytes = std::fs::read(&path).expect("read file");
+                    let found = bytes.windows(needle_bytes.len()).any(|w| w == needle_bytes);
+                    assert!(
+                        !found,
+                        "needle {needle:?} found in on-disk file {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sqlite_mode_keeps_mnemonic_off_disk() {
+        let temp = TempDir::new().expect("tempdir");
+        let unique = Mnemonic::generate(12).expect("mnemonic").to_string();
+
+        let mut cfg = Config::new(
+            Some(unique.clone()),
+            "alice".to_string(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            temp.path().to_path_buf(),
+            "wallet",
+            true,
+        )
+        .expect("config");
+        cfg.set_offline(true);
+        cfg.persist_kind = PersistenceKind::Sqlite;
+
+        // Build the account, force a config write + a label write to exercise
+        // multiple persist paths. SQLite mode must not write the mnemonic
+        // anywhere under the account dir.
+        let account = Account::new(cfg.clone());
+        cfg.persist();
+        account.label_store.lock().expect("poisoned").persist();
+        drop(account);
+
+        let account_dir = Config::path(temp.path().to_path_buf(), "wallet", "alice".to_string());
+        assert!(account_dir.exists(), "account dir created");
+        assert_needle_absent(&account_dir, &unique);
+    }
+
+    #[test]
+    fn json_mode_writes_mnemonic_to_config_json() {
+        let temp = TempDir::new().expect("tempdir");
+        let unique = Mnemonic::generate(12).expect("mnemonic").to_string();
+
+        let cfg = Config::new(
+            Some(unique.clone()),
+            "alice".to_string(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            temp.path().to_path_buf(),
+            "wallet",
+            true,
+        )
+        .expect("config")
+        .with_persist_kind(PersistenceKind::Json);
+        cfg.persist();
+
+        let on_disk = std::fs::read_to_string(
+            Config::path(temp.path().to_path_buf(), "wallet", "alice".to_string())
+                .join("config.json"),
+        )
+        .expect("config.json");
+        assert!(
+            on_disk.contains(&unique),
+            "mnemonic must appear in config.json under JSON mode (default)"
+        );
     }
 }

@@ -716,6 +716,7 @@ impl TestEnv {
             descriptor,
             persist: false,
             skip_labels: true,
+            persist_kind: bwk::persist::PersistenceKind::default(),
         });
         account.add_sub_account(sub);
     }
@@ -741,6 +742,7 @@ impl TestEnv {
             descriptor,
             persist: false,
             skip_labels: true,
+            persist_kind: bwk::persist::PersistenceKind::default(),
         });
         account.add_sub_account(sub);
     }

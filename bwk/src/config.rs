@@ -1,20 +1,24 @@
 use std::{
-    collections::BTreeMap,
     fs::{self, File},
     io::{Read, Write},
     path::PathBuf,
     str::FromStr,
+    sync::Arc,
 };
 
 use bwk_descriptor::descriptor::ScriptType;
+use bwk_persist::{self as persist, PersistenceBackend, PersistenceKind};
 use bwk_sign::hot_signer::HotSigner;
-use miniscript::{
-    bitcoin::{self, ScriptBuf},
-    Descriptor, DescriptorPublicKey,
-};
+use miniscript::{bitcoin, Descriptor, DescriptorPublicKey};
 use serde::{Deserialize, Serialize};
 
 const CONFIG_FILENAME: &str = "config.json";
+/// Logical store name for the bwk per-address-tip subscription map.
+/// Re-export of the canonical constant in [`bwk_persist`].
+pub const STATUSES_STORE_KEY: &str = bwk_persist::STATUSES_STORE_KEY;
+/// Row keys under the `account` store for the [`Tip`] singleton fields.
+const TIP_RECEIVE_ROW: &str = "receive_index";
+const TIP_CHANGE_ROW: &str = "change_index";
 
 /// Returns the data directory path based on the operating system.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -78,6 +82,8 @@ pub struct Config {
     /// Used by sp::Account to delegate label management to the parent's SpLabelStore.
     #[serde(skip)]
     pub skip_labels: bool,
+    #[serde(skip)]
+    pub persist_kind: PersistenceKind,
 }
 
 impl Config {
@@ -123,14 +129,50 @@ impl Config {
             mnemonic,
             descriptor,
             persist,
+            persist_kind: PersistenceKind::default(),
             offline: None,
             skip_labels: false,
         })
+    }
+
+    /// Return the directory where this account's files (or SQLite DB) live.
+    pub fn account_dir(&self) -> PathBuf {
+        Self::path(self.data_dir.clone(), self.dir_name, self.account.clone())
+    }
+
+    /// Construct the concrete persistence backend for this config.
+    ///
+    /// Returns [`NoopBackend`] when `persist` is false; otherwise a
+    /// [`JsonBackend`](bwk_persist::JsonBackend) rooted at
+    /// [`Config::account_dir`] when `persist_kind == Json`, or a
+    /// [`SqliteBackend`](bwk_persist::SqliteBackend) at
+    /// `{account_dir}/account.sqlite` when `persist_kind == Sqlite` (errors
+    /// if the `sqlite` feature is off).
+    pub fn build_backend(&self) -> Result<Arc<dyn PersistenceBackend>, persist::PersistError> {
+        let dir = self.account_dir();
+        persist::build_backend(self.persist.then_some(self.persist_kind), dir)
     }
     /// Allow to disable persistance of data, useful for tests
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
+    }
+
+    /// Select the on-disk persistence backend (JSON default, or SQLite).
+    ///
+    /// Under [`PersistenceKind::Sqlite`], signer material (mnemonic / any
+    /// private key) is never written to disk — not to `config.json`, not to
+    /// the SQLite file, not to `.signers`. See [`bwk_persist`] for the
+    /// full rule. Callers must re-supply the seed on the next run.
+    pub fn with_persist_kind(mut self, kind: PersistenceKind) -> Self {
+        self.persist_kind = kind;
+        self
+    }
+
+    /// Is this config configured to keep signer material out of on-disk
+    /// writes?
+    pub fn excludes_signer_data(&self) -> bool {
+        matches!(self.persist_kind, PersistenceKind::Sqlite)
     }
 
     /// Returns the Electrum URL as a string.
@@ -184,15 +226,24 @@ impl Config {
         self.offline.unwrap_or(false)
     }
     /// Saves the configuration to a file.
-    pub fn to_file(&self) {
+    ///
+    /// Under [`PersistenceKind::Sqlite`], the on-disk view strips the
+    /// mnemonic — callers must re-supply it on the next run.
+    pub fn persist(&self) {
         let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
         maybe_create_dir(&path);
         path.push(CONFIG_FILENAME);
 
-        log::warn!("Config::to_file() {:?}", path);
+        log::warn!("Config::persist() {:?}", path);
 
         let mut file = File::create(path).unwrap();
-        let content = serde_json::to_string_pretty(&self).unwrap();
+        let content = if self.excludes_signer_data() {
+            let mut stripped = self.clone();
+            stripped.mnemonic = None;
+            serde_json::to_string_pretty(&stripped).unwrap()
+        } else {
+            serde_json::to_string_pretty(&self).unwrap()
+        };
         file.write_all(content.as_bytes()).unwrap();
     }
 
@@ -277,98 +328,49 @@ impl Config {
         conf
     }
 
-    /// Returns the path to the transactions file for the current account.
-    pub fn transactions_path(&self) -> PathBuf {
-        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
-        path.push("transactions.json");
-        path
-    }
-
-    /// Returns the path to the statuses file for the current account.
-    pub fn statuses_path(&self) -> PathBuf {
-        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
-        path.push("statuses.json");
-        path
-    }
-
-    /// Returns the path to the tip file for the current account.
-    pub fn tip_path(&self) -> PathBuf {
-        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
-        path.push("tip.json");
-        path
-    }
-
-    /// Persists the tip information to a file for the current account.
+    /// Persists the tip information through the given backend.
     ///
-    /// # Arguments
-    ///
-    /// * `receive` - The amount to receive.
-    /// * `change` - The amount of change.
-    pub fn persist_tip(&self, receive: u32, change: u32) {
-        if !self.persist {
+    /// Writes two rows under the `account` store: `receive_index` and
+    /// `change_index`, each holding the JSON-encoded `u32`.
+    pub fn persist_tip(backend: &dyn PersistenceBackend, receive: u32, change: u32) {
+        let enc = |label: &str, v: u32| match serde_json::to_vec(&v) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                log::error!("persist_tip encode {label}: {e}");
+                None
+            }
+        };
+        let recv_bytes = match enc("receive_index", receive) {
+            Some(b) => b,
+            None => return,
+        };
+        let chg_bytes = match enc("change_index", change) {
+            Some(b) => b,
+            None => return,
+        };
+        if let Err(e) =
+            backend.put_row(bwk_persist::ACCOUNT_STORE_KEY, TIP_RECEIVE_ROW, &recv_bytes)
+        {
+            log::error!("persist_tip put receive_index: {e}");
             return;
         }
-        let file = File::create(self.tip_path());
-        match file {
-            Ok(mut file) => {
-                let tip = Tip { receive, change };
-                let content = serde_json::to_string_pretty(&tip).expect("cannot fail");
-                let _ = file.write(content.as_bytes());
-            }
-            Err(e) => {
-                log::error!("Config::persist_tip() fail to open file: {e}");
-            }
+        if let Err(e) = backend.put_row(bwk_persist::ACCOUNT_STORE_KEY, TIP_CHANGE_ROW, &chg_bytes)
+        {
+            log::error!("persist_tip put change_index: {e}");
         }
     }
 
-    /// Retrieves the tip information from the tip file for the current account.
-    ///
-    /// # Returns
-    ///
-    /// A `Tip` instance containing the tip information.
-    pub fn tip_from_file(&self) -> Tip {
-        if let Ok(mut file) = File::open(self.tip_path()) {
-            let mut content = String::new();
-            let _ = file.read_to_string(&mut content);
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Default::default()
-        }
-    }
-
-    /// Persists the statuses information to a file for the current account.
-    ///
-    /// # Arguments
-    ///
-    /// * `statuses` - A reference to a `BTreeMap` containing the statuses information.
-    pub fn persist_statuses(&self, statuses: &BTreeMap<ScriptBuf, (Option<String>, u32, u32)>) {
-        if !self.persist {
-            return;
-        }
-        let file = File::create(self.statuses_path());
-        match file {
-            Ok(mut file) => {
-                let content = serde_json::to_string_pretty(statuses).expect("cannot fail");
-                let _ = file.write(content.as_bytes());
+    /// Retrieves the tip information through the given backend.
+    pub fn tip_from_backend(backend: &dyn PersistenceBackend) -> Tip {
+        let read = |row: &str| -> u32 {
+            match backend.get_row(bwk_persist::ACCOUNT_STORE_KEY, row) {
+                Ok(Some(bytes)) => serde_json::from_slice::<u32>(&bytes).unwrap_or_default(),
+                _ => 0,
             }
-            Err(e) => {
-                log::error!("Config::statuses() fail to open file: {e}");
-            }
-        }
-    }
-
-    /// Retrieves the statuses information from the statuses file for the current account.
-    ///
-    /// # Returns
-    ///
-    /// A `BTreeMap` containing the statuses information.
-    pub fn statuses_from_file(&self) -> BTreeMap<ScriptBuf, (Option<String>, u32, u32)> {
-        if let Ok(mut file) = File::open(self.statuses_path()) {
-            let mut content = String::new();
-            let _ = file.read_to_string(&mut content);
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Default::default()
+        };
+        Tip {
+            receive: read(TIP_RECEIVE_ROW),
+            change: read(TIP_CHANGE_ROW),
         }
     }
 }
@@ -411,12 +413,67 @@ pub mod tests {
             true,
         )
         .unwrap();
-        cfg.to_file();
+        cfg.persist();
         let mut path = path.to_path_buf();
         path.push(dir_name);
         path.push("my_account");
         let cfg2 = Config::from_file(path);
         assert_eq!(cfg.account, cfg2.account);
         assert_eq!(cfg2.account, "my_account")
+    }
+
+    #[test]
+    fn persist_under_sqlite_strips_mnemonic() {
+        let temp = temp_dir::TempDir::new().unwrap();
+        let path = temp.child("storage");
+        let unique = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
+        let mut cfg = Config::new(
+            Some(unique.clone()),
+            "alice".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path.clone(),
+            "wallet",
+            true,
+        )
+        .unwrap();
+        cfg.persist_kind = PersistenceKind::Sqlite;
+        cfg.persist();
+
+        let on_disk = std::fs::read_to_string(
+            Config::path(path.clone(), "wallet", "alice".to_string()).join(CONFIG_FILENAME),
+        )
+        .expect("config.json present");
+        assert!(
+            !on_disk.contains(&unique),
+            "mnemonic must not appear in config.json under SQLite mode: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn persist_under_json_preserves_mnemonic() {
+        let temp = temp_dir::TempDir::new().unwrap();
+        let path = temp.child("storage");
+        let unique = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
+        let cfg = Config::new(
+            Some(unique.clone()),
+            "alice".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path.clone(),
+            "wallet",
+            true,
+        )
+        .unwrap();
+        cfg.persist();
+
+        let on_disk = std::fs::read_to_string(
+            Config::path(path.clone(), "wallet", "alice".to_string()).join(CONFIG_FILENAME),
+        )
+        .expect("config.json present");
+        assert!(
+            on_disk.contains(&unique),
+            "mnemonic must appear in config.json under JSON mode (default)"
+        );
     }
 }
