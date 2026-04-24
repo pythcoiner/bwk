@@ -4,6 +4,7 @@ pub mod coin_store;
 pub mod config;
 pub mod label_store;
 pub mod log;
+pub mod profile;
 pub mod tx_store;
 
 #[cfg(feature = "sp")]

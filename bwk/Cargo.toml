@@ -19,6 +19,7 @@ bwk-electrum.workspace = true
 bwk-backoff.workspace = true
 bwk-keys.workspace = true
 bwk-descriptor.workspace = true
+bwk-persist.workspace = true
 bwk-sign.workspace = true
 bwk-utils.workspace = true
 bwk-tx.workspace = true

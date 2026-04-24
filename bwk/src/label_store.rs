@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, Ord, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialOrd, Ord, Eq, PartialEq, Hash)]
 pub enum LabelKey {
     OutPoint(bitcoin::OutPoint),
     Transaction(bitcoin::Txid),

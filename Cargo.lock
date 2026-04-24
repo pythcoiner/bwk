@@ -450,6 +450,7 @@ dependencies = [
  "bwk-descriptor",
  "bwk-electrum",
  "bwk-keys",
+ "bwk-persist",
  "bwk-sign",
  "bwk-tx",
  "bwk-utils",
