@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 use crate::{PersistError, KNOWN_STORES};
 
+mod noop;
+pub use noop::NoopBackend;
+
 /// Trait abstracting where a store's rows live.
 ///
 /// Every store is a set of `(key, value)` rows. `value` is always

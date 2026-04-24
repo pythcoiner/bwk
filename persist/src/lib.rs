@@ -36,7 +36,7 @@
 
 pub mod backend;
 
-pub use backend::PersistenceBackend;
+pub use backend::{NoopBackend, PersistenceBackend};
 
 /// Monotonic integer stamped into every persistence medium by the
 /// running binary.
