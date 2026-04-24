@@ -7,9 +7,12 @@ mod account;
 mod coin_store;
 mod config;
 mod label_store;
+pub mod profile;
 pub mod recipient;
 mod scan_state;
 mod tx_store;
+
+pub use profile::{SpRamProfile, SpStorageProfile};
 
 // Internal types
 pub use account::{
