@@ -20,6 +20,7 @@ use crate::{
     address_store::{AddressEntry, AddressStatus, AddressStore, AddressTip},
     config::Config,
     label_store::{LabelKey, LabelStore},
+    profile::{DefaultBackend, RamProfile, StorageProfile},
     tx_store::{InputMetadata, OutputMetadata, TxEntry, TxStore},
 };
 
@@ -68,15 +69,17 @@ impl From<TxEntry> for Payment {
     }
 }
 
-pub struct CoinStoreSource(Arc<Mutex<CoinStore>>);
+pub struct CoinStoreSource<P: StorageProfile = RamProfile<DefaultBackend>>(
+    Arc<Mutex<CoinStore<P>>>,
+);
 
-impl CoinStoreSource {
-    pub fn new(store: Arc<Mutex<CoinStore>>) -> Self {
+impl<P: StorageProfile> CoinStoreSource<P> {
+    pub fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
         Self(store)
     }
 }
 
-impl CoinSource for CoinStoreSource {
+impl<P: StorageProfile> CoinSource for CoinStoreSource<P> {
     fn spendable_coins(&self) -> Vec<Coin> {
         self.0
             .lock()
@@ -95,7 +98,7 @@ impl CoinSource for CoinStoreSource {
 /// TxStore update and acts as a cache for coins. It maintains mappings
 /// of outpoints to coin entries and tracks the history of script public
 /// keys (SPKs).
-pub struct CoinStore {
+pub struct CoinStore<P: StorageProfile = RamProfile<DefaultBackend>> {
     store: BTreeMap<OutPoint, CoinEntry>,
     label_store: Arc<Mutex<LabelStore<P>>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
@@ -187,19 +190,8 @@ impl SpkHistory {
     }
 }
 
-impl CoinStore {
+impl<P: StorageProfile> CoinStore<P> {
     /// Creates a new instance of `CoinStore`.
-    ///
-    /// # Parameters
-    /// - `network`: The Bitcoin network to use.
-    /// - `mnemonic`: The mnemonic phrase for generating keys.
-    /// - `notification`: Channel for sending notifications about updates.
-    /// - `recv_tip`: Initial index for receiving address generation.
-    /// - `change_tip`: Initial index for change address generation.
-    /// - `look_ahead`: Number of addresses to generate ahead of the current tip.
-    ///
-    /// # Returns
-    /// A new instance of `CoinStore`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         network: bitcoin::Network,
