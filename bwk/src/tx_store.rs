@@ -1,72 +1,134 @@
 use miniscript::bitcoin::{self, Txid};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::BTreeMap,
-    fmt::Debug,
-    fs::File,
-    io::{Read, Write},
-    path::PathBuf,
+use std::{collections::BTreeMap, fmt::Debug, str::FromStr, sync::Arc};
+
+use bwk_persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
+
+use crate::{
+    coin_store::Update,
+    profile::{DefaultBackend, RamProfile, StorageProfile},
 };
 
-use crate::{coin_store::Update, config::maybe_create_dir};
+/// Logical store name used by [`PersistenceBackend`] implementations for
+/// the bwk transaction store.
+pub const STORE_KEY: &str = bwk_persist::TRANSACTIONS_STORE_KEY;
 
-#[derive(Debug)]
-/// A structure to store Bitcoin transactions indexed by their transaction IDs.
-pub struct TxStore {
-    store: BTreeMap<Txid, TxEntry>,
-    path: Option<PathBuf>,
-    persist: bool,
+pub fn encode_txid(k: &Txid) -> String {
+    k.to_string()
+}
+pub fn decode_txid(s: &str) -> Result<Txid, PersistError> {
+    Txid::from_str(s).map_err(|e| PersistError::Serde(format!("bad txid pk {s:?}: {e}")))
+}
+pub fn encode_entry(v: &TxEntry) -> Result<Vec<u8>, PersistError> {
+    serde_json::to_vec(v).map_err(|e| PersistError::Serde(format!("encode TxEntry: {e}")))
+}
+pub fn decode_entry(bytes: &[u8]) -> Result<TxEntry, PersistError> {
+    serde_json::from_slice(bytes).map_err(|e| PersistError::Serde(format!("decode TxEntry: {e}")))
 }
 
-impl TxStore {
-    /// Creates a new `TxStore` instance.
-    ///
-    /// # Parameters
-    /// - `store`: A BTreeMap containing the transactions indexed by their Txid.
-    /// - `path`: An optional path to a file where the store can be persisted.
-    pub fn new(store: BTreeMap<Txid, TxEntry>, path: Option<PathBuf>) -> Self {
+/// A structure to store Bitcoin transactions indexed by their txids.
+///
+/// Generic over any [`StorageProfile`]: the wrapper picks up the
+/// profile's `TxStore` slot, so today's RAM-backed default is
+/// [`RamStore`] via [`RamProfile`] but any other profile plugs in
+/// without touching this wrapper or its callers.
+pub struct TxStore<P: StorageProfile = RamProfile<DefaultBackend>> {
+    store: P::TxStore,
+}
+
+impl<P: StorageProfile> Debug for TxStore<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxStore")
+            .field("len", &self.store.len().ok())
+            .finish()
+    }
+}
+
+impl TxStore<RamProfile<DefaultBackend>> {
+    /// Creates a `TxStore` with no persistence (in-memory only).
+    pub fn new() -> Self {
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
         Self {
-            store,
-            path,
-            persist: true,
+            store: RamStore::empty(backend, STORE_KEY, encode_txid, encode_entry),
         }
     }
 
+    /// Creates a `TxStore` that persists through the given backend and
+    /// eagerly loads any existing rows from it.
+    pub fn with_backend(
+        backend: Arc<dyn PersistenceBackend>,
+        store_key: &'static str,
+    ) -> Result<Self, PersistError> {
+        Ok(Self {
+            store: RamStore::open(
+                backend,
+                store_key,
+                encode_txid,
+                decode_txid,
+                encode_entry,
+                decode_entry,
+            )?,
+        })
+    }
+}
+
+impl Default for TxStore<RamProfile<DefaultBackend>> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<P: StorageProfile> TxStore<P> {
+    /// Wrap any `P::TxStore` impl produced by the profile.
+    pub fn from_store(store: P::TxStore) -> Self {
+        Self { store }
+    }
+
+    /// Returns every transaction entry as an owned `Vec`, key-ordered.
     pub fn transactions(&self) -> Vec<TxEntry> {
-        self.store.values().cloned().collect()
+        self.store
+            .values()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default()
     }
 
-    pub fn get(&self, txid: &Txid) -> Option<&TxEntry> {
-        self.store.get(txid)
+    /// Fetch a cloned entry by txid. `None` if absent.
+    pub fn get(&self, txid: &Txid) -> Option<TxEntry> {
+        self.store.get(txid).ok().flatten()
     }
 
-    pub fn get_mut(&mut self, txid: &Txid) -> Option<&mut TxEntry> {
-        self.store.get_mut(txid)
-    }
-
+    /// Number of transactions in the store.
     #[allow(clippy::len_without_is_empty)]
-    /// Returns the number of transactions in the store.
     pub fn len(&self) -> usize {
-        self.store.len()
+        self.store.len().unwrap_or(0)
     }
 
-    /// Returns a reference to the inner BTreeMap of transactions.
-    pub fn inner(&self) -> &BTreeMap<Txid, TxEntry> {
-        &self.store
+    /// Iterate `(Txid, TxEntry)` pairs, key-ordered.
+    pub fn iter(&self) -> Vec<(Txid, TxEntry)> {
+        self.store
+            .iter()
+            .ok()
+            .map(|it| it.collect())
+            .unwrap_or_default()
     }
 
-    /// Inserts a vector of updates into the transaction store.
-    ///
-    /// # Parameters
-    /// - `updates`: A vector of `Update` instances containing transactions to insert.
+    /// Inserts updates (only txids not already in the store).
     pub fn insert_updates(&mut self, updates: Vec<Update>) {
-        // sanitize, all Txs must Some(_)
         updates.iter().for_each(|u| {
             assert!(u.is_complete());
         });
 
         for upd in updates {
             for (txid, tx, height) in upd.txs {
+                match self.store.contains_key(&txid) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::error!("TxStore::insert_updates contains_key: {e}");
+                        continue;
+                    }
+                }
                 let tx = tx.expect("all txs populated");
                 let weight = tx.weight().to_wu();
                 let entry = TxEntry {
@@ -78,80 +140,46 @@ impl TxStore {
                     fees: 0,
                     weight,
                 };
-                self.store.entry(txid).or_insert(entry);
+                if let Err(e) = self.store.insert(txid, entry) {
+                    log::error!("TxStore::insert_updates insert: {e}");
+                }
             }
         }
     }
 
-    /// Updates an existing transaction entry in the store.
-    ///
-    /// # Parameters
-    /// - `entry`: The `TxEntry` to update in the store.
+    /// Updates (or inserts) a transaction entry in the store.
     pub fn update(&mut self, entry: TxEntry) {
         let txid = entry.txid();
-        self.store.insert(txid, entry);
+        if let Err(e) = self.store.insert(txid, entry) {
+            log::error!("TxStore::update insert: {e}");
+        }
     }
 
-    /// Retrieves a transaction by its transaction ID.
-    ///
-    /// # Parameters
-    /// - `txid`: The transaction ID of the transaction to retrieve.
-    ///
-    /// # Returns
-    /// An `Option` containing the transaction if found, or `None` if not.
+    /// Retrieves the underlying Bitcoin transaction for a given txid.
     pub fn inner_get(&self, txid: &Txid) -> Option<bitcoin::Transaction> {
-        self.store.get(txid).map(|e| e.tx.clone())
+        self.store.get(txid).ok().flatten().map(|e| e.tx)
     }
 
     /// Removes a transaction from the store by its transaction ID.
-    ///
-    /// # Parameters
-    /// - `txid`: The transaction ID of the transaction to remove.
-    pub fn remove(&mut self, txid: &bitcoin::Txid) {
-        self.store.remove(txid);
+    pub fn remove(&mut self, txid: &Txid) {
+        if let Err(e) = self.store.remove(txid) {
+            log::error!("TxStore::remove: {e}");
+        }
     }
 
     /// Updates the height of a transaction in the store.
-    ///
-    /// # Parameters
-    /// - `txid`: The transaction ID of the transaction to update.
-    /// - `height`: The new height to set, or `None` to clear the height.
-    pub fn update_height(&mut self, txid: &bitcoin::Txid, height: Option<u64>) {
-        self.store.get_mut(txid).expect("is present").height = height;
-    }
-
-    /// Loads the transaction store from a file.
-    ///
-    /// # Parameters
-    /// - `path`: The path to the file to load the transactions from.
-    pub fn store_from_file(path: PathBuf) -> BTreeMap<Txid, TxEntry> {
-        let file = File::open(path);
-        if let Ok(mut file) = file {
-            let mut content = String::new();
-            let _ = file.read_to_string(&mut content);
-            serde_json::from_str(&content).unwrap_or_default()
-        } else {
-            Default::default()
+    pub fn update_height(&mut self, txid: &Txid, height: Option<u64>) {
+        match self.store.modify(txid, |e| e.height = height) {
+            Ok(true) => {}
+            Ok(false) => panic!("update_height on a missing txid"),
+            Err(e) => log::error!("TxStore::update_height: {e}"),
         }
     }
 
-    /// Allow to disable persistance of data, useful for tests
-    pub fn enable_persist(mut self, persist: bool) -> Self {
-        self.persist = persist;
-        self
-    }
-
-    /// Persists the transaction store to a file.
-    pub fn persist(&self) {
-        if !self.persist {
-            return;
-        }
-        if let Some(path) = &self.path {
-            let parent = path.parent().expect("has a parent").to_path_buf();
-            maybe_create_dir(&parent);
-            let mut file = File::create(path.clone()).unwrap();
-            let content = serde_json::to_string_pretty(&self.store).unwrap();
-            let _ = file.write(content.as_bytes());
+    /// Persists pending changes through the configured backend.
+    pub fn persist(&mut self) {
+        if let Err(e) = self.store.flush() {
+            log::error!("TxStore::persist() flush: {e}");
         }
     }
 }
@@ -201,24 +229,32 @@ impl Debug for TxEntry {
 }
 
 impl TxEntry {
-    /// Returns the transaction ID of the transaction entry.
     pub fn txid(&self) -> Txid {
         self.tx.compute_txid()
     }
-    /// Returns the height of the transaction in the blockchain.
     pub fn height(&self) -> Option<u64> {
         self.height
     }
-    /// Returns a reference to the underlying Bitcoin transaction.
+    pub fn set_height(&mut self, height: Option<u64>) {
+        self.height = height;
+    }
     pub fn tx(&self) -> &bitcoin::Transaction {
         &self.tx
     }
-    /// Returns the Merkle proof associated with the transaction entry.
-    ///
-    /// # Returns
-    /// A vector of byte vectors representing the Merkle proof.
     pub fn merkle(&self) -> Vec<Vec<u8>> {
         self.merkle.clone()
+    }
+    pub fn set_merkle(&mut self, merkle: Vec<Vec<u8>>) {
+        self.merkle = merkle;
+    }
+    pub fn fees(&self) -> u64 {
+        self.fees
+    }
+    pub fn set_fees(&mut self, fees: u64) {
+        self.fees = fees;
+    }
+    pub fn weight(&self) -> u64 {
+        self.weight
     }
 
     pub fn is_complete(&self) -> bool {

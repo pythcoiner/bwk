@@ -100,7 +100,7 @@ pub struct CoinStore {
     label_store: Arc<Mutex<LabelStore>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
     address_store: Arc<Mutex<AddressStore>>,
-    tx_store: TxStore,
+    tx_store: TxStore<P>,
     spk_history: BTreeMap<ScriptBuf, SpkHistory>,
     updates: Vec<Update>,
     derivator: SpkDerivator,
@@ -208,7 +208,7 @@ impl CoinStore {
         recv_tip: u32,
         change_tip: u32,
         look_ahead: u32,
-        tx_store: TxStore,
+        tx_store: TxStore<P>,
         label_store: Arc<Mutex<LabelStore>>,
         config: Config,
     ) -> Self {
@@ -507,7 +507,7 @@ impl CoinStore {
         let satisfaction = max_input_satisfaction_size(&descriptor);
 
         // list all received coins
-        for entry in tx_store.inner().values() {
+        for (_, entry) in tx_store.iter() {
             let tx = entry.tx();
             let txid = tx.compute_txid();
             for (vout, txout) in tx.output.iter().enumerate() {
@@ -564,7 +564,7 @@ impl CoinStore {
             }
         }
         // list all spent coins
-        for tx_entry in tx_store.inner().values() {
+        for (_, tx_entry) in tx_store.iter() {
             for inp in &tx_entry.tx().input {
                 coins.entry(inp.previous_output).and_modify(|e| {
                     e.coin.status = CoinStatus::Spent;
@@ -685,8 +685,8 @@ impl CoinStore {
                 };
                 tx.inputs.insert(i, input);
             }
-            // Update the store
-            *self.tx_store.get_mut(&txid).expect("exists") = tx;
+            // Update the store (replace the entry entirely)
+            self.tx_store.update(tx);
         }
     }
 
