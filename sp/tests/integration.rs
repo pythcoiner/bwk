@@ -23,7 +23,9 @@ use common::{
     test_owned_output, wait_for_sync_and_index, MockBackend, MockBlock, TempDir,
 };
 
-use bwk::persist::{JsonBackend, PersistenceBackend, COINS_STORE_KEY, TXS_STORE_KEY};
+use bwk::persist::{
+    JsonBackend, PersistenceBackend, COINS_STORE_KEY, LABELS_STORE_KEY, TXS_STORE_KEY,
+};
 use bwk_sp::{Config, SpCoinStore, SpLabelStore, SpTxStore};
 
 // Store Integration Tests
@@ -41,8 +43,10 @@ fn test_stores_independent_persistence() {
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
+        let label_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
         let mut label_store =
-            SpLabelStore::with_path(dir.path().to_path_buf()).enable_persist(true);
+            SpLabelStore::with_backend(label_backend, LABELS_STORE_KEY).enable_persist(true);
         label_store.set_outpoint(test_outpoint(), "test label".to_string());
         label_store.persist();
 
@@ -70,7 +74,9 @@ fn test_stores_independent_persistence() {
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_store = SpLabelStore::from_file(dir.path().to_path_buf()).expect("load labels");
+        let label_backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
+        let label_store = SpLabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
         assert_eq!(
             label_store.outpoint(&test_outpoint()),
             Some(&"test label".to_string())

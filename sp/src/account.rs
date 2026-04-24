@@ -127,7 +127,7 @@ pub struct Account {
     /// Store for owned outputs
     coin_store: Arc<Mutex<SpCoinStore<P>>>,
     /// Store for user-facing labels
-    label_store: Arc<Mutex<SpLabelStore>>,
+    label_store: Arc<Mutex<SpLabelStore<P>>>,
     /// Store for transactions
     tx_store: Arc<Mutex<SpTxStore<P>>>,
     /// Scan state tracking

@@ -6,7 +6,6 @@
 mod account;
 mod coin_store;
 mod config;
-mod label_store;
 pub mod profile;
 pub mod recipient;
 mod scan_state;
@@ -20,10 +19,10 @@ pub use account::{
 };
 pub use backend_blindbit_native_non_async::InfoResponse;
 pub use bwk;
+pub use bwk::label_store::LabelKey;
 pub use bwk::{Notification, SpNotification};
 pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError, SubAccountConfig};
-pub use label_store::{LabelKey, LabelStoreError, SpLabelStore};
 pub use scan_state::{ScanState, ScanStateError};
 pub use tx_store::{SpTxEntry, SpTxStore, TxDirection};
 

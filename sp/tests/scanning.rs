@@ -19,6 +19,7 @@ use common::{
     test_mnemonic, test_outpoint, wait_for_sync_and_index, TempDir,
 };
 
+use bwk::persist::{JsonBackend, PersistenceBackend, LABELS_STORE_KEY};
 use bwk_sp::{Config, Notification, SpLabelStore, SpNotification};
 
 //
@@ -1207,7 +1208,8 @@ fn test_label_transaction() {
         "Labels file should exist after persist"
     );
 
-    let label_store = SpLabelStore::from_file(account_dir).expect("load labels");
+    let backend: Arc<dyn PersistenceBackend> = Arc::new(JsonBackend::open(account_dir).unwrap());
+    let label_store = SpLabelStore::load_from_backend(backend, LABELS_STORE_KEY);
     assert_eq!(
         label_store.transaction(&txid),
         Some(&"groceries".to_string()),
