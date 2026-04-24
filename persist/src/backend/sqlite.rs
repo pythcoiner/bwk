@@ -32,7 +32,7 @@
 //! on first access.
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -41,7 +41,7 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::PersistenceBackend;
+use super::{lock::DirLock, PersistenceBackend};
 use crate::{PersistError, ACCOUNT_STORE_KEY, DB_VERSION, VERSION_ROW_KEY};
 
 /// Encode the current [`DB_VERSION`] as the bytes we stamp into the
@@ -63,6 +63,11 @@ fn decode_version(bytes: &[u8]) -> Result<u32, PersistError> {
 
 /// SQLite-backed persistence for a single account file.
 pub struct SqliteBackend {
+    /// Advisory lock on `{parent}/.lock` where `{parent}` is the
+    /// directory holding the `.sqlite` file. Kept consistent with
+    /// `JsonBackend`'s lock location so the same account dir can't be
+    /// opened by both a JSON and a SQLite backend at once either.
+    _lock: DirLock,
     conn: Mutex<Connection>,
     /// `true` once the `account.version` row has been observed to equal
     /// [`DB_VERSION`] — either it was already stamped by a previous
@@ -81,6 +86,15 @@ impl std::fmt::Debug for SqliteBackend {
 impl SqliteBackend {
     /// Open (or create) the SQLite database at `path`.
     ///
+    /// Takes an exclusive advisory lock on `{parent}/.lock` before
+    /// opening the SQLite connection, so a second opener on the same
+    /// account directory fails fast with
+    /// [`PersistError::AlreadyOpen`]. SQLite's own WAL locking still
+    /// handles byte-level concurrency between threads inside this
+    /// process; the DirLock is about process-level ownership of the
+    /// whole account dir (including the stamped version row and the
+    /// wallet invariants downstream of it).
+    ///
     /// Ensures the `account` table exists and runs the DB version
     /// guard: refuses files whose stamped version is greater than
     /// [`DB_VERSION`]. Fresh files are NOT stamped at open time — the
@@ -88,11 +102,10 @@ impl SqliteBackend {
     /// op (see [`Self::stamp_version_if_needed`]). This keeps an
     /// open-but-never-written DB usable by older binaries.
     pub fn open(path: PathBuf) -> Result<Self, PersistError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                PersistError::Io(format!("create_dir_all {}: {e}", parent.display()))
-            })?;
-        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|e| PersistError::Io(format!("create_dir_all {}: {e}", parent.display())))?;
+        let lock = DirLock::acquire(parent)?;
         let conn = Connection::open(&path)
             .map_err(|e| PersistError::Sqlite(format!("open {}: {e}", path.display())))?;
         // Enable Write-Ahead Logging so the background scanner can persist
@@ -108,6 +121,7 @@ impl SqliteBackend {
         create_store_table_maybe(&conn, ACCOUNT_STORE_KEY)?;
         let existing = check_version(&conn)?;
         Ok(Self {
+            _lock: lock,
             conn: Mutex::new(conn),
             // If the on-disk version already matches DB_VERSION, skip
             // the stamp put on every subsequent mutating op.
@@ -547,5 +561,29 @@ mod tests {
                 other => panic!("expected UnknownStore for {bad:?}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn second_open_on_same_dir_returns_already_open() {
+        let d = temp_dir::TempDir::new().unwrap();
+        let _held = open_in_dir(&d);
+        match SqliteBackend::open(d.path().join("account.sqlite")) {
+            Err(PersistError::AlreadyOpen { path }) => {
+                assert_eq!(path, d.path().join(".lock"));
+            }
+            other => panic!("expected AlreadyOpen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reopen_after_drop_succeeds() {
+        let d = temp_dir::TempDir::new().unwrap();
+        let path = d.path().join("account.sqlite");
+        {
+            let _b = SqliteBackend::open(path.clone()).unwrap();
+        } // <- lock dropped here
+          // Second open on the same dir must succeed once the first
+          // has released the lock.
+        let _b2 = SqliteBackend::open(path).expect("reopen");
     }
 }
