@@ -7,6 +7,7 @@ members = [
     "electrum",
     "backoff",
     "keys", "utils", "sign", "descriptor", "tx",
+    "persist",
     "p2p",
     "hwi", "hwi/cli",
     "hwi/ledger-bitcoin-client", "hwi/ledger-transport-hidapi", "hwi/bitbox-api",
@@ -61,6 +62,7 @@ bwk-keys = { path = "keys" }
 bwk-tx = { path = "tx" }
 bwk-sign = { path = "sign" }
 bwk-descriptor = { path = "descriptor" }
+bwk-persist = { path = "persist" }
 bwk-utils = { path = "utils" }
 bwk-p2p = { path = "p2p" }
 bwk = { path = "bwk" }

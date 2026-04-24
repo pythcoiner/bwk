@@ -541,6 +541,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bwk-persist"
+version = "0.0.1"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "temp-dir",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bwk-sign"
 version = "0.0.1"
 dependencies = [
