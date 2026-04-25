@@ -435,6 +435,12 @@ impl<P: StorageProfile> AddressStore<P> {
         self.store.contains_key(spk)
     }
 
+    /// Snapshot of every entry currently in the store. Cloned, so
+    /// callers don't hold a borrow on the underlying map.
+    pub fn entries(&self) -> Vec<AddressEntry> {
+        self.store.values().cloned().collect()
+    }
+
     pub fn get_generated_addresses(
         &self,
     ) -> (

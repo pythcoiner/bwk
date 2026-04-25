@@ -1163,6 +1163,94 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();
     }
+
+    /// Aggregated view of every address this wallet owns, across
+    /// every BIP32 sub-account plus the SP-derived taproot spks the
+    /// SP coin store has seen. Each entry is tagged with the name
+    /// of the account it belongs to (BIP32 sub-account name, or
+    /// this SP account's name for SP-derived spks). Useful to:
+    ///   - list all owned addresses in a UI;
+    ///   - sanity-check before exporting / sending: refuse to expose
+    ///     or self-target an address whose status is `Used` /
+    ///     `Reused`.
+    pub fn owned_addresses(&self) -> Vec<OwnedAddress> {
+        let mut out: Vec<OwnedAddress> = Vec::new();
+
+        for sub in &self.sub_accounts {
+            let name = sub.name();
+            for e in sub.address_entries() {
+                out.push(OwnedAddress {
+                    address: e.value(),
+                    account_name: name.clone(),
+                    source: AddressSource::Bip32(e.account(), e.index()),
+                    status: e.status(),
+                    funding_txids: e.funding_txids().clone(),
+                    spending_txids: e.spending_txids().clone(),
+                });
+            }
+        }
+
+        let sp_name = self.name().to_string();
+        let network = self.config.network;
+        let sp_entries = self
+            .coin_store
+            .lock()
+            .expect("poisoned")
+            .addresses_with_status();
+        for e in sp_entries {
+            let address = bitcoin::Address::from_script(&e.script, network)
+                .map(|a| a.to_string())
+                .unwrap_or_else(|_| e.script.to_hex_string());
+            // SP-derived spks have exactly one funding tx by
+            // construction (per-output tweak makes them unique). If
+            // the set is somehow empty, fall back to Unknown rather
+            // than silently dropping the entry.
+            let source = match e.funding_txids.iter().next().copied() {
+                Some(txid) => AddressSource::SilentPayment(txid),
+                None => AddressSource::Unknown,
+            };
+            out.push(OwnedAddress {
+                address,
+                account_name: sp_name.clone(),
+                source,
+                status: e.status,
+                funding_txids: e.funding_txids,
+                spending_txids: e.spending_txids,
+            });
+        }
+
+        out
+    }
+}
+
+/// Provenance of an [`OwnedAddress`].
+///
+/// SP-derived spks have exactly one funding tx by protocol design
+/// (each output's per-tweak ensures uniqueness), so
+/// [`AddressSource::SilentPayment`] carries that single funding txid.
+/// BIP32 sub-account addresses carry their keychain (receive vs
+/// change) and derivation index. [`AddressSource::Unknown`] is a
+/// defensive fallback for cases where neither shape applies.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum AddressSource {
+    SilentPayment(bitcoin::Txid),
+    Bip32(bwk_tx::coin::KeyChain, u32),
+    Unknown,
+}
+
+/// One address the wallet owns, aggregated across sub-accounts
+/// (BIP32) and the SP wallet. `account_name` identifies the
+/// originating keychain — see [`bwk::Account::name`] /
+/// [`crate::Account::name`]. `source` carries the per-spk provenance
+/// (see [`AddressSource`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnedAddress {
+    pub address: String,
+    pub account_name: String,
+    pub source: AddressSource,
+    pub status: bwk::address_store::AddressStatus,
+    pub funding_txids: std::collections::BTreeSet<bitcoin::Txid>,
+    pub spending_txids: std::collections::BTreeSet<bitcoin::Txid>,
 }
 
 impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
@@ -1641,5 +1729,137 @@ mod tests {
         }
         let notified = drain(&receiver);
         assert_eq!(notified, vec![500, 600, 700]);
+    }
+
+    // -----------------------------------------------------------------
+    // owned_addresses — aggregate view across BIP32 subs + SP
+    // -----------------------------------------------------------------
+
+    fn build_offline_segwit_sub(name: &str) -> bwk::Account {
+        use bip39::Mnemonic;
+        use bwk_sign::bwk_descriptor;
+        use bwk_sign::HotSigner;
+        use miniscript::bitcoin::bip32::ChildNumber;
+
+        let network = bitcoin::Network::Regtest;
+        let mnemo = Mnemonic::generate(12).unwrap();
+        let signer = HotSigner::new_from_mnemonics(network, &mnemo.to_string()).unwrap();
+        let path =
+            bwk_descriptor::wpkh_path(network, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let descriptor = bwk_descriptor::SpkDerivator::new_wpkh(xpub, network)
+            .unwrap()
+            .descriptor();
+        bwk::Account::new(bwk::Config {
+            data_dir: std::path::PathBuf::new(),
+            dir_name: "",
+            account: name.to_string(),
+            electrum_url: None,
+            electrum_port: None,
+            offline: Some(true),
+            network,
+            look_ahead: 5,
+            mnemonic: Some(mnemo.to_string()),
+            descriptor,
+            persist: false,
+            skip_labels: true,
+            persist_kind: bwk::persist::PersistenceKind::default(),
+        })
+    }
+
+    /// Build a syntactically valid p2tr scriptPubKey from a fixed
+    /// 32-byte x-only key, suitable for seeding `SpCoinStore` in
+    /// tests where we don't actually scan a chain.
+    fn fake_tr_spk(seed: u8) -> bitcoin::ScriptBuf {
+        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[seed; 32]).unwrap();
+        let (xonly, _parity) = sk.public_key(&secp).x_only_public_key();
+        let tweaked = bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(xonly);
+        bitcoin::Address::p2tr_tweaked(tweaked, bitcoin::Network::Regtest).script_pubkey()
+    }
+
+    fn fake_sp_owned(spk: bitcoin::ScriptBuf, seed: u8) -> OwnedOutput {
+        OwnedOutput {
+            blockheight: Height::from_consensus(100).unwrap(),
+            tweak: [seed; 32],
+            amount: bitcoin::Amount::from_sat(10_000),
+            script: spk,
+            label: None,
+            spend_status: spdk_core::OutputSpendStatus::Unspent,
+        }
+    }
+
+    #[test]
+    fn owned_addresses_empty_for_fresh_account() {
+        let account = Account::new(test_config()).expect("Account::new");
+        // No sub-accounts, no SP coins, nothing to aggregate.
+        assert!(account.owned_addresses().is_empty());
+    }
+
+    #[test]
+    fn owned_addresses_includes_bip32_sub_accounts() {
+        let mut account = Account::new(test_config()).expect("Account::new");
+        let sub_name = "sub-segwit-0".to_string();
+        account.add_sub_account(build_offline_segwit_sub(&sub_name));
+
+        let owned = account.owned_addresses();
+        // Sub-accounts populate look_ahead receive + look_ahead change
+        // entries on construction (via CoinStore::generate). At least
+        // one of them must show up tagged with the sub's name.
+        assert!(
+            !owned.is_empty(),
+            "sub-account address entries should be visible in owned_addresses"
+        );
+        assert!(
+            owned.iter().all(|o| o.account_name == sub_name),
+            "every aggregated entry should carry the sub-account's name"
+        );
+        // BIP32-derived entries carry their keychain + index via
+        // AddressSource::Bip32; SP-only variants must not appear.
+        assert!(
+            owned
+                .iter()
+                .all(|o| matches!(o.source, AddressSource::Bip32(_, _))),
+            "every aggregated entry should carry AddressSource::Bip32"
+        );
+        // No SP coins were inserted, so nothing should be tagged with
+        // the SP account's own name.
+        assert!(owned.iter().all(|o| o.account_name != account.name()));
+    }
+
+    #[test]
+    fn owned_addresses_includes_sp_received() {
+        let account = Account::new(test_config()).expect("Account::new");
+        let spk = fake_tr_spk(7);
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xAB; 32]),
+            vout: 0,
+        };
+        account
+            .coin_store
+            .lock()
+            .expect("poisoned")
+            .insert(outpoint, fake_sp_owned(spk.clone(), 7));
+
+        let owned = account.owned_addresses();
+        assert_eq!(owned.len(), 1, "only the SP coin should show up");
+        let entry = &owned[0];
+        assert_eq!(entry.account_name, account.name());
+        assert_eq!(entry.status, bwk::address_store::AddressStatus::Used);
+        assert_eq!(entry.funding_txids.len(), 1);
+        assert!(entry.funding_txids.contains(&outpoint.txid));
+        assert!(entry.spending_txids.is_empty());
+        // SP-derived spk: source must be SilentPayment(funding_txid).
+        match entry.source {
+            AddressSource::SilentPayment(txid) => assert_eq!(txid, outpoint.txid),
+            ref other => panic!("expected SilentPayment source, got {other:?}"),
+        }
+        // Canonical form of the spk matches what the consumer would
+        // see via Address::from_script.
+        let expected = bitcoin::Address::from_script(&spk, bitcoin::Network::Signet)
+            .unwrap()
+            .to_string();
+        assert_eq!(entry.address, expected);
     }
 }

@@ -503,6 +503,19 @@ impl<P: StorageProfile> Account<P> {
             .expect("poisoned")
             .get_generated_addresses()
     }
+
+    /// Snapshot of every address entry the account currently tracks
+    /// (receive + change, all derivation indices). Cloned, so the
+    /// caller doesn't hold any lock.
+    pub fn address_entries(&self) -> Vec<AddressEntry> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .address_store()
+            .lock()
+            .expect("poisoned")
+            .entries()
+    }
 }
 
 // Electrum specific implementation
