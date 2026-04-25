@@ -153,8 +153,16 @@ impl<P: StorageProfile> std::fmt::Debug for Account<P> {
 
 impl<P: StorageProfile> Drop for Account<P> {
     fn drop(&mut self) {
+        // Signal the Electrum listener thread to stop, then block until
+        // it has actually exited. The listener holds Arc clones of the
+        // persistence backend; without the join, the DirLock on the
+        // account directory would stay acquired past Drop and refuse a
+        // subsequent reopen.
         if let Some(stop) = self.electrum_stop.as_mut() {
             stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.tx_listener.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -1836,55 +1844,62 @@ mod integration_tests {
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let saved_config = config.clone();
-        let mut account = Account::new(config);
-        sleep(Duration::from_millis(300));
-        let mut builder = account.tx_builder();
+        // Scoped so `builder` and `account` drop in reverse
+        // declaration order at the closing brace, the tx_builder
+        // holds Arc<Mutex<CoinStore>> clones that would otherwise
+        // keep the backend (and its DirLock on the account dir)
+        // alive past account's explicit drop.
+        {
+            let mut account = Account::new(config);
+            sleep(Duration::from_millis(300));
+            let mut builder = account.tx_builder();
 
-        let mut prev_blocks = receive(&mut account, &bitcoind, 100_000_000);
-        for _ in 0..15 {
+            let mut prev_blocks = receive(&mut account, &bitcoind, 100_000_000);
+            for _ in 0..15 {
+                wait_until_timeout(
+                    || !account.spendable_coins().coins.is_empty(),
+                    (prev_blocks as u64) * 3,
+                );
+                sleep(Duration::from_millis(1000));
+                let coins = account.spendable_coins();
+                let balance = coins
+                    .coins
+                    .into_iter()
+                    .fold(0, |a, (_, c)| a + c.txout.value.to_sat());
+                assert!(balance > 1_100_000);
+                let pay: bool = random();
+                if pay {
+                    let blocks: u32 = random_range(1..5);
+                    let addr = bitcoind
+                        .client
+                        .get_new_address(None, None)
+                        .unwrap()
+                        .assume_checked();
+                    let mut psbt = builder
+                        .pay(random_range(10_000..1_000_000), addr, 1000)
+                        .unwrap();
+                    account.sign_psbt(&mut psbt);
+                    PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
+                        .unwrap();
+                    let tx = psbt.extract_tx_unchecked_fee_rate();
+                    let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+                    generate(&bitcoind, blocks);
+                    prev_blocks = blocks;
+                } else {
+                    prev_blocks = receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
+                }
+            }
             wait_until_timeout(
-                || !account.spendable_coins().coins.is_empty(),
+                || {
+                    let payments = account.payment_history();
+                    payments.len() == 15
+                },
                 (prev_blocks as u64) * 3,
             );
-            sleep(Duration::from_millis(1000));
-            let coins = account.spendable_coins();
-            let balance = coins
-                .coins
-                .into_iter()
-                .fold(0, |a, (_, c)| a + c.txout.value.to_sat());
-            assert!(balance > 1_100_000);
-            let pay: bool = random();
-            if pay {
-                let blocks: u32 = random_range(1..5);
-                let addr = bitcoind
-                    .client
-                    .get_new_address(None, None)
-                    .unwrap()
-                    .assume_checked();
-                let mut psbt = builder
-                    .pay(random_range(10_000..1_000_000), addr, 1000)
-                    .unwrap();
-                account.sign_psbt(&mut psbt);
-                PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new()).unwrap();
-                let tx = psbt.extract_tx_unchecked_fee_rate();
-                let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
-                generate(&bitcoind, blocks);
-                prev_blocks = blocks;
-            } else {
-                prev_blocks = receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
-            }
+            sleep(Duration::from_secs(3));
+            let payments = account.payment_history();
+            assert_eq!(payments.len(), 16);
         }
-        wait_until_timeout(
-            || {
-                let payments = account.payment_history();
-                payments.len() == 15
-            },
-            (prev_blocks as u64) * 3,
-        );
-        sleep(Duration::from_secs(3));
-        let payments = account.payment_history();
-        assert_eq!(payments.len(), 16);
-        drop(account);
 
         let account: Account = Account::new(saved_config);
         sleep(Duration::from_millis(300));

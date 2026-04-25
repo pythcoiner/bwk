@@ -25,7 +25,8 @@ use common::{
 
 use bwk::label_store::{LabelKey, LabelStore};
 use bwk::persist::{
-    JsonBackend, PersistenceBackend, COINS_STORE_KEY, LABELS_STORE_KEY, TXS_STORE_KEY,
+    JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
+    TXS_STORE_KEY,
 };
 use bwk_sp::{Config, SpCoinStore, SpTxStore};
 
@@ -36,26 +37,23 @@ use bwk_sp::{Config, SpCoinStore, SpTxStore};
 fn test_stores_independent_persistence() {
     let dir = TempDir::new().unwrap();
 
-    // Create and populate stores
+    // Create and populate stores. All three share one JsonBackend so the
+    // per-dir advisory lock is held exactly once.
     {
-        let coin_backend: Arc<dyn PersistenceBackend> =
+        let backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let mut coin_store = SpCoinStore::with_backend(coin_backend, COINS_STORE_KEY);
+        let mut coin_store = SpCoinStore::with_backend(backend.clone(), COINS_STORE_KEY);
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
-        let label_backend: Arc<dyn PersistenceBackend> =
-            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let mut label_store = LabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
+        let mut label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY);
         label_store.edit(
             LabelKey::OutPoint(test_outpoint()),
             Some("test label".to_string()),
         );
         label_store.persist();
 
-        let tx_backend: Arc<dyn PersistenceBackend> =
-            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let mut tx_store = SpTxStore::with_backend(tx_backend, TXS_STORE_KEY);
+        let mut tx_store = SpTxStore::with_backend(backend, TXS_STORE_KEY);
         tx_store.insert(bwk_sp::SpTxEntry {
             txid: test_outpoint().txid,
             tx: None,
@@ -69,25 +67,22 @@ fn test_stores_independent_persistence() {
         tx_store.persist();
     }
 
-    // Load and verify stores
+    // Load and verify stores from the same dir, sharing a single backend.
     {
-        let coin_backend: Arc<dyn PersistenceBackend> =
+        let backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let coin_store = SpCoinStore::load_from_backend(coin_backend, COINS_STORE_KEY);
+
+        let coin_store = SpCoinStore::load_from_backend(backend.clone(), COINS_STORE_KEY);
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_backend: Arc<dyn PersistenceBackend> =
-            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let label_store = LabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
+        let label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY);
         assert_eq!(
             label_store.outpoint(test_outpoint()),
             Some("test label".to_string())
         );
 
-        let tx_backend: Arc<dyn PersistenceBackend> =
-            Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let tx_store = SpTxStore::load_from_backend(tx_backend, TXS_STORE_KEY);
+        let tx_store = SpTxStore::load_from_backend(backend, TXS_STORE_KEY);
         assert_eq!(tx_store.transactions().len(), 1);
     }
 }
@@ -1150,13 +1145,18 @@ fn test_scan_state_consistent_after_crash() {
     // 4. Create Account with persist=true and scan some blocks
     let (mut account, config, _dir) =
         test_account_persistent_named("test-crash-recovery", &bbd.url());
-    let state_path = config.account_dir().join("account.json");
 
     // 5. Scan and persist
     account.scan_blocks(Some(1), Some(50)).unwrap();
     drop(account);
 
-    // 6. Simulate crash by corrupting/deleting the scan_state file
+    // 6. Simulate crash by corrupting/deleting the scan_state file. Ask
+    // the backend for the canonical state-store path now that the
+    // account has dropped its DirLock.
+    let state_path = {
+        let probe = JsonBackend::open(config.account_dir()).expect("open JsonBackend");
+        probe.path_for(ACCOUNT_STORE_KEY)
+    };
     if state_path.exists() {
         // Option A: Delete the file completely
         std::fs::remove_file(&state_path).expect("remove state file");
@@ -3547,9 +3547,15 @@ fn test_no_persist_on_empty_scan() {
     assert_eq!(account.balance(), 0, "Balance should be 0");
     drop(account);
 
-    // 6. Check coin file contents
+    // 6. Check coin file contents. Compute the coins-store path through
+    // the backend (the persistence layer owns the layout), then drop the
+    // probe so step 7's Account::load can reacquire the DirLock.
+    let coins_path = {
+        let probe = JsonBackend::open(account_dir.clone()).unwrap();
+        probe.path_for(COINS_STORE_KEY)
+    };
     // The coin file may be created (empty store), but should have no coins
-    if account_dir.join(SpCoinStore::FILENAME).exists() {
+    if coins_path.exists() {
         let backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(account_dir.clone()).unwrap());
         let store = SpCoinStore::load_from_backend(backend, COINS_STORE_KEY);

@@ -324,17 +324,23 @@ mod tests {
 
     #[test]
     fn ram_store_flush_only_writes_dirty_and_removed() {
-        let (mut s, d) = ram_store_on_json();
-        // First batch.
-        s.insert("a".into(), 1).unwrap();
-        s.insert("b".into(), 2).unwrap();
-        s.flush().unwrap();
+        // Scoped so `s` (and the backend inside it) drop at the
+        // closing brace, releasing the DirLock before the reopener
+        // tries to acquire it.
+        let d = {
+            let (mut s, d) = ram_store_on_json();
+            // First batch.
+            s.insert("a".into(), 1).unwrap();
+            s.insert("b".into(), 2).unwrap();
+            s.flush().unwrap();
 
-        // Mutate just one, remove another; flush again.
-        s.modify(&"a".to_string(), |v| *v = 11).unwrap();
-        s.remove(&"b".to_string()).unwrap();
-        s.insert("c".into(), 3).unwrap();
-        s.flush().unwrap();
+            // Mutate just one, remove another; flush again.
+            s.modify(&"a".to_string(), |v| *v = 11).unwrap();
+            s.remove(&"b".to_string()).unwrap();
+            s.insert("c".into(), 3).unwrap();
+            s.flush().unwrap();
+            d
+        };
 
         // Reopen via a fresh backend and check what's on disk.
         let backend = JsonBackend::open(d.path().to_path_buf()).unwrap();

@@ -16,8 +16,6 @@
 //! not a member of [`KNOWN_STORES`](crate::KNOWN_STORES), so
 //! `validate_store_name` cannot collide with it.
 
-#![allow(dead_code)] // Backend wiring lands in follow-up commits.
-
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 

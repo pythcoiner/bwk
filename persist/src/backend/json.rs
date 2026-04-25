@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::Value;
 
-use super::PersistenceBackend;
+use super::{lock::DirLock, PersistenceBackend};
 use crate::{PersistError, DB_VERSION};
 
 const VERSION_FILENAME: &str = "version";
@@ -31,6 +31,10 @@ const VERSION_FILENAME: &str = "version";
 /// JSON-on-disk persistence backend rooted at a directory.
 #[derive(Debug)]
 pub struct JsonBackend {
+    /// Advisory lock on `{dir}/.lock`, held for the lifetime of the
+    /// backend so no second process can open the same account
+    /// directory and race on the shared store files.
+    _lock: DirLock,
     dir: PathBuf,
     /// `true` once the `{dir}/version` file has been observed to equal
     /// [`DB_VERSION`] — either it was already stamped by a previous
@@ -43,6 +47,11 @@ pub struct JsonBackend {
 impl JsonBackend {
     /// Open (or initialise) a JSON backend at `dir`.
     ///
+    /// Takes an exclusive advisory lock on `{dir}/.lock` before any
+    /// read or write, so a second opener fails fast with
+    /// [`PersistError::AlreadyOpen`] instead of silently racing on the
+    /// read-merge-write sequence of each store file.
+    ///
     /// Refuses to proceed if `{dir}/version` records a version greater
     /// than [`DB_VERSION`]. A fresh directory without a version file is
     /// NOT stamped at open time — the file is written lazily by the
@@ -51,8 +60,10 @@ impl JsonBackend {
     pub fn open(dir: PathBuf) -> Result<Self, PersistError> {
         fs::create_dir_all(&dir)
             .map_err(|e| PersistError::Io(format!("create_dir_all {}: {e}", dir.display())))?;
+        let lock = DirLock::acquire(&dir)?;
         let existing = check_version(&dir)?;
         Ok(Self {
+            _lock: lock,
             dir,
             // If the on-disk version already matches DB_VERSION, skip
             // the stamp on every subsequent mutating op. Otherwise
@@ -414,5 +425,28 @@ mod tests {
             text.contains("\"amount\"") && text.contains("10000"),
             "file should contain the inlined value, got: {text}"
         );
+    }
+
+    #[test]
+    fn second_open_on_same_dir_returns_already_open() {
+        let d = tmp_dir();
+        let _held = JsonBackend::open(d.path().to_path_buf()).unwrap();
+        match JsonBackend::open(d.path().to_path_buf()) {
+            Err(PersistError::AlreadyOpen { path }) => {
+                assert_eq!(path, d.path().join(".lock"));
+            }
+            other => panic!("expected AlreadyOpen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reopen_after_drop_succeeds() {
+        let d = tmp_dir();
+        {
+            let _b = JsonBackend::open(d.path().to_path_buf()).unwrap();
+        } // <- lock dropped here
+          // Second open on the same dir must succeed once the first
+          // has released the lock.
+        let _b2 = JsonBackend::open(d.path().to_path_buf()).expect("reopen");
     }
 }

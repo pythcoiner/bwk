@@ -273,14 +273,18 @@ mod tests {
 
         let block_hash = [0x12; 32];
 
-        // Create and populate state
-        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
-        let mut state = ScanState::with_backend(300, backend);
-        state.update(350, block_hash);
-        state.persist();
+        // Scoped so `state` drops at the closing brace, releasing
+        // the DirLock before the reopener tries to acquire it.
+        {
+            let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+            let account_path = backend.path_for(persist::ACCOUNT_STORE_KEY);
+            let mut state = ScanState::with_backend(300, Arc::new(backend));
+            state.update(350, block_hash);
+            state.persist();
 
-        // Singleton fields are persisted under the `account` store.
-        assert!(temp_dir.join("account.json").exists());
+            // Singleton fields are persisted under the `account` store.
+            assert!(account_path.exists());
+        }
 
         // Load from dir
         let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
@@ -303,12 +307,15 @@ mod tests {
         let _ = fs::create_dir_all(&temp_dir);
 
         // Create state with persist disabled (NoopBackend via ScanState::new)
+        let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+        let account_path = backend.path_for(persist::ACCOUNT_STORE_KEY);
+        drop(backend);
         let mut state = ScanState::new(100);
         state.update(150, [0xAA; 32]);
         state.persist();
 
         // Account file should NOT exist (persist is a noop)
-        assert!(!temp_dir.join("account.json").exists());
+        assert!(!account_path.exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);

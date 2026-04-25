@@ -671,15 +671,18 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        // Create and populate store
-        let backend = JsonBackend::open(temp_dir.clone()).unwrap();
-        let coins_path = backend.path_for(STORE_KEY);
-        let mut store = SpCoinStore::with_backend(Arc::new(backend), STORE_KEY);
-        store.insert(test_outpoint(), test_owned_output(10000));
-        store.insert(test_outpoint_2(), test_owned_output(20000));
-        store.persist();
+        // Scoped so `store` drops at the closing brace, releasing
+        // the DirLock before the reopener tries to acquire it.
+        {
+            let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+            let coins_path = backend.path_for(STORE_KEY);
+            let mut store = SpCoinStore::with_backend(Arc::new(backend), STORE_KEY);
+            store.insert(test_outpoint(), test_owned_output(10000));
+            store.insert(test_outpoint_2(), test_owned_output(20000));
+            store.persist();
 
-        assert!(coins_path.exists());
+            assert!(coins_path.exists());
+        }
 
         // Load from dir
         let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
