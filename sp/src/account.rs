@@ -19,6 +19,7 @@ use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::taproot::Signature;
 use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
+use bwk::label_store::LabelStore;
 use miniscript::psbt::PsbtExt;
 use silentpayments::SilentPaymentAddress;
 
@@ -29,8 +30,7 @@ use spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
 use crate::{
     coin_store::{KeyedBip32Source, MergedCoinSource, SpCoinSource},
     recipient::{SpChangeRecipientProvider, SpSecretProvider},
-    CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpLabelStore, SpTxEntry,
-    SpTxStore,
+    CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpTxEntry, SpTxStore,
 };
 
 // Type Aliases
@@ -38,7 +38,7 @@ use crate::{
 /// Type alias for the tuple of stores returned by create_or_load_stores.
 type Stores = (
     Arc<Mutex<SpCoinStore>>,
-    Arc<Mutex<SpLabelStore>>,
+    Arc<Mutex<LabelStore>>,
     Arc<Mutex<SpTxStore>>,
     Arc<Mutex<ScanState>>,
 );
@@ -115,38 +115,32 @@ pub struct Payment {
 
 // Account
 
-/// Main orchestrator for a Silent Payment wallet account.
-///
-/// Ties together the SpClient, backend, and all stores. Provides methods for
-/// balance queries, scanning, transaction building, and persistence.
-pub struct Account {
-    /// Silent payment client (keys and address derivation)
+/// Main orchestrator for a Silent Payment wallet account. Generic
+/// over any [`crate::profile::SpStorageProfile`]; defaults to
+/// [`crate::profile::SpRamProfile<DefaultBackend>`].
+pub struct Account<
+    P: crate::profile::SpStorageProfile = crate::profile::SpRamProfile<
+        crate::profile::DefaultBackend,
+    >,
+> {
     client: SpClient,
-    /// Blindbit backend for blockchain data
     backend: BlindbitBackend<UreqClient>,
-    /// Store for owned outputs
     coin_store: Arc<Mutex<SpCoinStore<P>>>,
-    /// Store for user-facing labels
-    label_store: Arc<Mutex<SpLabelStore<P>>>,
-    /// Store for transactions
+    label_store: Arc<Mutex<LabelStore>>,
     tx_store: Arc<Mutex<SpTxStore<P>>>,
-    /// Scan state tracking
     scan_state: Arc<Mutex<ScanState>>,
-    /// Account configuration
     config: Config,
-    /// Channel sender for notifications
     sender: mpsc::Sender<Notification>,
-    /// Channel receiver for notifications (take once)
     receiver: Option<mpsc::Receiver<Notification>>,
-    /// Handle to the background scanner thread
     scanner_handle: Option<JoinHandle<()>>,
-    /// Flag to signal scanner to stop
     scanner_stop: Arc<AtomicBool>,
-    /// Optional embedded standard wallet accounts (segwit, taproot, etc.)
+    // Sub-accounts use the default bwk RAM profile — independent of sp's P.
     sub_accounts: Vec<bwk::Account>,
 }
 
-impl Account {
+// Constructors are tied to the default SpRamProfile because they open
+// concrete on-disk RamStore instances.
+impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     // Constructors
 
     /// Create a new Account from configuration.
@@ -174,7 +168,7 @@ impl Account {
         let client = Self::create_sp_client(&config)?;
 
         // Create backend
-        let backend = Self::create_backend(&config)?;
+        let backend = create_backend(&config)?;
 
         // Create notification channel
         let (sender, receiver) = mpsc::channel();
@@ -205,7 +199,7 @@ impl Account {
                     descriptor: sub_cfg.descriptor.clone(),
                     persist: config.persist,
                     skip_labels: true,
-                    persist_kind: bwk::persist::PersistenceKind::default(),
+                    persist_kind: config.persist_kind,
                 };
                 bwk_config.dir_name =
                     Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());
@@ -313,57 +307,40 @@ impl Account {
         }
     }
 
-    /// Create BlindbitBackend from config.
-    fn create_backend(config: &Config) -> Result<BlindbitBackend<UreqClient>, AccountError> {
-        let http_client = UreqClient::new();
-        BlindbitBackend::new(config.blindbit_url.clone(), http_client)
-            .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))
-    }
+    // (see the free `create_backend` helper below for the backend
+    // constructor — it's pure w.r.t. `P`.)
 
-    /// Create or load stores based on config.persist.
+    /// Create or load stores based on config.persist + persist_kind.
+    ///
+    /// Builds a single backend ([`bwk::persist::JsonBackend`] or
+    /// [`bwk::persist::SqliteBackend`]) from the config and threads it into
+    /// every store. JSON layout is byte-for-byte equivalent to the
+    /// pre-backend layout (one `{store}.json` file per store name).
     fn create_or_load_stores(config: &Config) -> Stores {
         let birthday = config
             .birthday_height
             .unwrap_or_else(|| config.min_birthday_height());
-        let dir = config.account_dir();
 
-        // Coin store
-        let coin_store = if config.persist && dir.join(SpCoinStore::FILENAME).exists() {
-            SpCoinStore::from_file(dir.clone())
-                .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| SpCoinStore::with_path(dir.clone()).enable_persist(true))
-        } else {
-            SpCoinStore::with_path(dir.clone()).enable_persist(config.persist)
+        let backend: Arc<dyn bwk::persist::PersistenceBackend> = match bwk::persist::build_backend(
+            config.persist.then_some(config.persist_kind),
+            config.account_dir(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!(
+                    "create_or_load_stores: failed to build persistence backend ({e}); \
+                         falling back to no-op"
+                );
+                Arc::new(bwk::persist::NoopBackend)
+            }
         };
 
-        // Label store
-        let label_store = if config.persist && dir.join(SpLabelStore::FILENAME).exists() {
-            SpLabelStore::from_file(dir.clone())
-                .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| SpLabelStore::with_path(dir.clone()).enable_persist(true))
-        } else {
-            SpLabelStore::with_path(dir.clone()).enable_persist(config.persist)
-        };
-
-        // Transaction store
-        let tx_store = if config.persist && dir.join(SpTxStore::FILENAME).exists() {
-            SpTxStore::from_file(dir.clone())
-                .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| SpTxStore::with_path(dir.clone()).enable_persist(true))
-        } else {
-            SpTxStore::with_path(dir.clone()).enable_persist(config.persist)
-        };
-
-        // Scan state
-        let scan_state = if config.persist && dir.join(ScanState::FILENAME).exists() {
-            ScanState::from_file(dir.clone())
-                .map(|s| s.enable_persist(true))
-                .unwrap_or_else(|_| {
-                    ScanState::with_path(birthday, dir.clone()).enable_persist(true)
-                })
-        } else {
-            ScanState::with_path(birthday, dir).enable_persist(config.persist)
-        };
+        let coin_store =
+            SpCoinStore::load_from_backend(backend.clone(), crate::coin_store::STORE_KEY);
+        let label_store =
+            LabelStore::load_from_backend(backend.clone(), bwk::persist::LABELS_STORE_KEY);
+        let tx_store = SpTxStore::load_from_backend(backend.clone(), crate::tx_store::STORE_KEY);
+        let scan_state = ScanState::load_from_backend(birthday, backend);
 
         (
             Arc::new(Mutex::new(coin_store)),
@@ -371,8 +348,11 @@ impl Account {
             Arc::new(Mutex::new(tx_store)),
             Arc::new(Mutex::new(scan_state)),
         )
-    } // Getters (accessors)
+    }
+}
 
+// Generic accessors and operations — available for any `P: SpStorageProfile`.
+impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Returns the account name.
     pub fn name(&self) -> &str {
         &self.config.account_name
@@ -410,11 +390,7 @@ impl Account {
 
     /// Returns a coin entry by outpoint if it exists.
     pub fn get_coin(&self, outpoint: &OutPoint) -> Option<SpCoinEntry> {
-        self.coin_store
-            .lock()
-            .expect("poisoned")
-            .get(outpoint)
-            .cloned()
+        self.coin_store.lock().expect("poisoned").get(outpoint)
     }
 
     /// Returns spendable coins and balance summary.
@@ -429,13 +405,7 @@ impl Account {
 
     /// Returns all transaction entries.
     pub fn tx_history(&self) -> Vec<SpTxEntry> {
-        self.tx_store
-            .lock()
-            .expect("poisoned")
-            .transactions()
-            .into_iter()
-            .cloned()
-            .collect()
+        self.tx_store.lock().expect("poisoned").transactions()
     }
 
     /// Returns a unified payment history combining coins and transactions.
@@ -487,7 +457,7 @@ impl Account {
                 .iter()
                 .filter_map(|(outpoint, _, _, _)| {
                     label_store
-                        .outpoint(outpoint)
+                        .outpoint(*outpoint)
                         .map(|l| (*outpoint, l.clone()))
                 })
                 .collect()
@@ -539,7 +509,7 @@ impl Account {
                 .filter(|td| td.label.is_none())
                 .filter_map(|td| {
                     label_store
-                        .transaction(&td.txid)
+                        .transaction(td.txid)
                         .map(|l| (td.txid, l.clone()))
                 })
                 .collect()
@@ -589,22 +559,16 @@ impl Account {
     /// Update the label for a coin.
     pub fn update_coin_label(&self, outpoint: OutPoint, label: String) {
         let mut store = self.label_store.lock().expect("poisoned");
-        if label.is_empty() {
-            store.remove(&LabelKey::OutPoint(outpoint));
-        } else {
-            store.set_outpoint(outpoint, label);
-        }
+        let value = (!label.is_empty()).then_some(label);
+        store.edit(LabelKey::OutPoint(outpoint), value);
         store.persist();
     }
 
     /// Update the label for a transaction.
     pub fn update_tx_label(&self, txid: Txid, label: String) {
         let mut store = self.label_store.lock().expect("poisoned");
-        if label.is_empty() {
-            store.remove(&LabelKey::Transaction(txid));
-        } else {
-            store.set_transaction(txid, label);
-        }
+        let value = (!label.is_empty()).then_some(label);
+        store.edit(LabelKey::Transaction(txid), value);
         store.persist();
     }
 
@@ -613,8 +577,7 @@ impl Account {
         self.label_store
             .lock()
             .expect("poisoned")
-            .outpoint(outpoint)
-            .cloned()
+            .outpoint(*outpoint)
     } // Scanning
 
     /// Get the current block height from the backend.
@@ -639,11 +602,11 @@ impl Account {
     pub fn set_blindbit_url(&mut self, url: String) {
         self.config.blindbit_url = url;
         // Recreate backend with new URL
-        if let Ok(backend) = Self::create_backend(&self.config) {
+        if let Ok(backend) = create_backend(&self.config) {
             self.backend = backend;
         }
         if self.config.persist {
-            self.config.to_file();
+            self.config.persist();
         }
     }
 
@@ -683,7 +646,7 @@ impl Account {
             .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-        let scan_backend = Self::create_backend(&self.config)?;
+        let scan_backend = create_backend(&self.config)?;
 
         let with_cutthrough = scan_backend
             .info()
@@ -917,7 +880,7 @@ impl Account {
             .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-        let scan_backend = Self::create_backend(&self.config)?;
+        let scan_backend = create_backend(&self.config)?;
 
         let with_cutthrough = scan_backend
             .info()
@@ -1202,7 +1165,7 @@ impl Account {
     }
 }
 
-impl Drop for Account {
+impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
     fn drop(&mut self) {
         self.stop_scan();
         self.persist();
@@ -1210,6 +1173,14 @@ impl Drop for Account {
 }
 
 // AccountUpdater - Implements Updater trait for Account
+
+/// Create a [`BlindbitBackend`] from the config's URL. Pure w.r.t.
+/// storage strategy — shared across all generic impls.
+fn create_backend(config: &Config) -> Result<BlindbitBackend<UreqClient>, AccountError> {
+    let http_client = UreqClient::new();
+    BlindbitBackend::new(config.blindbit_url.clone(), http_client)
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))
+}
 
 /// Internal struct that implements the Updater trait for scanning.
 struct AccountUpdater<P: crate::profile::SpStorageProfile> {

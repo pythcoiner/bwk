@@ -384,8 +384,12 @@ fn batch_derive_sp_scripts(
 /// Holds a cloned [`SpClient`] and a shared coin store reference to look up
 /// `OwnedOutput` tweaks for selected inputs. Also stores master xprivs from
 /// BIP32 sub-accounts so it can derive secret keys for mixed-input transactions.
-pub struct SpSecretProvider {
-    coin_store: Arc<Mutex<SpCoinStore>>,
+pub struct SpSecretProvider<
+    P: crate::profile::SpStorageProfile = crate::profile::SpRamProfile<
+        crate::profile::DefaultBackend,
+    >,
+> {
+    coin_store: Arc<Mutex<SpCoinStore<P>>>,
     client: SpClient,
     xprivs: std::collections::BTreeMap<
         spdk_core::bitcoin::bip32::Fingerprint,
@@ -394,9 +398,9 @@ pub struct SpSecretProvider {
     secp: spdk_core::bitcoin::secp256k1::Secp256k1<spdk_core::bitcoin::secp256k1::All>,
 }
 
-impl SpSecretProvider {
+impl<P: crate::profile::SpStorageProfile> SpSecretProvider<P> {
     pub fn new(
-        coin_store: Arc<Mutex<SpCoinStore>>,
+        coin_store: Arc<Mutex<SpCoinStore<P>>>,
         client: SpClient,
         xprivs: std::collections::BTreeMap<
             spdk_core::bitcoin::bip32::Fingerprint,
@@ -443,7 +447,9 @@ impl SpSecretProvider {
     }
 }
 
-impl SpPartialSecretProvider for SpSecretProvider {
+impl<P: crate::profile::SpStorageProfile + Send + Sync + 'static> SpPartialSecretProvider
+    for SpSecretProvider<P>
+{
     fn compute_partial_secret(
         &self,
         inputs: &[Coin],

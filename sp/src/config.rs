@@ -39,6 +39,14 @@ pub struct Config {
     /// Whether to persist data to disk (not serialized)
     #[serde(skip)]
     pub persist: bool,
+    /// Which on-disk backend to use when `persist` is true.
+    ///
+    /// `Json` (default) — byte-for-byte compatible with the pre-backend
+    /// layout. `Sqlite` — single `account.sqlite` file per account;
+    /// signer material (mnemonic / scan_sk / spend_key) is stripped from
+    /// everything written to disk and must be re-supplied on the next run.
+    #[serde(skip)]
+    pub persist_kind: bwk::persist::PersistenceKind,
 
     // Scanning
     /// Minimum output value in satoshis to consider (dust filter)
@@ -86,6 +94,7 @@ impl Config {
             blindbit_url,
             data_dir,
             persist: true,
+            persist_kind: bwk::persist::PersistenceKind::default(),
             dust_limit: None,
             birthday_height: None,
             descriptors: Vec::new(),
@@ -139,6 +148,7 @@ impl Config {
             blindbit_url,
             data_dir,
             persist: true,
+            persist_kind: bwk::persist::PersistenceKind::default(),
             dust_limit: None,
             birthday_height: None,
             descriptors: Vec::new(),
@@ -217,6 +227,22 @@ impl Config {
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
         self
+    }
+
+    /// Select the on-disk backend (JSON default, or SQLite).
+    ///
+    /// Under [`bwk::persist::PersistenceKind::Sqlite`], signer material
+    /// (mnemonic / scan_sk / spend_key) is stripped from everything
+    /// written to disk and must be re-supplied on the next run.
+    pub fn with_persist_kind(mut self, kind: bwk::persist::PersistenceKind) -> Self {
+        self.persist_kind = kind;
+        self
+    }
+
+    /// Whether this config is configured to keep signer material out of
+    /// on-disk writes.
+    pub fn excludes_signer_data(&self) -> bool {
+        matches!(self.persist_kind, bwk::persist::PersistenceKind::Sqlite)
     } // Path helpers
 
     /// Returns the account-specific data directory.
@@ -245,8 +271,10 @@ impl Config {
     /// Persist the config to disk.
     ///
     /// Does nothing if `persist` is false. Creates the account directory
-    /// if it doesn't exist.
-    pub fn to_file(&self) {
+    /// if it doesn't exist. Under [`bwk::persist::PersistenceKind::Sqlite`],
+    /// signer material (mnemonic / scan_sk / spend_key) is stripped from
+    /// the on-disk view.
+    pub fn persist(&self) {
         if !self.persist {
             return;
         }
@@ -256,13 +284,23 @@ impl Config {
             let _ = fs::create_dir_all(parent);
         }
 
-        match serde_json::to_string_pretty(self) {
+        let serialized = if self.excludes_signer_data() {
+            let mut stripped = self.clone();
+            stripped.mnemonic = None;
+            stripped.scan_sk = None;
+            stripped.spend_key = None;
+            serde_json::to_string_pretty(&stripped)
+        } else {
+            serde_json::to_string_pretty(self)
+        };
+
+        match serialized {
             Ok(content) => {
                 if let Err(e) = fs::write(&path, content) {
-                    log::error!("Config::to_file() failed to write: {}", e);
+                    log::error!("Config::persist() failed to write: {}", e);
                 }
             }
-            Err(e) => log::error!("Config::to_file() failed to serialize: {}", e),
+            Err(e) => log::error!("Config::persist() failed to serialize: {}", e),
         }
     }
 }
@@ -493,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_persistence() {
+    fn test_persist_basic() {
         use std::env;
 
         // Create a temp directory for this test
@@ -509,7 +547,7 @@ mod tests {
         );
 
         // Write to file
-        config.to_file();
+        config.persist();
 
         // Read back
         let loaded = Config::from_file(config.config_path()).expect("load config");
@@ -524,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn test_config_persist_disabled() {
+    fn test_persist_disabled() {
         use std::env;
 
         let temp_dir = env::temp_dir().join("bwk-sp-config-no-persist-test");
@@ -540,7 +578,7 @@ mod tests {
         .enable_persist(false);
 
         // Should do nothing since persist is false
-        config.to_file();
+        config.persist();
 
         // File should not exist
         assert!(!config.config_path().exists());
@@ -556,6 +594,70 @@ mod tests {
         if let Err(e) = result {
             assert!(matches!(e, ConfigError::Io(_)));
         }
+    }
+
+    #[test]
+    fn test_persist_under_sqlite_strips_all_signer_material() {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("bwk-sp-config-sqlite-strip");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let unique_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
+        let unique_scan_sk =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string();
+        let unique_spend_key =
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string();
+
+        let mut config = Config::new(
+            "alice".to_string(),
+            Network::Signet,
+            unique_mnemonic.clone(),
+            "https://blindbit.example.com".to_string(),
+            temp_dir.clone(),
+        );
+        config.scan_sk = Some(unique_scan_sk.clone());
+        config.spend_key = Some(unique_spend_key.clone());
+        config.persist_kind = bwk::persist::PersistenceKind::Sqlite;
+
+        config.persist();
+
+        let on_disk = fs::read_to_string(config.config_path()).expect("config.json present");
+        for needle in [&unique_mnemonic, &unique_scan_sk, &unique_spend_key] {
+            assert!(
+                !on_disk.contains(needle),
+                "{needle:?} must not appear in config.json under SQLite mode: {on_disk}"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_persist_under_json_preserves_mnemonic() {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("bwk-sp-config-json-preserve");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let unique_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
+        let config = Config::new(
+            "alice".to_string(),
+            Network::Signet,
+            unique_mnemonic.clone(),
+            "https://blindbit.example.com".to_string(),
+            temp_dir.clone(),
+        );
+
+        config.persist();
+
+        let on_disk = fs::read_to_string(config.config_path()).expect("config.json present");
+        assert!(
+            on_disk.contains(&unique_mnemonic),
+            "mnemonic must appear under default JSON mode"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

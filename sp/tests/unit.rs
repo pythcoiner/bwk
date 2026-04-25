@@ -13,10 +13,8 @@ use common::{
     TempDir,
 };
 
-use bwk_sp::{
-    Account, AccountError, Config, Notification, SpCoinStore, SpLabelStore, SpNotification,
-    SpTxStore,
-};
+use bwk::label_store::{LabelKey, LabelStore};
+use bwk_sp::{Account, AccountError, Config, Notification, SpCoinStore, SpNotification, SpTxStore};
 
 // MockBackend Tests
 
@@ -372,7 +370,7 @@ fn test_no_deadlock_coin_then_label() {
     use std::time::Duration;
 
     let coin_store = Arc::new(Mutex::new(SpCoinStore::new()));
-    let label_store = Arc::new(Mutex::new(SpLabelStore::new()));
+    let label_store = Arc::new(Mutex::new(LabelStore::new()));
 
     let coin_store_1 = Arc::clone(&coin_store);
     let label_store_1 = Arc::clone(&label_store);
@@ -389,7 +387,10 @@ fn test_no_deadlock_coin_then_label() {
             // Release coin_store before acquiring label_store
             {
                 let mut labels = label_store_1.lock().expect("poisoned");
-                labels.set_outpoint(test_outpoint(), "label from thread 1".to_string());
+                labels.edit(
+                    LabelKey::OutPoint(test_outpoint()),
+                    Some("label from thread 1".to_string()),
+                );
             }
             thread::sleep(Duration::from_micros(1));
         }
@@ -405,7 +406,7 @@ fn test_no_deadlock_coin_then_label() {
             // Release coin_store before acquiring label_store
             {
                 let labels = label_store_2.lock().expect("poisoned");
-                let _ = labels.outpoint(&test_outpoint());
+                let _ = labels.outpoint(test_outpoint());
             }
             thread::sleep(Duration::from_micros(1));
         }

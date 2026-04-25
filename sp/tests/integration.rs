@@ -23,10 +23,11 @@ use common::{
     test_owned_output, wait_for_sync_and_index, MockBackend, MockBlock, TempDir,
 };
 
+use bwk::label_store::{LabelKey, LabelStore};
 use bwk::persist::{
     JsonBackend, PersistenceBackend, COINS_STORE_KEY, LABELS_STORE_KEY, TXS_STORE_KEY,
 };
-use bwk_sp::{Config, SpCoinStore, SpLabelStore, SpTxStore};
+use bwk_sp::{Config, SpCoinStore, SpTxStore};
 
 // Store Integration Tests
 
@@ -45,9 +46,11 @@ fn test_stores_independent_persistence() {
 
         let label_backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let mut label_store =
-            SpLabelStore::with_backend(label_backend, LABELS_STORE_KEY).enable_persist(true);
-        label_store.set_outpoint(test_outpoint(), "test label".to_string());
+        let mut label_store = LabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
+        label_store.edit(
+            LabelKey::OutPoint(test_outpoint()),
+            Some("test label".to_string()),
+        );
         label_store.persist();
 
         let tx_backend: Arc<dyn PersistenceBackend> =
@@ -76,10 +79,10 @@ fn test_stores_independent_persistence() {
 
         let label_backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
-        let label_store = SpLabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
+        let label_store = LabelStore::load_from_backend(label_backend, LABELS_STORE_KEY);
         assert_eq!(
-            label_store.outpoint(&test_outpoint()),
-            Some(&"test label".to_string())
+            label_store.outpoint(test_outpoint()),
+            Some("test label".to_string())
         );
 
         let tx_backend: Arc<dyn PersistenceBackend> =
@@ -149,7 +152,7 @@ fn test_config_with_all_options() {
 
 /// Test config persistence and reload.
 #[test]
-fn test_config_persistence_roundtrip() {
+fn test_persist_basic_roundtrip() {
     let dir = TempDir::new().unwrap();
 
     let config = Config::new(
@@ -162,7 +165,7 @@ fn test_config_persistence_roundtrip() {
 
     // Enable persist and save
     let config = config.enable_persist(true);
-    config.to_file();
+    config.persist();
 
     // Load and verify
     let loaded = Config::from_file(config.config_path()).expect("load config");
@@ -1147,7 +1150,7 @@ fn test_scan_state_consistent_after_crash() {
     // 4. Create Account with persist=true and scan some blocks
     let (mut account, config, _dir) =
         test_account_persistent_named("test-crash-recovery", &bbd.url());
-    let state_path = config.account_dir().join(bwk_sp::ScanState::FILENAME);
+    let state_path = config.account_dir().join("account.json");
 
     // 5. Scan and persist
     account.scan_blocks(Some(1), Some(50)).unwrap();
@@ -3176,14 +3179,14 @@ fn test_concurrent_scan_and_read() {
 /// - Final state is consistent (labels are properly set)
 ///
 /// Note: Since Account contains an mpsc::Receiver which is not Sync,
-/// we test concurrent access on the underlying SpLabelStore directly,
+/// we test concurrent access on the underlying LabelStore directly,
 /// which mirrors the internal locking pattern used by Account.
 #[test]
 fn test_concurrent_label_updates() {
     use std::sync::Arc;
 
-    // 1. Create a shared SpLabelStore (same locking pattern as Account internals)
-    let label_store = Arc::new(Mutex::new(SpLabelStore::new()));
+    // 1. Create a shared LabelStore (same locking pattern as Account internals)
+    let label_store = Arc::new(Mutex::new(LabelStore::new()));
 
     // 2. Create multiple outpoints for concurrent updates
     let outpoints: Vec<OutPoint> = (0..10)
@@ -3209,7 +3212,7 @@ fn test_concurrent_label_updates() {
                 // Acquire lock, update, release - same pattern as Account
                 {
                     let mut store = store_clone.lock().expect("poisoned");
-                    store.set_outpoint(*outpoint, label);
+                    store.edit(LabelKey::OutPoint(*outpoint), Some(label));
                 }
 
                 // Small sleep to increase chance of interleaving
@@ -3231,7 +3234,7 @@ fn test_concurrent_label_updates() {
     // (The exact label depends on thread ordering, but one should be set)
     let store = label_store.lock().expect("poisoned");
     for outpoint in &outpoints {
-        let label = store.outpoint(outpoint);
+        let label = store.outpoint(*outpoint);
         assert!(
             label.is_some(),
             "Each outpoint should have a label after concurrent updates"

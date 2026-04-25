@@ -19,8 +19,11 @@ use common::{
     test_mnemonic, test_outpoint, wait_for_sync_and_index, TempDir,
 };
 
-use bwk::persist::{JsonBackend, PersistenceBackend, LABELS_STORE_KEY};
-use bwk_sp::{Config, Notification, SpLabelStore, SpNotification};
+use bwk::label_store::LabelStore;
+use bwk::persist::{
+    JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
+};
+use bwk_sp::{Config, Notification, SpNotification};
 
 //
 // These tests require the `blindbitd` crate which provides:
@@ -910,17 +913,20 @@ fn test_persistence_after_scan() {
     // 4. Create Account with persist=true
     let (mut account, config, _dir) = test_account_persistent(&bbd.url());
     let account_dir = config.account_dir();
-    let coins_path = account_dir.join(bwk_sp::SpCoinStore::FILENAME);
-    let state_path = account_dir.join(bwk_sp::ScanState::FILENAME);
 
     // 5. Scan and drop (persists on drop)
     account.scan_blocks(Some(1), Some(100)).unwrap();
     assert_eq!(account.balance(), 0); // No SP outputs in standard blocks
     drop(account);
 
-    // 6. Verify persistence files were created
-    // At least one of the store files should exist
+    // 6. Verify persistence files were created. At least one of the
+    // store files should exist; ask the backend for the canonical paths
+    // rather than baking the layout in here.
+    let probe = JsonBackend::open(account_dir.clone()).expect("reopen JsonBackend");
+    let coins_path = probe.path_for(COINS_STORE_KEY);
+    let state_path = probe.path_for(ACCOUNT_STORE_KEY);
     let any_file_exists = coins_path.exists() || state_path.exists();
+    drop(probe);
     assert!(
         any_file_exists,
         "At least one store file should exist after persist (coins: {}, state: {})",
@@ -1203,16 +1209,17 @@ fn test_label_transaction() {
 
     // 6. Verify label persists by checking the label file directly
     let account_dir = config.account_dir();
+    let typed_backend = JsonBackend::open(account_dir).unwrap();
     assert!(
-        account_dir.join(SpLabelStore::FILENAME).exists(),
+        typed_backend.path_for(LABELS_STORE_KEY).exists(),
         "Labels file should exist after persist"
     );
 
-    let backend: Arc<dyn PersistenceBackend> = Arc::new(JsonBackend::open(account_dir).unwrap());
-    let label_store = SpLabelStore::load_from_backend(backend, LABELS_STORE_KEY);
+    let backend: Arc<dyn PersistenceBackend> = Arc::new(typed_backend);
+    let label_store = LabelStore::load_from_backend(backend, LABELS_STORE_KEY);
     assert_eq!(
-        label_store.transaction(&txid),
-        Some(&"groceries".to_string()),
+        label_store.transaction(txid),
+        Some("groceries".to_string()),
         "Transaction label should persist"
     );
 }
