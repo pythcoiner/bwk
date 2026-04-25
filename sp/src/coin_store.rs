@@ -10,7 +10,7 @@ use std::{
     sync::Arc,
 };
 
-use bitcoin::{Amount, OutPoint, ScriptBuf};
+use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptBuf};
 use bwk::persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
 use serde::{Deserialize, Serialize};
 use silentpayments::receiving::Label;
@@ -302,6 +302,67 @@ impl<P: SpStorageProfile> SpCoinStore<P> {
             log::error!("SpCoinStore::persist() flush: {e}");
         }
     }
+
+    /// Group SP coins by their tweaked taproot spk and report
+    /// status + funding/spending txids per address.
+    ///
+    /// In normal SP-flow operation each spk appears at most once
+    /// (each per-output tweak is unique), so most entries are
+    /// `Used` with a single funding txid. A `Reused` entry
+    /// indicates external (non-SP-flow) activity that landed at
+    /// the same spk — typically address poisoning, or a payer
+    /// copying the on-chain address from an earlier tx and sending
+    /// a regular Bitcoin payment to it. The wallet surfaces the
+    /// signal; consumer policy decides how to react.
+    pub fn addresses_with_status(&self) -> Vec<SpAddressEntry> {
+        use std::collections::BTreeMap;
+        let mut by_spk: BTreeMap<
+            ScriptBuf,
+            (
+                std::collections::BTreeSet<bitcoin::Txid>,
+                std::collections::BTreeSet<bitcoin::Txid>,
+            ),
+        > = BTreeMap::new();
+        let Ok(iter) = self.store.iter() else {
+            return Vec::new();
+        };
+        for (outpoint, entry) in iter {
+            let bucket = by_spk.entry(entry.script().clone()).or_default();
+            bucket.0.insert(outpoint.txid);
+            if let OutputSpendStatus::Spent(spending_txid) = entry.status() {
+                bucket
+                    .1
+                    .insert(bitcoin::Txid::from_byte_array(*spending_txid));
+            }
+        }
+        by_spk
+            .into_iter()
+            .map(|(script, (funding_txids, spending_txids))| {
+                let status = match funding_txids.len() {
+                    0 => bwk::address_store::AddressStatus::NotUsed,
+                    1 => bwk::address_store::AddressStatus::Used,
+                    _ => bwk::address_store::AddressStatus::Reused,
+                };
+                SpAddressEntry {
+                    script,
+                    status,
+                    funding_txids,
+                    spending_txids,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Per-spk view over an [`SpCoinStore`]. One entry per unique
+/// SP-derived taproot script we own, with the txids that funded
+/// and (if any) spent it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpAddressEntry {
+    pub script: ScriptBuf,
+    pub status: bwk::address_store::AddressStatus,
+    pub funding_txids: std::collections::BTreeSet<bitcoin::Txid>,
+    pub spending_txids: std::collections::BTreeSet<bitcoin::Txid>,
 }
 
 // SpCoinSource (CoinSource for TxBuilder)
@@ -755,5 +816,94 @@ mod tests {
         let coins = store.coins();
         assert_eq!(coins.len(), 1);
         assert!(coins.contains_key(&test_outpoint()));
+    }
+
+    // ---------------------------------------------------------------
+    // addresses_with_status — per-spk status + funding/spending view
+    // ---------------------------------------------------------------
+
+    /// Build an `OwnedOutput` pointing at a specific script_pubkey,
+    /// optionally marked as spent. Pair with [`SpCoinStore::insert`].
+    fn owned_at(spk: ScriptBuf, spending: Option<[u8; 32]>) -> OwnedOutput {
+        let spend_status = match spending {
+            None => OutputSpendStatus::Unspent,
+            Some(txid_bytes) => OutputSpendStatus::Spent(txid_bytes),
+        };
+        OwnedOutput {
+            blockheight: Height::from_consensus(100).unwrap(),
+            tweak: [0u8; 32],
+            amount: Amount::from_sat(10_000),
+            script: spk,
+            label: None,
+            spend_status,
+        }
+    }
+
+    fn distinct_spk(seed: u8) -> ScriptBuf {
+        // 22-byte witness program is enough to be a valid distinct
+        // ScriptBuf for grouping purposes.
+        ScriptBuf::from_bytes(vec![seed; 22])
+    }
+
+    #[test]
+    fn addresses_with_status_empty_for_empty_store() {
+        let store = SpCoinStore::new();
+        assert!(store.addresses_with_status().is_empty());
+    }
+
+    #[test]
+    fn addresses_with_status_normal_one_shot() {
+        let mut store = SpCoinStore::new();
+        let spk = distinct_spk(7);
+        let op = test_outpoint();
+        store.insert(op, owned_at(spk.clone(), None));
+
+        let entries = store.addresses_with_status();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.script, spk);
+        assert_eq!(e.status, bwk::address_store::AddressStatus::Used);
+        assert_eq!(e.funding_txids.len(), 1);
+        assert!(e.funding_txids.contains(&op.txid));
+        assert!(e.spending_txids.is_empty());
+    }
+
+    #[test]
+    fn addresses_with_status_reuse_marks_reused() {
+        // Two coins landing at the SAME spk — anomalous in normal
+        // SP flow (would need address poisoning or a non-SP payment
+        // copying the on-chain address from history).
+        let mut store = SpCoinStore::new();
+        let spk = distinct_spk(11);
+        let op_a = test_outpoint();
+        let op_b = test_outpoint_2();
+        store.insert(op_a, owned_at(spk.clone(), None));
+        store.insert(op_b, owned_at(spk.clone(), None));
+
+        let entries = store.addresses_with_status();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.status, bwk::address_store::AddressStatus::Reused);
+        assert_eq!(e.funding_txids.len(), 2);
+        assert!(e.funding_txids.contains(&op_a.txid));
+        assert!(e.funding_txids.contains(&op_b.txid));
+    }
+
+    #[test]
+    fn addresses_with_status_records_spending_txid() {
+        let mut store = SpCoinStore::new();
+        let spk = distinct_spk(13);
+        let op = test_outpoint_3();
+        let spending_txid_bytes = [0xAA; 32];
+        store.insert(op, owned_at(spk, Some(spending_txid_bytes)));
+
+        let entries = store.addresses_with_status();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.status, bwk::address_store::AddressStatus::Used);
+        assert_eq!(e.spending_txids.len(), 1);
+        assert!(e
+            .spending_txids
+            .contains(&Txid::from_byte_array(spending_txid_bytes)));
     }
 }
