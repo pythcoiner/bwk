@@ -1221,6 +1221,20 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
         out
     }
+
+    /// Sanity-check API: look `address` up in the wallet's
+    /// aggregated owned-address view. Returns the entry with status
+    /// and funding/spending txids if it belongs to this wallet, or
+    /// `None` otherwise. Compares by canonical bech32/bech32m string.
+    ///
+    /// Consumer policy decides what to do with a `Used` / `Reused`
+    /// hit (typical: refuse to re-export or self-target). The wallet
+    /// just answers "is this mine, and if so what's its status".
+    pub fn lookup_owned_address(&self, address: &str) -> Option<OwnedAddress> {
+        self.owned_addresses()
+            .into_iter()
+            .find(|o| o.address == address)
+    }
 }
 
 /// Provenance of an [`OwnedAddress`].
@@ -1861,5 +1875,65 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(entry.address, expected);
+    }
+
+    // -----------------------------------------------------------------
+    // lookup_owned_address — sanity-check API for export / send paths
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn lookup_returns_none_for_unknown_address() {
+        let mut account = Account::new(test_config()).expect("Account::new");
+        account.add_sub_account(build_offline_segwit_sub("sub-segwit-0"));
+        // A signet bech32 address that the wallet definitely doesn't own.
+        let unknown = "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx";
+        assert!(account.lookup_owned_address(unknown).is_none());
+    }
+
+    #[test]
+    fn lookup_returns_entry_for_owned_bip32_address() {
+        let mut account = Account::new(test_config()).expect("Account::new");
+        account.add_sub_account(build_offline_segwit_sub("sub-segwit-0"));
+
+        // Pick any address the sub generated at construction time,
+        // look it up by canonical string, and check we get it back.
+        let sample = account
+            .sub_accounts()
+            .iter()
+            .flat_map(|s| s.address_entries())
+            .next()
+            .expect("sub-account has entries");
+        let canonical = sample.value();
+
+        let hit = account
+            .lookup_owned_address(&canonical)
+            .expect("address should be owned");
+        assert_eq!(hit.address, canonical);
+        assert_eq!(hit.account_name, "sub-segwit-0");
+    }
+
+    #[test]
+    fn lookup_returns_entry_for_sp_received_spk() {
+        let account = Account::new(test_config()).expect("Account::new");
+        let spk = fake_tr_spk(13);
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_byte_array([0xCD; 32]),
+            vout: 1,
+        };
+        account
+            .coin_store
+            .lock()
+            .expect("poisoned")
+            .insert(outpoint, fake_sp_owned(spk.clone(), 13));
+
+        let canonical = bitcoin::Address::from_script(&spk, bitcoin::Network::Signet)
+            .unwrap()
+            .to_string();
+        let hit = account
+            .lookup_owned_address(&canonical)
+            .expect("SP-derived spk should be owned");
+        assert_eq!(hit.account_name, account.name());
+        assert_eq!(hit.status, bwk::address_store::AddressStatus::Used);
+        assert!(hit.funding_txids.contains(&outpoint.txid));
     }
 }
