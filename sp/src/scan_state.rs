@@ -4,23 +4,16 @@
 //! scanned block height and hash (for reorg detection), and the wallet's
 //! birthday height.
 
-use std::fs;
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use bwk::persist::{self as persist, NoopBackend, PersistenceBackend};
 
-// ScanStateError
-
-/// Errors that can occur in the scan state.
-#[derive(Debug, thiserror::Error)]
-pub enum ScanStateError {
-    /// IO error (file not found, permission denied, etc.)
-    #[error("io error: {0}")]
-    Io(String),
-    /// JSON parsing error
-    #[error("parse error: {0}")]
-    Parse(String),
-}
+/// Row key under the `account` store for [`ScanState::last_scanned_height`].
+const LAST_SCANNED_HEIGHT_ROW: &str = "last_scanned_height";
+/// Row key under the `account` store for [`ScanState::last_block_hash`].
+const LAST_BLOCK_HASH_ROW: &str = "last_block_hash";
+/// Row key under the `account` store for [`ScanState::birthday_height`].
+const BIRTHDAY_HEIGHT_ROW: &str = "birthday_height";
 
 // ScanState
 
@@ -28,7 +21,7 @@ pub enum ScanStateError {
 ///
 /// This struct maintains the scan position (last scanned height and block hash)
 /// and the wallet's birthday height. The block hash is stored for reorg detection.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct ScanState {
     /// The last successfully scanned block height (None if never scanned)
     last_scanned_height: Option<u32>,
@@ -39,71 +32,106 @@ pub struct ScanState {
     /// The wallet's birthday height (where scanning should start)
     birthday_height: u32,
 
-    /// Directory containing the JSON file, if persistence is enabled (not
-    /// serialized).
-    #[serde(skip)]
-    dir: Option<PathBuf>,
+    backend: Arc<dyn PersistenceBackend>,
+}
 
-    /// Whether persistence is enabled (not serialized, defaults to true)
-    #[serde(skip)]
-    persist: bool,
+impl Default for ScanState {
+    fn default() -> Self {
+        Self {
+            last_scanned_height: None,
+            last_block_hash: None,
+            birthday_height: 0,
+            backend: Arc::new(NoopBackend),
+        }
+    }
+}
+
+impl std::fmt::Debug for ScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScanState")
+            .field("last_scanned_height", &self.last_scanned_height)
+            .field("last_block_hash", &self.last_block_hash)
+            .field("birthday_height", &self.birthday_height)
+            .finish()
+    }
 }
 
 impl ScanState {
-    /// Filename used under the account directory for this store's JSON.
-    pub const FILENAME: &'static str = "state.json";
-
     // Constructors
 
-    /// Create a new scan state with the given birthday height.
+    /// Create a new scan state with the given birthday height (no persistence).
     pub fn new(birthday_height: u32) -> Self {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
             birthday_height,
-            dir: None,
-            persist: true,
+            backend: Arc::new(NoopBackend),
         }
     }
 
-    /// Create a new scan state rooted at the given directory.
-    ///
-    /// The state persists to `{dir}/{FILENAME}`.
-    pub fn with_path(birthday_height: u32, dir: PathBuf) -> Self {
+    /// Create a scan state backed by an arbitrary backend.
+    pub fn with_backend(birthday_height: u32, backend: Arc<dyn PersistenceBackend>) -> Self {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
             birthday_height,
-            dir: Some(dir),
-            persist: true,
+            backend,
         }
     }
 
-    /// Load a scan state from `{dir}/{FILENAME}`.
+    /// Load a scan state from the per-field rows in the `account` store.
     ///
-    /// The loaded state will have its dir set but persist disabled.
-    /// Call `enable_persist(true)` to enable persistence.
-    pub fn from_file(dir: PathBuf) -> Result<Self, ScanStateError> {
-        let path = dir.join(Self::FILENAME);
-        let content = fs::read_to_string(&path).map_err(|e| {
-            ScanStateError::Io(format!(
-                "failed to read scan state from {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
-        let mut state: ScanState = serde_json::from_str(&content)
-            .map_err(|e| ScanStateError::Parse(format!("failed to parse scan state: {}", e)))?;
-        state.dir = Some(dir);
-        state.persist = false;
-        Ok(state)
-    }
+    /// `birthday_height` is used as the fallback when no birthday row
+    /// has been persisted yet (fresh wallet).
+    pub fn load_from_backend(birthday_height: u32, backend: Arc<dyn PersistenceBackend>) -> Self {
+        let read_bytes = |row: &str| -> Option<Vec<u8>> {
+            match backend.get_row(persist::ACCOUNT_STORE_KEY, row) {
+                Ok(Some(b)) => Some(b),
+                Ok(None) => None,
+                Err(e) => {
+                    log::error!("ScanState::load_from_backend get_row {row}: {e}");
+                    None
+                }
+            }
+        };
 
-    /// Enable or disable persistence (builder pattern).
-    pub fn enable_persist(mut self, persist: bool) -> Self {
-        self.persist = persist;
-        self
-    } // Getters
+        let last_scanned_height = read_bytes(LAST_SCANNED_HEIGHT_ROW)
+            .and_then(|b| match serde_json::from_slice::<Option<u32>>(&b) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::error!("ScanState::load_from_backend decode last_scanned_height: {e}");
+                    None
+                }
+            })
+            .unwrap_or(None);
+
+        let last_block_hash = read_bytes(LAST_BLOCK_HASH_ROW)
+            .and_then(|b| match serde_json::from_slice::<Option<[u8; 32]>>(&b) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::error!("ScanState::load_from_backend decode last_block_hash: {e}");
+                    None
+                }
+            })
+            .unwrap_or(None);
+
+        let birthday = read_bytes(BIRTHDAY_HEIGHT_ROW)
+            .and_then(|b| match serde_json::from_slice::<u32>(&b) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    log::error!("ScanState::load_from_backend decode birthday_height: {e}");
+                    None
+                }
+            })
+            .unwrap_or(birthday_height);
+
+        Self {
+            last_scanned_height,
+            last_block_hash,
+            birthday_height: birthday,
+            backend,
+        }
+    }
 
     /// Returns the last scanned block height, if any.
     pub fn last_scanned_height(&self) -> Option<u32> {
@@ -119,16 +147,6 @@ impl ScanState {
     pub fn birthday_height(&self) -> u32 {
         self.birthday_height
     }
-
-    /// Returns the persistence directory, if set.
-    pub fn path(&self) -> Option<&PathBuf> {
-        self.dir.as_ref()
-    }
-
-    /// Returns whether persistence is enabled.
-    pub fn is_persist_enabled(&self) -> bool {
-        self.persist
-    } // Mutators
 
     /// Update the scan state with a new height and block hash.
     pub fn update(&mut self, height: u32, block_hash: [u8; 32]) {
@@ -156,26 +174,28 @@ impl ScanState {
             .unwrap_or(self.birthday_height)
     } // Persistence
 
-    /// Persist the state to `{dir}/{FILENAME}`.
+    /// Persist the state through the configured backend.
     ///
-    /// Does nothing if persistence is disabled or no directory is set.
+    /// Writes the three scalar fields as individual rows under the
+    /// [`persist::ACCOUNT_STORE_KEY`] store.
     pub fn persist(&self) {
-        if !self.persist {
-            return;
-        }
-        let Some(dir) = &self.dir else {
-            return;
-        };
-        let _ = fs::create_dir_all(dir);
-        let path = dir.join(Self::FILENAME);
-
-        match serde_json::to_string_pretty(self) {
-            Ok(content) => {
-                if let Err(e) = fs::write(path, content) {
-                    log::error!("ScanState::persist() failed to write: {}", e);
-                }
+        let write = |row: &str, bytes: &[u8]| {
+            if let Err(e) = self.backend.put_row(persist::ACCOUNT_STORE_KEY, row, bytes) {
+                log::error!("ScanState::persist() put {row}: {e}");
             }
-            Err(e) => log::error!("ScanState::persist() failed to serialize: {}", e),
+        };
+
+        match serde_json::to_vec(&self.last_scanned_height) {
+            Ok(b) => write(LAST_SCANNED_HEIGHT_ROW, &b),
+            Err(e) => log::error!("ScanState::persist() encode last_scanned_height: {e}"),
+        }
+        match serde_json::to_vec(&self.last_block_hash) {
+            Ok(b) => write(LAST_BLOCK_HASH_ROW, &b),
+            Err(e) => log::error!("ScanState::persist() encode last_block_hash: {e}"),
+        }
+        match serde_json::to_vec(&self.birthday_height) {
+            Ok(b) => write(BIRTHDAY_HEIGHT_ROW, &b),
+            Err(e) => log::error!("ScanState::persist() encode birthday_height: {e}"),
         }
     }
 }
@@ -185,6 +205,8 @@ impl ScanState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bwk::persist::JsonBackend;
+    use std::fs;
 
     #[test]
     fn test_scan_state_new() {
@@ -193,18 +215,19 @@ mod tests {
         assert_eq!(state.birthday_height(), 100);
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
-        assert!(state.persist); // Default is true
-        assert!(state.dir.is_none());
     }
 
     #[test]
-    fn test_scan_state_with_path() {
-        let dir = PathBuf::from("/tmp/test_scan_state_dir");
-        let state = ScanState::with_path(200, dir.clone());
+    fn test_scan_state_with_backend_json() {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("bwk-sp-scan-state-with-backend-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let state = ScanState::with_backend(200, backend);
 
         assert_eq!(state.birthday_height(), 200);
-        assert_eq!(state.dir, Some(dir));
-        assert!(state.persist); // Default is true
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -241,24 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_state_serde_roundtrip() {
-        let mut state = ScanState::new(100);
-        let block_hash = [0xEF; 32];
-        state.update(250, block_hash);
-
-        let json = serde_json::to_string(&state).expect("serialize");
-        let loaded: ScanState = serde_json::from_str(&json).expect("deserialize");
-
-        assert_eq!(loaded.birthday_height(), 100);
-        assert_eq!(loaded.last_scanned_height(), Some(250));
-        assert_eq!(loaded.last_block_hash(), Some(block_hash));
-
-        // Skipped fields should be defaults
-        assert!(loaded.dir.is_none());
-        assert!(!loaded.persist); // Default for bool is false
-    }
-
-    #[test]
     fn test_scan_state_persistence() {
         use std::env;
 
@@ -269,15 +274,17 @@ mod tests {
         let block_hash = [0x12; 32];
 
         // Create and populate state
-        let mut state = ScanState::with_path(300, temp_dir.clone()).enable_persist(true);
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let mut state = ScanState::with_backend(300, backend);
         state.update(350, block_hash);
         state.persist();
 
-        // File should exist under the account dir with the canonical name.
-        assert!(temp_dir.join(ScanState::FILENAME).exists());
+        // Singleton fields are persisted under the `account` store.
+        assert!(temp_dir.join("account.json").exists());
 
         // Load from dir
-        let loaded = ScanState::from_file(temp_dir.clone()).expect("load");
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let loaded = ScanState::load_from_backend(0, backend);
 
         assert_eq!(loaded.birthday_height(), 300);
         assert_eq!(loaded.last_scanned_height(), Some(350));
@@ -295,26 +302,34 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         let _ = fs::create_dir_all(&temp_dir);
 
-        // Create state with persist disabled
-        let mut state = ScanState::with_path(100, temp_dir.clone()).enable_persist(false);
+        // Create state with persist disabled (NoopBackend via ScanState::new)
+        let mut state = ScanState::new(100);
         state.update(150, [0xAA; 32]);
         state.persist();
 
-        // File should NOT exist
-        assert!(!temp_dir.join(ScanState::FILENAME).exists());
+        // Account file should NOT exist (persist is a noop)
+        assert!(!temp_dir.join("account.json").exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
-    fn test_scan_state_from_file_not_found() {
-        // Directory has no state.json under it, so load must fail with Io.
-        let result = ScanState::from_file(PathBuf::from("/nonexistent/path"));
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(matches!(e, ScanStateError::Io(_)));
-        }
+    fn test_scan_state_load_from_backend_fresh_dir_returns_default() {
+        use std::env;
+
+        // Fresh directory — no persisted state yet. JsonBackend::open
+        // stamps DB_VERSION; load_from_backend returns a state at birthday 0.
+        let temp_dir = env::temp_dir().join("bwk-sp-scan-state-fresh-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let state = ScanState::load_from_backend(0, backend);
+        assert_eq!(state.birthday_height(), 0);
+        assert_eq!(state.last_scanned_height(), None);
+        assert_eq!(state.last_block_hash(), None);
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -342,22 +357,5 @@ mod tests {
         assert_eq!(state.birthday_height(), 0);
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
-        assert!(state.dir.is_none());
-        assert!(!state.persist); // Default for bool is false
-    }
-
-    #[test]
-    fn test_scan_state_error_display() {
-        // Test Io error variant
-        let err = ScanStateError::Io("state file locked".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("io error"));
-        assert!(msg.contains("state file locked"));
-
-        // Test Parse error variant
-        let err = ScanStateError::Parse("corrupted state data".to_string());
-        let msg = err.to_string();
-        assert!(msg.contains("parse error"));
-        assert!(msg.contains("corrupted state data"));
     }
 }
