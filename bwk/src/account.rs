@@ -430,6 +430,8 @@ impl<P: StorageProfile> Account<P> {
             address: addr.as_unchecked().clone(),
             account: KeyChain::Receive,
             index,
+            funding_txids: std::collections::BTreeSet::new(),
+            spending_txids: std::collections::BTreeSet::new(),
         }
     }
     fn new_recv_addr(&mut self) -> bitcoin::Address {

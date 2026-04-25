@@ -229,6 +229,24 @@ impl Debug for TxEntry {
 }
 
 impl TxEntry {
+    /// Test-only constructor that wraps a raw tx + height in a
+    /// fully-defaulted [`TxEntry`]. Intended for in-crate tests
+    /// that need to seed the [`TxStore`] without going through the
+    /// Electrum update plumbing.
+    #[cfg(all(test, feature = "test"))]
+    pub(crate) fn for_test(tx: bitcoin::Transaction, height: Option<u64>) -> Self {
+        let weight = tx.weight().to_wu();
+        Self {
+            height,
+            tx,
+            merkle: Default::default(),
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            fees: 0,
+            weight,
+        }
+    }
+
     pub fn txid(&self) -> Txid {
         self.tx.compute_txid()
     }

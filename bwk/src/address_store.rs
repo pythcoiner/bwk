@@ -1,9 +1,9 @@
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_tx::{coin::KeyChain, tx_builder::ChangeTip};
-use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf};
+use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf, Txid};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{mpsc, Arc, Mutex},
 };
 
@@ -220,6 +220,8 @@ impl<P: StorageProfile> AddressStore<P> {
                     address,
                     account: KeyChain::Receive,
                     index: i,
+                    funding_txids: BTreeSet::new(),
+                    spending_txids: BTreeSet::new(),
                 }
             });
         }
@@ -233,6 +235,8 @@ impl<P: StorageProfile> AddressStore<P> {
                     address,
                     account: KeyChain::Change,
                     index: i,
+                    funding_txids: BTreeSet::new(),
+                    spending_txids: BTreeSet::new(),
                 }
             });
         }
@@ -471,12 +475,24 @@ impl<P: StorageProfile> AddressStore<P> {
 /// - `address`: The Bitcoin address associated with this entry.
 /// - `account`: The account type (receiving or change).
 /// - `index`: The index of the address in the generation sequence.
+/// - `funding_txids`: txids of transactions that paid INTO this
+///   address. Derived from the live coin map by
+///   [`crate::coin_store::CoinStore::generate`]; rebuilt on every
+///   generate call rather than stored independently.
+/// - `spending_txids`: txids of transactions that SPENT outputs
+///   paid to this address (i.e. an output at this spk appeared as
+///   a `previous_output` of one of the tx's inputs). Same provenance
+///   as `funding_txids`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddressEntry {
     pub status: AddressStatus,
     pub address: bitcoin::Address<NetworkUnchecked>,
     pub account: KeyChain,
     pub index: u32,
+    #[serde(default)]
+    pub funding_txids: BTreeSet<Txid>,
+    #[serde(default)]
+    pub spending_txids: BTreeSet<Txid>,
 }
 
 impl AddressEntry {
@@ -504,6 +520,27 @@ impl AddressEntry {
     /// The current status of this entry.
     pub fn status(&self) -> AddressStatus {
         self.status
+    }
+    /// Replace the set of funding txids (txs that paid into this
+    /// address). Called from [`crate::coin_store::CoinStore::generate`]
+    /// after rebuilding the in-memory coin map.
+    pub fn set_funding_txids(&mut self, txids: BTreeSet<Txid>) {
+        self.funding_txids = txids;
+    }
+    /// Returns the set of funding txids for this address.
+    pub fn funding_txids(&self) -> &BTreeSet<Txid> {
+        &self.funding_txids
+    }
+    /// Replace the set of spending txids (txs that consumed an
+    /// output paid to this address). Called from
+    /// [`crate::coin_store::CoinStore::generate`] alongside
+    /// [`Self::set_funding_txids`].
+    pub fn set_spending_txids(&mut self, txids: BTreeSet<Txid>) {
+        self.spending_txids = txids;
+    }
+    /// Returns the set of spending txids for this address.
+    pub fn spending_txids(&self) -> &BTreeSet<Txid> {
+        &self.spending_txids
     }
     /// Returns the string representation of the address.
     ///

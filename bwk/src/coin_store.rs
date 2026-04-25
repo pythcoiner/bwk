@@ -557,18 +557,27 @@ impl<P: StorageProfile> CoinStore<P> {
                 }
             }
         }
-        // list all spent coins
-        for (_, tx_entry) in tx_store.iter() {
+        // list all spent coins + collect spending txids per spk:
+        // every input whose previous_output points at one of our
+        // coins is, by definition, a tx that spent that spk.
+        let mut spk_to_spending = BTreeMap::<ScriptBuf, BTreeSet<Txid>>::new();
+        for (tx_txid, tx_entry) in tx_store.iter() {
             for inp in &tx_entry.tx().input {
-                coins.entry(inp.previous_output).and_modify(|e| {
-                    e.coin.status = CoinStatus::Spent;
-                });
+                if let Some(spent_ce) = coins.get_mut(&inp.previous_output) {
+                    spent_ce.coin.status = CoinStatus::Spent;
+                    spk_to_spending
+                        .entry(spent_ce.spk())
+                        .or_default()
+                        .insert(tx_txid);
+                }
             }
         }
         let mut spk_to_outpoint = BTreeMap::<ScriptBuf, HashSet<OutPoint>>::new();
+        let mut spk_to_funding = BTreeMap::<ScriptBuf, BTreeSet<Txid>>::new();
         coins.iter().for_each(|(op, ce)| {
+            let spk = ce.spk();
             spk_to_outpoint
-                .entry(ce.spk())
+                .entry(spk.clone())
                 .and_modify(|e| {
                     e.insert(*op);
                 })
@@ -577,6 +586,7 @@ impl<P: StorageProfile> CoinStore<P> {
                     h.insert(*op);
                     h
                 });
+            spk_to_funding.entry(spk).or_default().insert(op.txid);
         });
 
         // populate labels
@@ -590,7 +600,7 @@ impl<P: StorageProfile> CoinStore<P> {
         self.store = coins;
         self.spk_to_outpoint = spk_to_outpoint;
 
-        // update address_store statuses
+        // update address_store statuses + per-address tx history
         self.spk_to_outpoint.iter().for_each(|(spk, op)| {
             let status = match op.len() {
                 0 => AddressStatus::NotUsed,
@@ -598,7 +608,9 @@ impl<P: StorageProfile> CoinStore<P> {
                 _ => AddressStatus::Reused,
             };
             if let Some(e) = addr_store.lock().expect("poisoned").get_entry_mut(spk) {
-                e.set_status(status)
+                e.set_status(status);
+                e.set_funding_txids(spk_to_funding.get(spk).cloned().unwrap_or_default());
+                e.set_spending_txids(spk_to_spending.get(spk).cloned().unwrap_or_default());
             }
         });
 
@@ -985,6 +997,8 @@ impl CoinEntry {
             address: self.address.clone(),
             account,
             index,
+            funding_txids: std::collections::BTreeSet::new(),
+            spending_txids: std::collections::BTreeSet::new(),
         }
     }
     /// Returns the script public key (SPK) associated with the coin.
@@ -993,5 +1007,156 @@ impl CoinEntry {
     /// The `ScriptBuf` representing the coin's SPK.
     pub fn spk(&self) -> ScriptBuf {
         self.address.clone().assume_checked().script_pubkey()
+    }
+}
+
+#[cfg(all(test, feature = "test"))]
+mod tests {
+    //! Coverage for the per-address tx-history population in
+    //! [`CoinStore::generate`]. Constructs a CoinStore directly
+    //! with a NoopBackend (no electrsd, no listener thread) and
+    //! drives funding/spending txs through the in-memory
+    //! [`TxStore`].
+    use super::*;
+    use crate::config::Config;
+    use bip39::Mnemonic;
+    use bwk_descriptor::{descriptor::ScriptType, wpkh_path};
+    use bwk_sign::HotSigner;
+    use bwk_utils::test::{funding_tx, spending_tx};
+    use miniscript::bitcoin::bip32::ChildNumber;
+    use std::sync::mpsc;
+
+    fn build_coin_store() -> (CoinStore, SpkDerivator) {
+        let network = bitcoin::Network::Regtest;
+        let mnemo = Mnemonic::generate(12).unwrap();
+        let signer = HotSigner::new_from_mnemonics(network, &mnemo.to_string()).unwrap();
+        let path = wpkh_path(network, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let derivator = SpkDerivator::new_wpkh(xpub, network).unwrap();
+        let descriptor = derivator.descriptor();
+        let dummy_config = Config::new(
+            Some(mnemo.to_string()),
+            "addr_history_test".into(),
+            network,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            std::path::PathBuf::default(),
+            "",
+            false,
+        )
+        .unwrap();
+
+        let (notif_sender, _notif_recv) = mpsc::channel();
+        let tx_store = TxStore::new();
+        let label_store = Arc::new(Mutex::new(LabelStore::new()));
+        let mock_backend: Arc<dyn bwk_persist::PersistenceBackend> =
+            Arc::new(bwk_persist::NoopBackend);
+        let account_store = Arc::new(Mutex::new(bwk_persist::RamStore::empty(
+            mock_backend,
+            bwk_persist::ACCOUNT_STORE_KEY,
+            crate::profile::encode_account_key,
+            crate::profile::encode_account_value,
+        )));
+        let cs = CoinStore::new(
+            network,
+            descriptor,
+            notif_sender,
+            0, // recv_tip
+            0, // change_tip
+            5, // look_ahead — populates spk indices 0..=5
+            tx_store,
+            label_store,
+            dummy_config,
+            account_store,
+        );
+        (cs, derivator)
+    }
+
+    #[test]
+    fn funding_txids_empty_for_unused_address() {
+        let (mut cs, deriv) = build_coin_store();
+        cs.generate();
+        let spk = deriv.receive_spk_at(2);
+        let entry = cs.address_info(&spk).expect("populated by look-ahead");
+        assert_eq!(entry.status(), AddressStatus::NotUsed);
+        assert!(entry.funding_txids().is_empty());
+        assert!(entry.spending_txids().is_empty());
+    }
+
+    #[test]
+    fn funding_txids_single_for_used_address() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(tx, Some(101)));
+        cs.generate();
+        let entry = cs.address_info(&spk).expect("entry");
+        assert_eq!(entry.status(), AddressStatus::Used);
+        assert_eq!(entry.funding_txids().len(), 1);
+        assert!(entry.funding_txids().contains(&txid));
+        assert!(entry.spending_txids().is_empty());
+    }
+
+    #[test]
+    fn funding_txids_multiple_for_reused_address() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx_a = funding_tx(spk.clone(), 0.5);
+        let tx_b = funding_tx(spk.clone(), 0.25);
+        let (txid_a, txid_b) = (tx_a.compute_txid(), tx_b.compute_txid());
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(tx_a, Some(101)));
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(tx_b, Some(102)));
+        cs.generate();
+        let entry = cs.address_info(&spk).expect("entry");
+        assert_eq!(entry.status(), AddressStatus::Reused);
+        assert_eq!(entry.funding_txids().len(), 2);
+        assert!(entry.funding_txids().contains(&txid_a));
+        assert!(entry.funding_txids().contains(&txid_b));
+    }
+
+    #[test]
+    fn spending_txids_empty_when_unspent() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(3);
+        let tx = funding_tx(spk.clone(), 0.5);
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(tx, Some(101)));
+        cs.generate();
+        let entry = cs.address_info(&spk).expect("entry");
+        assert!(entry.spending_txids().is_empty());
+    }
+
+    #[test]
+    fn spending_txids_recorded_when_outpoint_consumed() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(4);
+
+        // Fund index 4.
+        let funding = funding_tx(spk.clone(), 0.5);
+        let funding_txid = funding.compute_txid();
+        // The spk we paid is at the LAST output (funding_tx appends it).
+        let funded_vout = (funding.output.len() - 1) as u32;
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(funding, Some(101)));
+
+        // Spend the freshly-funded outpoint.
+        let outpoint = OutPoint {
+            txid: funding_txid,
+            vout: funded_vout,
+        };
+        let spending = spending_tx(outpoint);
+        let spending_txid = spending.compute_txid();
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(spending, Some(102)));
+
+        cs.generate();
+        let entry = cs.address_info(&spk).expect("entry");
+        assert_eq!(entry.spending_txids().len(), 1);
+        assert!(entry.spending_txids().contains(&spending_txid));
+        // Funding still recorded too.
+        assert!(entry.funding_txids().contains(&funding_txid));
     }
 }
