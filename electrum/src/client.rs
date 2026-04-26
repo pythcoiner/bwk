@@ -47,6 +47,8 @@ impl Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 impl From<raw_client::Error> for Error {
     fn from(value: raw_client::Error) -> Self {
         Error::Electrum(format!("{value:?}"))
