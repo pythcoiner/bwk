@@ -22,7 +22,7 @@ pub use bwk;
 pub use bwk::label_store::LabelKey;
 pub use bwk::{Notification, SpNotification};
 pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
-pub use config::{Config, ConfigError, SubAccountConfig};
+pub use config::{Config, ConfigError, SubAccountConfig, CONFIG_FILENAME};
 pub use scan_state::ScanState;
 pub use tx_store::{SpTxEntry, SpTxStore, TxDirection};
 

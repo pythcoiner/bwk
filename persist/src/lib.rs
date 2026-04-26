@@ -49,11 +49,13 @@
 use std::sync::Arc;
 
 pub mod backend;
+pub mod config_store;
 pub mod storage;
 
 #[cfg(feature = "sqlite")]
 pub use backend::SqliteBackend;
 pub use backend::{JsonBackend, NoopBackend, PersistenceBackend};
+pub use config_store::{CallbackConfigStore, ConfigStore, FileConfigStore, NoopConfigStore};
 pub use storage::{RamStore, Store};
 
 /// Monotonic integer stamped into every persistence medium (both JSON

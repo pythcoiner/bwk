@@ -27,6 +27,8 @@ use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClien
 use spdk_core::account::SpAccount;
 use spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
 
+use bwk::persist::{ConfigStore, NoopConfigStore};
+
 use crate::{
     coin_store::{KeyedBip32Source, MergedCoinSource, SpCoinSource},
     recipient::{SpChangeRecipientProvider, SpSecretProvider},
@@ -130,6 +132,12 @@ pub struct Account<
     tx_store: Arc<Mutex<SpTxStore<P>>>,
     scan_state: Arc<Mutex<ScanState>>,
     config: Config,
+    /// Persistence sink for `config`. [`NoopConfigStore`] by default.
+    /// Consumers wire whatever shape suits them — a
+    /// [`bwk::persist::FileConfigStore`] for file-backed persistence, a
+    /// [`bwk::persist::CallbackConfigStore`] to bridge save/load through
+    /// host-supplied closures, or any other [`ConfigStore`] impl.
+    config_store: Arc<dyn ConfigStore<Config>>,
     sender: mpsc::Sender<Notification>,
     receiver: Option<mpsc::Receiver<Notification>>,
     scanner_handle: Option<JoinHandle<()>>,
@@ -154,6 +162,17 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     /// - Neither mnemonic nor scan_sk is provided
     /// - blindbit_url is empty
     pub fn new(config: Config) -> Result<Self, AccountError> {
+        Self::with_config_store(config, Arc::new(NoopConfigStore::<Config>::default()))
+    }
+
+    /// Like [`Account::new`] but with an explicit config store
+    /// ([`bwk::persist::FileConfigStore`] for file-backed,
+    /// [`bwk::persist::CallbackConfigStore`] to bridge through
+    /// caller-supplied closures, or any other [`ConfigStore`]).
+    pub fn with_config_store(
+        config: Config,
+        config_store: Arc<dyn ConfigStore<Config>>,
+    ) -> Result<Self, AccountError> {
         // Validate config
         if config.mnemonic.is_none() && config.scan_sk.is_none() {
             return Err(AccountError::Config(
@@ -182,9 +201,9 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             .iter()
             .enumerate()
             .map(|(i, sub_cfg)| {
-                let mut bwk_config = bwk::Config {
+                let bwk_config = bwk::Config {
                     data_dir: config.account_dir(),
-                    dir_name: "",
+                    dir_name: format!("{}-sub-{}", config.account_name, i),
                     account: format!("{}-sub-{}", config.account_name, i),
                     electrum_url: sub_cfg.electrum_url.clone(),
                     electrum_port: sub_cfg.electrum_port,
@@ -201,8 +220,6 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     skip_labels: true,
                     persist_kind: config.persist_kind,
                 };
-                bwk_config.dir_name =
-                    Box::leak(format!("{}-sub-{}", config.account_name, i).into_boxed_str());
                 bwk::Account::new_with_sender(bwk_config, sender.clone())
             })
             .collect();
@@ -215,6 +232,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             tx_store,
             scan_state,
             config,
+            config_store,
             sender,
             receiver: Some(receiver),
             scanner_handle: None,
@@ -606,7 +624,17 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             self.backend = backend;
         }
         if self.config.persist {
-            self.config.persist();
+            self.persist_config();
+        }
+    }
+
+    /// Push the current config to the configured [`ConfigStore`].
+    ///
+    /// Under [`bwk::persist::PersistenceKind::Sqlite`] the saved view has
+    /// signer material stripped via [`Config::for_persistence`].
+    fn persist_config(&self) {
+        if let Err(e) = self.config_store.save(&self.config.for_persistence()) {
+            log::warn!("config save failed: {e}");
         }
     }
 
@@ -1766,7 +1794,7 @@ mod tests {
             .descriptor();
         bwk::Account::new(bwk::Config {
             data_dir: std::path::PathBuf::new(),
-            dir_name: "",
+            dir_name: String::new(),
             account: name.to_string(),
             electrum_url: None,
             electrum_port: None,

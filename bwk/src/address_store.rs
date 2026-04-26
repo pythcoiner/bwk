@@ -623,7 +623,7 @@ mod tests {
             Network::Regtest,
             ScriptType::Descriptor(Box::new(descriptor)),
             tmp.path().to_path_buf(),
-            "test",
+            "test".to_string(),
             false, // don't persist
         )
         .expect("valid config")

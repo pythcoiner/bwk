@@ -11,7 +11,7 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
-use bwk_persist::{PersistenceBackend, Store};
+use bwk_persist::{ConfigStore, NoopConfigStore, PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
 
@@ -138,6 +138,12 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,
     config: Config,
+    /// Persistence sink for `config`. [`NoopConfigStore`] by default.
+    /// Consumers wire whatever shape suits them — a
+    /// [`bwk_persist::FileConfigStore`] for file-backed persistence, a
+    /// [`bwk_persist::CallbackConfigStore`] to bridge save/load through
+    /// host-supplied closures, or any other [`ConfigStore`] impl.
+    config_store: Arc<dyn ConfigStore<Config>>,
     electrum_stop: Option<Arc<AtomicBool>>,
     signing_manager: SigningManager<P::SignerStore>,
     /// Owned by the Electrum listener thread once it spawns; `take()`-n
@@ -179,6 +185,7 @@ impl Account<RamProfile<DefaultBackend>> {
         Self::from_stores(
             config,
             sender,
+            default_config_store(),
             Stores {
                 tx: ram.tx,
                 label: ram.label,
@@ -188,6 +195,10 @@ impl Account<RamProfile<DefaultBackend>> {
             },
         )
     }
+}
+
+fn default_config_store() -> Arc<dyn ConfigStore<Config>> {
+    Arc::new(NoopConfigStore::<Config>::default())
 }
 
 // Generic constructors over any profile that knows how to open its
@@ -200,19 +211,37 @@ impl<P: OpenFromBackend> Account<P> {
     /// `SqliteBackend` under `PersistenceKind::Sqlite`). Defaults to
     /// the [`RamProfile<DefaultBackend>`] storage strategy via the
     /// `Account` struct's default type parameter.
+    ///
+    /// Config persistence defaults to [`NoopConfigStore`]; use
+    /// [`Account::with_config_store`] to wire a concrete impl
+    /// ([`bwk_persist::FileConfigStore`] for file-backed,
+    /// [`bwk_persist::CallbackConfigStore`] to bridge through
+    /// caller-supplied closures, or any other [`ConfigStore`]).
     pub fn new(config: Config) -> Self {
         let (sender, receiver) = mpsc::channel();
-        let mut account = Self::new_inner(config, sender);
+        let mut account = Self::new_inner(config, sender, default_config_store());
+        account.receiver = Some(receiver);
+        account
+    }
+
+    /// Like [`Account::new`] but with an explicit config store.
+    pub fn with_config_store(config: Config, config_store: Arc<dyn ConfigStore<Config>>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let mut account = Self::new_inner(config, sender, config_store);
         account.receiver = Some(receiver);
         account
     }
 
     /// Creates a new `Account` using an external notification sender.
     pub fn new_with_sender(config: Config, sender: mpsc::Sender<Notification>) -> Self {
-        Self::new_inner(config, sender)
+        Self::new_inner(config, sender, default_config_store())
     }
 
-    fn new_inner(config: Config, sender: mpsc::Sender<Notification>) -> Self {
+    fn new_inner(
+        config: Config,
+        sender: mpsc::Sender<Notification>,
+        config_store: Arc<dyn ConfigStore<Config>>,
+    ) -> Self {
         assert!(!config.account.is_empty());
         let backend: Arc<dyn PersistenceBackend> = config
             .build_backend()
@@ -227,20 +256,26 @@ impl<P: OpenFromBackend> Account<P> {
             };
         let stores =
             P::open(backend, secrets_backend).expect("Account::new: failed to open stores");
-        Self::from_stores(config, sender, stores)
+        Self::from_stores(config, sender, config_store, stores)
     }
 
     /// Recreate the Account with the same config, online.
     pub fn restart_electrum(&mut self) {
-        let mut new_account = Account::<P>::new(self.config.clone());
+        let store = self.config_store.clone();
+        let mut new_account = Account::<P>::with_config_store(self.config.clone(), store);
         new_account.config.set_offline(false);
-        new_account.config.persist();
+        new_account.persist_config();
         *self = new_account;
     }
 }
 
 impl<P: StorageProfile> Account<P> {
-    fn from_stores(config: Config, sender: mpsc::Sender<Notification>, stores: Stores<P>) -> Self {
+    fn from_stores(
+        config: Config,
+        sender: mpsc::Sender<Notification>,
+        config_store: Arc<dyn ConfigStore<Config>>,
+        stores: Stores<P>,
+    ) -> Self {
         let tx_store = TxStore::from_store(stores.tx);
         let label_store = Arc::new(Mutex::new(LabelStore::from_store(stores.label)));
         let account_store = Arc::new(Mutex::new(stores.account));
@@ -277,6 +312,7 @@ impl<P: StorageProfile> Account<P> {
             receiver: None,
             sender,
             config,
+            config_store,
             signing_manager,
             statuses_store: Some(stores.statuses),
         };
@@ -284,6 +320,18 @@ impl<P: StorageProfile> Account<P> {
             account.start_electrum();
         }
         account
+    }
+}
+
+impl<P: StorageProfile> Account<P> {
+    /// Push the current config to the configured [`ConfigStore`].
+    ///
+    /// Under [`bwk_persist::PersistenceKind::Sqlite`] the saved view has
+    /// signer material stripped via [`Config::for_persistence`].
+    fn persist_config(&self) {
+        if let Err(e) = self.config_store.save(&self.config.for_persistence()) {
+            log::warn!("config save failed: {e}");
+        }
     }
 }
 
@@ -602,7 +650,7 @@ impl<P: StorageProfile> Account<P> {
         if let Ok(port) = port.parse::<u16>() {
             self.config.electrum_url = Some(url);
             self.config.electrum_port = Some(port);
-            self.config.persist();
+            self.persist_config();
         } else {
             self.sender
                 .send(Notification::InvalidElectrumConfig)
@@ -628,7 +676,7 @@ impl<P: StorageProfile> Account<P> {
             self.electrum_stop = Some(electrum_stop);
             if self.config.offline() {
                 self.config.set_offline(false);
-                self.config.persist();
+                self.persist_config();
             }
         }
     }
@@ -641,7 +689,7 @@ impl<P: StorageProfile> Account<P> {
         self.electrum_stop = None;
         self.tx_listener = None;
         self.config.set_offline(true);
-        self.config.persist();
+        self.persist_config();
     }
 
     pub fn electrum_offline(&self) -> bool {
@@ -656,7 +704,7 @@ impl<P: StorageProfile> Account<P> {
     pub fn set_look_ahead(&mut self, look_ahead: String) {
         if let Ok(la) = look_ahead.parse::<u32>() {
             self.config.look_ahead = la;
-            self.config.persist();
+            self.persist_config();
         } else {
             self.sender
                 .send(Notification::InvalidLookAhead)
@@ -967,7 +1015,7 @@ mod tests {
                 Network::Regtest,
                 ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
                 PathBuf::default(),
-                "",
+                String::new(),
                 false,
             )
             .unwrap();
@@ -1509,7 +1557,7 @@ mod integration_tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path,
-            ".bwk",
+            ".bwk".to_string(),
             true,
         )
         .unwrap();
@@ -1632,7 +1680,7 @@ mod integration_tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path,
-            ".bwk",
+            ".bwk".to_string(),
             true,
         )
         .unwrap();
@@ -1790,7 +1838,7 @@ mod integration_tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path,
-            ".bwk",
+            ".bwk".to_string(),
             true,
         )
         .unwrap();
@@ -1849,7 +1897,7 @@ mod integration_tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path,
-            ".bwk",
+            ".bwk".to_string(),
             true,
         )
         .unwrap();
@@ -1926,10 +1974,10 @@ mod integration_tests {
 #[cfg(all(test, feature = "sqlite"))]
 mod sqlite_signer_exclusion {
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, CONFIG_FILENAME};
     use bip39::Mnemonic;
     use bwk_descriptor::descriptor::ScriptType;
-    use bwk_persist::PersistenceKind;
+    use bwk_persist::{FileConfigStore, PersistenceKind};
     use miniscript::bitcoin::{bip32::ChildNumber, Network};
     use temp_dir::TempDir;
 
@@ -1969,22 +2017,26 @@ mod sqlite_signer_exclusion {
             Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             temp.path().to_path_buf(),
-            "wallet",
+            "wallet".to_string(),
             true,
         )
         .expect("config");
         cfg.set_offline(true);
         cfg.persist_kind = PersistenceKind::Sqlite;
 
-        // Build the account, force a config write + a label write to exercise
-        // multiple persist paths. SQLite mode must not write the mnemonic
-        // anywhere under the account dir.
-        let account = Account::new(cfg.clone());
-        cfg.persist();
+        // Wire a FileConfigStore against the account dir's config.json,
+        // build the account, drive a config save + a label write to
+        // exercise multiple persist paths. SQLite mode must not write
+        // the mnemonic anywhere under the account dir.
+        let account_dir = cfg.account_dir();
+        let config_store: Arc<dyn ConfigStore<Config>> = Arc::new(FileConfigStore::<Config>::new(
+            account_dir.join(CONFIG_FILENAME),
+        ));
+        let account: Account = Account::with_config_store(cfg.clone(), config_store);
+        account.persist_config();
         account.label_store.lock().expect("poisoned").persist();
         drop(account);
 
-        let account_dir = Config::path(temp.path().to_path_buf(), "wallet", "alice".to_string());
         assert!(account_dir.exists(), "account dir created");
         assert_needle_absent(&account_dir, &unique);
     }
@@ -2000,18 +2052,21 @@ mod sqlite_signer_exclusion {
             Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             temp.path().to_path_buf(),
-            "wallet",
+            "wallet".to_string(),
             true,
         )
         .expect("config")
         .with_persist_kind(PersistenceKind::Json);
-        cfg.persist();
 
-        let on_disk = std::fs::read_to_string(
-            Config::path(temp.path().to_path_buf(), "wallet", "alice".to_string())
-                .join("config.json"),
-        )
-        .expect("config.json");
+        let account_dir = cfg.account_dir();
+        let config_path = account_dir.join(CONFIG_FILENAME);
+        let config_store: Arc<dyn ConfigStore<Config>> =
+            Arc::new(FileConfigStore::<Config>::new(config_path.clone()));
+        let account: Account = Account::with_config_store(cfg.clone(), config_store);
+        account.persist_config();
+        drop(account);
+
+        let on_disk = std::fs::read_to_string(&config_path).expect("config.json");
         assert!(
             on_disk.contains(&unique),
             "mnemonic must appear in config.json under JSON mode (default)"

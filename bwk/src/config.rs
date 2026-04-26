@@ -1,10 +1,4 @@
-use std::{
-    fs::{self, File},
-    io::{Read, Write},
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use bwk_descriptor::descriptor::ScriptType;
 use bwk_persist::{self as persist, PersistenceBackend, PersistenceKind};
@@ -12,7 +6,12 @@ use bwk_sign::hot_signer::HotSigner;
 use miniscript::{bitcoin, Descriptor, DescriptorPublicKey};
 use serde::{Deserialize, Serialize};
 
-const CONFIG_FILENAME: &str = "config.json";
+/// Filename used by [`bwk_persist::FileConfigStore`].
+///
+/// Lives on `Config` for backwards-compat with existing on-disk layouts;
+/// one could build its `FileConfigStore` path as
+/// `config.account_dir().join(Config::CONFIG_FILENAME)`.
+pub const CONFIG_FILENAME: &str = "config.json";
 /// Logical store name for the bwk per-address-tip subscription map.
 /// Re-export of the canonical constant in [`bwk_persist`].
 pub const STATUSES_STORE_KEY: &str = bwk_persist::STATUSES_STORE_KEY;
@@ -20,7 +19,11 @@ pub const STATUSES_STORE_KEY: &str = bwk_persist::STATUSES_STORE_KEY;
 const TIP_RECEIVE_ROW: &str = "receive_index";
 const TIP_CHANGE_ROW: &str = "change_index";
 
-/// Returns the data directory path based on the operating system.
+/// Returns the OS-specific data directory under `dir_name`.
+///
+/// Convenience for callers running on a desktop OS; consumers on
+/// other platforms (mobile, embedded) typically compute their data
+/// path natively and pass it as `data_dir` to `Config::new`.
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub fn datadir(dir_name: &str) -> PathBuf {
     #[cfg(target_os = "linux")]
@@ -65,7 +68,7 @@ pub struct Config {
     #[serde(skip)]
     pub data_dir: PathBuf,
     #[serde(skip)]
-    pub dir_name: &'static str,
+    pub dir_name: String,
     pub account: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub electrum_url: Option<String>,
@@ -104,7 +107,7 @@ impl Config {
         network: bitcoin::Network,
         script: ScriptType,
         data_dir: PathBuf,
-        dir_name: &'static str,
+        dir_name: String,
         persist: bool,
     ) -> Option<Config> {
         let descriptor = match script {
@@ -137,7 +140,26 @@ impl Config {
 
     /// Return the directory where this account's files (or SQLite DB) live.
     pub fn account_dir(&self) -> PathBuf {
-        Self::path(self.data_dir.clone(), self.dir_name, self.account.clone())
+        let mut dir = self.data_dir.clone();
+        dir.push(&self.dir_name);
+        dir.push(&self.account);
+        dir
+    }
+
+    /// View of this config that's safe to persist to disk.
+    ///
+    /// Under [`PersistenceKind::Sqlite`] the mnemonic is stripped so it
+    /// never lands on disk; under [`PersistenceKind::Json`] (default)
+    /// the config is returned unchanged. Used by `Account` when handing
+    /// config to a [`bwk_persist::ConfigStore`].
+    pub fn for_persistence(&self) -> Config {
+        if self.excludes_signer_data() {
+            let mut stripped = self.clone();
+            stripped.mnemonic = None;
+            stripped
+        } else {
+            self.clone()
+        }
     }
 
     /// Construct the concrete persistence backend for this config.
@@ -225,107 +247,12 @@ impl Config {
     pub fn offline(&self) -> bool {
         self.offline.unwrap_or(false)
     }
-    /// Saves the configuration to a file.
-    ///
-    /// Under [`PersistenceKind::Sqlite`], the on-disk view strips the
-    /// mnemonic — callers must re-supply it on the next run.
-    pub fn persist(&self) {
-        let mut path = Self::path(self.data_dir.clone(), self.dir_name, self.account.clone());
-        maybe_create_dir(&path);
-        path.push(CONFIG_FILENAME);
-
-        log::warn!("Config::persist() {:?}", path);
-
-        let mut file = File::create(path).unwrap();
-        let content = if self.excludes_signer_data() {
-            let mut stripped = self.clone();
-            stripped.mnemonic = None;
-            serde_json::to_string_pretty(&stripped).unwrap()
-        } else {
-            serde_json::to_string_pretty(&self).unwrap()
-        };
-        file.write_all(content.as_bytes()).unwrap();
-    }
-
-    pub fn dir_name(&self) -> &'static str {
-        self.dir_name
+    pub fn dir_name(&self) -> &str {
+        &self.dir_name
     }
 
     pub fn data_dir(&self) -> PathBuf {
         self.data_dir.clone()
-    }
-
-    /// Lists all configuration directories in the data directory.
-    ///
-    /// # Returns
-    ///
-    /// A vector of strings representing the account names of the configurations
-    /// found in the data directory.
-    /// Lists all configuration directories in the data directory.
-    pub fn list_configs(data_dir: PathBuf, dir_name: &'static str) -> Vec<String> {
-        let mut path = data_dir.clone();
-        path.push(dir_name);
-        let mut out = vec![];
-        if let Ok(folders) = fs::read_dir(path) {
-            folders.for_each(|account| {
-                if let Ok(entry) = account {
-                    if let Ok(md) = entry.metadata() {
-                        if md.is_dir() {
-                            let acc_name = entry.file_name().to_str().unwrap().to_string();
-                            let path = Self::path(data_dir.clone(), dir_name, acc_name.clone());
-                            let parsed = Self::from_file(path);
-                            if !parsed.account.is_empty() {
-                                out.push(acc_name);
-                            }
-                        };
-                    }
-                }
-            });
-        }
-
-        out
-    }
-
-    /// Checks if a configuration file exists for the given account.
-    ///
-    /// # Arguments
-    ///
-    /// * `account` - A string representing the account name.
-    ///
-    /// # Returns
-    ///
-    /// A boolean value indicating whether the configuration file exists.
-    /// Checks if a configuration file exists for the given account.
-    pub fn config_exists(data_dir: PathBuf, dir_name: &'static str, account: String) -> bool {
-        let mut path = Self::path(data_dir, dir_name, account.clone());
-        path.push(CONFIG_FILENAME);
-        path.exists()
-    }
-    /// Returns the path to the configuration directory for the specified account.
-    ///
-    /// # Arguments
-    ///
-    /// * `account` - A string representing the account name.
-    ///
-    /// # Returns
-    ///
-    /// A `PathBuf` representing the path to the configuration directory.
-    pub fn path(data_dir: PathBuf, dir_name: &'static str, account: String) -> PathBuf {
-        let mut dir = data_dir;
-        dir.push(dir_name);
-        dir.push(account);
-        dir
-    }
-
-    /// Creates a `Config` instance from a configuration file.
-    pub fn from_file(mut path: PathBuf) -> Self {
-        path.push(CONFIG_FILENAME);
-
-        let mut file = File::open(path).unwrap();
-        let mut content = String::new();
-        let _ = file.read_to_string(&mut content);
-        let conf: Config = serde_json::from_str(&content).unwrap();
-        conf
     }
 
     /// Persists the tip information through the given backend.
@@ -393,37 +320,37 @@ pub fn is_descriptor_valid(descriptor: String) -> bool {
 
 #[cfg(test)]
 pub mod tests {
+    use bwk_persist::{ConfigStore, FileConfigStore};
     use miniscript::bitcoin::bip32::ChildNumber;
 
     use super::*;
 
     #[test]
-    fn test_persist() {
+    fn config_round_trips_through_file_store() {
         let temp = temp_dir::TempDir::new().unwrap();
         let path = temp.child("storage");
         let mnemonic = bip39::Mnemonic::generate(12).unwrap();
-        let dir_name = "wallet";
         let cfg = Config::new(
             Some(mnemonic.to_string()),
             "my_account".to_string(),
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path.clone(),
-            dir_name,
+            "wallet".to_string(),
             true,
         )
         .unwrap();
-        cfg.persist();
-        let mut path = path.to_path_buf();
-        path.push(dir_name);
-        path.push("my_account");
-        let cfg2 = Config::from_file(path);
+
+        let store: FileConfigStore<Config> =
+            FileConfigStore::new(cfg.account_dir().join(CONFIG_FILENAME));
+        store.save(&cfg.for_persistence()).unwrap();
+        let cfg2 = store.load().unwrap().expect("config persisted");
         assert_eq!(cfg.account, cfg2.account);
-        assert_eq!(cfg2.account, "my_account")
+        assert_eq!(cfg2.account, "my_account");
     }
 
     #[test]
-    fn persist_under_sqlite_strips_mnemonic() {
+    fn for_persistence_under_sqlite_strips_mnemonic() {
         let temp = temp_dir::TempDir::new().unwrap();
         let path = temp.child("storage");
         let unique = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
@@ -433,25 +360,26 @@ pub mod tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path.clone(),
-            "wallet",
+            "wallet".to_string(),
             true,
         )
         .unwrap();
         cfg.persist_kind = PersistenceKind::Sqlite;
-        cfg.persist();
 
-        let on_disk = std::fs::read_to_string(
-            Config::path(path.clone(), "wallet", "alice".to_string()).join(CONFIG_FILENAME),
-        )
-        .expect("config.json present");
+        let view = cfg.for_persistence();
         assert!(
-            !on_disk.contains(&unique),
-            "mnemonic must not appear in config.json under SQLite mode: {on_disk}"
+            view.mnemonic.is_none(),
+            "mnemonic must be stripped under SQLite"
+        );
+        let serialized = serde_json::to_string_pretty(&view).unwrap();
+        assert!(
+            !serialized.contains(&unique),
+            "mnemonic must not appear in serialized form under SQLite mode: {serialized}"
         );
     }
 
     #[test]
-    fn persist_under_json_preserves_mnemonic() {
+    fn for_persistence_under_json_preserves_mnemonic() {
         let temp = temp_dir::TempDir::new().unwrap();
         let path = temp.child("storage");
         let unique = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
@@ -461,19 +389,17 @@ pub mod tests {
             bitcoin::Network::Regtest,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             path.clone(),
-            "wallet",
+            "wallet".to_string(),
             true,
         )
         .unwrap();
-        cfg.persist();
 
-        let on_disk = std::fs::read_to_string(
-            Config::path(path.clone(), "wallet", "alice".to_string()).join(CONFIG_FILENAME),
-        )
-        .expect("config.json present");
+        let view = cfg.for_persistence();
+        assert_eq!(view.mnemonic, Some(unique.clone()));
+        let serialized = serde_json::to_string_pretty(&view).unwrap();
         assert!(
-            on_disk.contains(&unique),
-            "mnemonic must appear in config.json under JSON mode (default)"
+            serialized.contains(&unique),
+            "mnemonic must appear in serialized form under JSON mode (default)"
         );
     }
 }

@@ -705,7 +705,7 @@ impl TestEnv {
         let descriptor = signer.descriptors().into_iter().next().unwrap();
         let sub = bwk::Account::new(bwk::Config {
             data_dir: std::path::PathBuf::new(),
-            dir_name: "",
+            dir_name: String::new(),
             account: "sub-tr".to_string(),
             electrum_url: None,
             electrum_port: None,
@@ -731,7 +731,7 @@ impl TestEnv {
         let descriptor = signer.descriptors().into_iter().next().unwrap();
         let sub = bwk::Account::new(bwk::Config {
             data_dir: std::path::PathBuf::new(),
-            dir_name: "",
+            dir_name: String::new(),
             account: "sub-sw".to_string(),
             electrum_url: None,
             electrum_port: None,

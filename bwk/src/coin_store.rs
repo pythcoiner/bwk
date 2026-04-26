@@ -1040,7 +1040,7 @@ mod tests {
             network,
             ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
             std::path::PathBuf::default(),
-            "",
+            String::new(),
             false,
         )
         .unwrap();

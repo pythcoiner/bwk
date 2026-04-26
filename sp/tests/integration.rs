@@ -145,9 +145,12 @@ fn test_config_with_all_options() {
     assert_eq!(config.birthday_height, Some(850000));
 }
 
-/// Test config persistence and reload.
+/// Test config persistence and reload via FileConfigStore.
 #[test]
-fn test_persist_basic_roundtrip() {
+fn test_config_persistence_roundtrip() {
+    use bwk::persist::{ConfigStore, FileConfigStore};
+    use bwk_sp::CONFIG_FILENAME;
+
     let dir = TempDir::new().unwrap();
 
     let config = Config::new(
@@ -156,14 +159,14 @@ fn test_persist_basic_roundtrip() {
         test_mnemonic().to_string(),
         "https://blindbit.example.com".to_string(),
         dir.path().to_path_buf(),
-    );
+    )
+    .enable_persist(true);
 
-    // Enable persist and save
-    let config = config.enable_persist(true);
-    config.persist();
+    let store: FileConfigStore<Config> =
+        FileConfigStore::new(config.account_dir().join(CONFIG_FILENAME));
+    store.save(&config.for_persistence()).expect("save");
 
-    // Load and verify
-    let loaded = Config::from_file(config.config_path()).expect("load config");
+    let loaded = store.load().expect("load").expect("config persisted");
     assert_eq!(loaded.account_name, config.account_name);
     assert_eq!(loaded.network, config.network);
     assert_eq!(loaded.mnemonic, config.mnemonic);
