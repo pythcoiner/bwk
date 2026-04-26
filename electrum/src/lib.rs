@@ -2,3 +2,5 @@
 pub mod client;
 pub mod electrum;
 pub mod raw_client;
+
+pub use client::Client;

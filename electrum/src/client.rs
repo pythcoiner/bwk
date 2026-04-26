@@ -2,8 +2,8 @@ use crate::{
     electrum::{
         request::Request,
         response::{
-            ErrorResponse, HistoryResult, Response, SHGetHistoryResponse, SHNotification,
-            SHSubscribeResponse, TxBroadcastResponse, TxGetResponse, TxGetResult,
+            ErrorResponse, ErrorResult, HistoryResult, Response, SHGetHistoryResponse,
+            SHNotification, SHSubscribeResponse, TxBroadcastResponse, TxGetResponse, TxGetResult,
         },
         types::ScriptHash,
     },
@@ -31,6 +31,7 @@ pub enum Error {
     WrongResponse,
     WrongOutPoint,
     TxDoesNotExists,
+    Rejected(String),
 }
 
 impl Display for Error {
@@ -41,6 +42,7 @@ impl Display for Error {
             Error::WrongResponse => write!(f, "Wrong response from electrum server"),
             Error::WrongOutPoint => write!(f, "Requested outpoint did not exists"),
             Error::TxDoesNotExists => write!(f, "Requested transaction did not exists"),
+            Error::Rejected(msg) => write!(f, "server rejected transaction: {msg}"),
         }
     }
 }
@@ -631,6 +633,44 @@ impl Client {
                     self.index.remove(&req_id);
                     return Ok(());
                 }
+            }
+        }
+        self.index.remove(&req_id);
+        Err(Error::WrongResponse)
+    }
+
+    /// Broadcast a fully signed transaction and return its txid on success.
+    ///
+    /// Unlike [`Client::broadcast`], a server rejection (`Response::Error`) is
+    /// surfaced as [`Error::Rejected`] with the server's message instead of
+    /// the opaque [`Error::WrongResponse`].
+    pub fn broadcast_tx(&mut self, tx: &Transaction) -> Result<Txid, Error> {
+        let raw_tx = serialize_hex(tx);
+        let request = Request::tx_broadcast(raw_tx);
+        let req_id = request.id;
+        self.inner.try_send(&request)?;
+        self.index.insert(req_id, request);
+        let resp = match self.inner.recv(&self.index) {
+            Ok(r) => r,
+            Err(e) => {
+                self.index.remove(&req_id);
+                return Err(e.into());
+            }
+        };
+        for r in resp {
+            match r {
+                Response::TxBroadcast(TxBroadcastResponse { id, .. }) if id == req_id => {
+                    self.index.remove(&req_id);
+                    return Ok(tx.compute_txid());
+                }
+                Response::Error(ErrorResponse {
+                    id,
+                    error: ErrorResult { message, .. },
+                }) if id == req_id => {
+                    self.index.remove(&req_id);
+                    return Err(Error::Rejected(message));
+                }
+                _ => {}
             }
         }
         self.index.remove(&req_id);

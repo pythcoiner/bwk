@@ -24,6 +24,7 @@ serde_json.workspace = true
 hex-conservative.workspace = true
 bwk-backoff.workspace = true
 bwk-utils.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 hex_lit.workspace = true
