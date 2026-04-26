@@ -32,6 +32,7 @@ getrandom = { workspace = true }
 
 [dev-dependencies]
 blindbitd = { workspace = true }
+bwk = { workspace = true, features = ["sp", "test"] }
 bwk-utils = { workspace = true, features = ["test"] }
 bwk-sign = { workspace = true, features = ["test"] }
 bip39 = { workspace = true }
