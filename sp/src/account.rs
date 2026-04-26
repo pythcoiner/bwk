@@ -1062,6 +1062,152 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         out
     }
 
+    /// Build a configured `TxBuilder` from a [`bwk_tx::TxRequest`].
+    ///
+    /// The returned builder has the request's outputs added, fee policy set,
+    /// and inputs selected per the rules: manual outpoints when supplied,
+    /// drain when any output sets `max`, otherwise auto-select.
+    pub fn tx_builder_from_request(
+        &self,
+        request: &bwk_tx::TxRequest,
+    ) -> Result<bwk_tx::TxBuilder, bwk_tx::TxRequestError> {
+        use crate::recipient::SpRecipientAddress;
+        use bwk_tx::{Amount as BwkAmount, TxRequestError};
+        use spdk_core::RecipientAddress;
+
+        let network = self.network();
+
+        let mut has_max = false;
+        let mut max_addr: Option<RecipientAddress> = None;
+        let mut output_total: u64 = 0;
+        let mut recipients: Vec<SpRecipientAddress> = Vec::new();
+
+        for output in &request.outputs {
+            let addr = RecipientAddress::try_from(output.address.clone()).map_err(|e| {
+                TxRequestError::InvalidAddress {
+                    address: output.address.clone(),
+                    source: Box::new(e),
+                }
+            })?;
+            if output.max {
+                if has_max {
+                    return Err(TxRequestError::MultipleMaxOutputs);
+                }
+                has_max = true;
+                max_addr = Some(addr);
+            } else {
+                output_total += output.amount;
+                recipients.push(SpRecipientAddress::new(addr, output.amount, network));
+            }
+        }
+
+        let feerate_msats_vb = (request.fee_rate.max(1.0) * 1000.0) as u64;
+        let mut builder = self.tx_builder();
+        builder = if request.fee > 0 {
+            builder.fee(request.fee)
+        } else {
+            builder.feerate(feerate_msats_vb)
+        };
+
+        for recip in recipients {
+            builder.add_output(recip);
+        }
+        if has_max {
+            let mut recip = SpRecipientAddress::new(max_addr.unwrap(), 0, network);
+            recip.amount = BwkAmount::Max(None);
+            builder.add_output(recip);
+        }
+
+        if !request.input_outpoints.is_empty() {
+            let sp_coins = self.coins();
+            for outpoint in &request.input_outpoints {
+                if let Some(entry) = sp_coins.get(outpoint) {
+                    if !entry.is_spendable() {
+                        return Err(TxRequestError::CoinNotSpendable(*outpoint));
+                    }
+                    builder.add_input(sp_coin_entry_to_coin(*outpoint, entry));
+                    continue;
+                }
+                let mut found = false;
+                for sub in self.sub_accounts() {
+                    if let Some(entry) = sub.coins().get(outpoint) {
+                        if matches!(
+                            entry.status(),
+                            bwk_tx::CoinStatus::Spent | bwk_tx::CoinStatus::BeingSpend
+                        ) {
+                            return Err(TxRequestError::CoinNotSpendable(*outpoint));
+                        }
+                        builder.add_input(entry.coin.clone());
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Err(TxRequestError::CoinNotFound(*outpoint));
+                }
+            }
+        } else if has_max {
+            builder.drain_inputs();
+        } else {
+            let coins = builder.select_coins(output_total, feerate_msats_vb);
+            if coins.is_empty() {
+                return Err(TxRequestError::InsufficientFunds);
+            }
+            for coin in coins {
+                builder.add_input(coin);
+            }
+        }
+
+        Ok(builder)
+    }
+
+    /// Simulate a transaction described by a [`bwk_tx::TxRequest`].
+    pub fn simulate(
+        &self,
+        request: &bwk_tx::TxRequest,
+    ) -> Result<bwk_tx::TxSimulation, bwk_tx::TxRequestError> {
+        let builder = self.tx_builder_from_request(request)?;
+        let result = builder.simulate();
+        if let Some(err) = &result.error {
+            return Err(bwk_tx::TxRequestError::Builder(format!("{err:?}")));
+        }
+        let weight = bwk_tx::transaction::tx_estimated_weight(&result.tx_template);
+        let input_total: bitcoin::Amount = result
+            .tx_template
+            .inputs
+            .iter()
+            .map(|c| c.txout.value)
+            .sum();
+        let fee = result.fees.unwrap_or(bitcoin::Amount::ZERO);
+        let output_total = input_total
+            .checked_sub(fee)
+            .unwrap_or(bitcoin::Amount::ZERO);
+        let selected_outpoints = result
+            .tx_template
+            .inputs
+            .iter()
+            .map(|c| c.outpoint)
+            .collect();
+        Ok(bwk_tx::TxSimulation {
+            fee,
+            weight,
+            input_total,
+            output_total,
+            selected_outpoints,
+        })
+    }
+
+    /// Build an unsigned PSBT from a [`bwk_tx::TxRequest`].
+    pub fn prepare(
+        &self,
+        request: &bwk_tx::TxRequest,
+    ) -> Result<bitcoin::Psbt, bwk_tx::TxRequestError> {
+        let mut builder = self.tx_builder_from_request(request)?;
+        builder
+            .generate()
+            .map_err(|e| bwk_tx::TxRequestError::Builder(format!("{e:?}")))
+    }
+
     /// SP spendable summary plus every sub-account's spendable summary, summed.
     pub fn all_spendable_coins(&self) -> crate::SpendableSummary {
         use crate::SpendableSummary;
@@ -1530,6 +1676,29 @@ pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
         .block_height()
         .map(|h| h.to_consensus_u32())
         .map_err(|e| AccountError::Network(e.to_string()))
+}
+
+/// Build a [`bwk_tx::Coin`] from an SP outpoint + entry, suitable for
+/// `TxBuilder::add_input`. The taproot key-spend satisfaction weight (66 wu)
+/// is hardcoded — SP outputs are always single-key taproot.
+fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx::Coin {
+    const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
+    bwk_tx::Coin {
+        txout: bitcoin::TxOut {
+            value: entry.amount(),
+            script_pubkey: entry.script().clone(),
+        },
+        outpoint,
+        height: Some(entry.height() as u64),
+        sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+        status: bwk_tx::CoinStatus::Confirmed,
+        label: None,
+        satisfaction_size: TR_KEYSPEND_SATISFACTION_WEIGHT,
+        spend_info: bwk_tx::CoinSpendInfo::Sp {
+            derivation: bitcoin::bip32::DerivationPath::default(),
+            tweak: *entry.tweak(),
+        },
+    }
 }
 
 // Tests

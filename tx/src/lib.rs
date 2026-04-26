@@ -3,6 +3,7 @@ pub mod coin_selection;
 pub mod descr_fingerprint;
 pub mod error;
 pub mod recipient;
+pub mod template;
 pub mod transaction;
 pub mod tx_builder;
 
@@ -14,6 +15,7 @@ pub use recipient::{
     ChangeRecipientProvider, FinalizationContext, LocalTipUpdater, PsbtOutputInfo, Recipient,
     RecipientProvider, SpPartialSecretProvider,
 };
+pub use template::{TxOutputSpec, TxRequest, TxRequestError, TxSimulation};
 pub use transaction::{
     estimated_weight_raw, process_fees, Amount, Drain, FeeResult, Fees, TransactionResult,
     TxTemplate, Warning,

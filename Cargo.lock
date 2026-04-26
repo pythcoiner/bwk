@@ -619,6 +619,7 @@ dependencies = [
  "miniscript",
  "rand 0.9.2",
  "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
