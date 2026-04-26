@@ -5,9 +5,11 @@ pub mod config;
 pub mod label_store;
 pub mod log;
 pub mod profile;
+pub mod sync;
 pub mod tx_store;
 
 pub use profile::{RamProfile, StorageProfile};
+pub use sync::SyncEstimator;
 
 #[cfg(feature = "sp")]
 pub use account::SpNotification;
