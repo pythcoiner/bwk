@@ -10,6 +10,7 @@ pub mod profile;
 pub mod recipient;
 mod scan_state;
 mod tx_store;
+mod unified;
 
 pub use profile::{SpRamProfile, SpStorageProfile};
 
@@ -25,6 +26,7 @@ pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
 pub use config::{Config, ConfigError, SubAccountConfig, CONFIG_FILENAME};
 pub use scan_state::ScanState;
 pub use tx_store::{SpTxEntry, SpTxStore, TxDirection};
+pub use unified::{CoinOrigin, SpendableSummary, UnifiedCoin};
 
 // Re-export external types for convenience
 pub use bitcoin;

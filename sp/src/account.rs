@@ -1014,7 +1014,74 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         let sp_balance = self.balance();
         let bip32_balance: u64 = self.sub_accounts.iter().map(|a| a.balance().0).sum();
         sp_balance + bip32_balance
-    } // Transaction Building
+    }
+
+    /// All coins from the SP account and every sub-account, keyed by outpoint.
+    ///
+    /// Spent and being-spent coins are included; filter by
+    /// [`UnifiedCoin::spendable`](crate::UnifiedCoin::spendable) to keep only
+    /// live UTXOs.
+    pub fn all_coins(&self) -> BTreeMap<OutPoint, crate::UnifiedCoin> {
+        use crate::{CoinOrigin, UnifiedCoin};
+        let mut out: BTreeMap<OutPoint, UnifiedCoin> = BTreeMap::new();
+
+        for (outpoint, entry) in self.coins() {
+            out.insert(
+                outpoint,
+                UnifiedCoin {
+                    origin: CoinOrigin::Sp,
+                    outpoint,
+                    amount: Amount::from_sat(entry.amount_sat()),
+                    height: Some(entry.height()),
+                    spendable: entry.is_spendable(),
+                    label: self.get_coin_label(&outpoint),
+                },
+            );
+        }
+
+        for (sub_idx, sub) in self.sub_accounts.iter().enumerate() {
+            for (outpoint, entry) in sub.coins() {
+                let spendable = !matches!(
+                    entry.status(),
+                    bwk_tx::CoinStatus::Spent | bwk_tx::CoinStatus::BeingSpend,
+                );
+                out.insert(
+                    outpoint,
+                    UnifiedCoin {
+                        origin: CoinOrigin::SubAccount(sub_idx),
+                        outpoint,
+                        amount: entry.coin.txout.value,
+                        height: entry.height().map(|h| h as u32),
+                        spendable,
+                        label: self.get_coin_label(&outpoint),
+                    },
+                );
+            }
+        }
+
+        out
+    }
+
+    /// SP spendable summary plus every sub-account's spendable summary, summed.
+    pub fn all_spendable_coins(&self) -> crate::SpendableSummary {
+        use crate::SpendableSummary;
+        let sp = self.spendable_coins();
+        let mut summary = SpendableSummary {
+            confirmed_count: sp.confirmed_coins as u64,
+            confirmed_balance: Amount::from_sat(sp.confirmed_balance),
+            unconfirmed_count: sp.unconfirmed_coins as u64,
+            unconfirmed_balance: Amount::from_sat(sp.unconfirmed_balance),
+        };
+        for sub in &self.sub_accounts {
+            let s = sub.spendable_coins();
+            summary.confirmed_count += s.confirmed_coins as u64;
+            summary.confirmed_balance += Amount::from_sat(s.confirmed_balance);
+            summary.unconfirmed_count += s.unconfirmed_coins as u64;
+            summary.unconfirmed_balance += Amount::from_sat(s.unconfirmed_balance);
+        }
+        summary
+    }
+    // Transaction Building
 
     /// Check if this account can sign transactions.
     ///
