@@ -1,12 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::{Read, Write},
-    path::PathBuf,
     str::FromStr,
+    sync::Arc,
 };
 
 use crossbeam::channel;
+
+use bwk_persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
 
 use miniscript::{
     bitcoin::{self, bip32},
@@ -50,111 +50,132 @@ struct ExternalSigner {
     descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
 }
 
+/// Logical store name used by [`PersistenceBackend`] implementations
+/// for the BIP32 hot-signer store.
+pub const STORE_KEY: &str = bwk_persist::SIGNERS_STORE_KEY;
+
+pub fn encode_fingerprint(k: &bip32::Fingerprint) -> String {
+    k.to_string()
+}
+pub fn decode_fingerprint(s: &str) -> Result<bip32::Fingerprint, PersistError> {
+    bip32::Fingerprint::from_str(s)
+        .map_err(|e| PersistError::Serde(format!("bad Fingerprint pk {s:?}: {e}")))
+}
+pub fn encode_json_signer(v: &JsonSigner) -> Result<Vec<u8>, PersistError> {
+    serde_json::to_vec(v).map_err(|e| PersistError::Serde(format!("encode JsonSigner: {e}")))
+}
+pub fn decode_json_signer(bytes: &[u8]) -> Result<JsonSigner, PersistError> {
+    serde_json::from_slice(bytes)
+        .map_err(|e| PersistError::Serde(format!("decode JsonSigner: {e}")))
+}
+
+/// Default backing store for [`SigningManager`]: RAM-cached + write-back
+/// over a runtime-dispatched [`PersistenceBackend`].
+pub type DefaultSignerStore = RamStore<Arc<dyn PersistenceBackend>, bip32::Fingerprint, JsonSigner>;
+
 /// A manager for handling hot signers and their notifications.
-pub struct SigningManager {
-    data_dir: PathBuf,
-    dir_name: &'static str,
+pub struct SigningManager<S = DefaultSignerStore>
+where
+    S: Store<Key = bip32::Fingerprint, Value = JsonSigner>,
+{
     receiver: channel::Receiver<SignerNotif>,
     sender: channel::Sender<SignerNotif>,
     bip32_signers: BTreeMap<bip32::Fingerprint, HotSigner>,
     signers: BTreeMap<bip32::Fingerprint, ExternalSigner>,
-    persist: bool,
+    store: S,
     #[cfg(feature = "hwi")]
     hw_service: Option<bwk_hwi::service::HwiService<crate::hwi::HwMessage>>,
     #[cfg(feature = "hwi")]
     hw_receiver: Option<channel::Receiver<crate::hwi::HwMessage>>,
 }
 
-impl std::fmt::Debug for SigningManager {
+impl<S> std::fmt::Debug for SigningManager<S>
+where
+    S: Store<Key = bip32::Fingerprint, Value = JsonSigner>,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SigningManager")
-            .field("data_dir", &self.data_dir)
-            .field("dir_name", &self.dir_name)
             .field("bip32_signers", &self.bip32_signers)
             .field("signers_count", &self.signers.len())
-            .field("persist", &self.persist)
             .finish()
     }
 }
 
-impl SigningManager {
-    pub fn new(data_dir: PathBuf, dir_name: &'static str) -> Self {
+impl SigningManager<DefaultSignerStore> {
+    /// In-memory only (no persistence).
+    pub fn new() -> Self {
+        let backend: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
+        let store = RamStore::empty(backend, STORE_KEY, encode_fingerprint, encode_json_signer);
+        Self::from_store(store)
+    }
+
+    /// Open the signer store against `backend`, hydrating the in-memory
+    /// signer map from any rows already present.
+    pub fn with_backend(backend: Arc<dyn PersistenceBackend>, store_key: &'static str) -> Self {
+        match RamStore::open(
+            backend.clone(),
+            store_key,
+            encode_fingerprint,
+            decode_fingerprint,
+            encode_json_signer,
+            decode_json_signer,
+        ) {
+            Ok(store) => Self::from_store(store),
+            Err(e) => {
+                log::error!("SigningManager::with_backend: {e}");
+                let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
+                let store =
+                    RamStore::empty(noop, store_key, encode_fingerprint, encode_json_signer);
+                Self::from_store(store)
+            }
+        }
+    }
+}
+
+impl Default for SigningManager<DefaultSignerStore> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> SigningManager<S>
+where
+    S: Store<Key = bip32::Fingerprint, Value = JsonSigner>,
+{
+    /// Wrap a pre-opened signer store. Hydrates `bip32_signers` from
+    /// every row already in the store.
+    pub fn from_store(store: S) -> Self {
         let (sender, receiver) = channel::unbounded();
+        let mut bip32_signers: BTreeMap<bip32::Fingerprint, HotSigner> = BTreeMap::new();
+        match store.iter() {
+            Ok(iter) => {
+                for (fg, json) in iter {
+                    let mut signer = HotSigner::from_json(json);
+                    signer.init(sender.clone());
+                    bip32_signers.insert(fg, signer);
+                }
+            }
+            Err(e) => {
+                log::error!("SigningManager::from_store iter: {e}");
+            }
+        }
         Self {
-            data_dir,
-            dir_name,
             receiver,
             sender,
-            bip32_signers: Default::default(),
-            signers: Default::default(),
-            persist: true,
+            bip32_signers,
+            signers: BTreeMap::new(),
+            store,
             #[cfg(feature = "hwi")]
             hw_service: None,
             #[cfg(feature = "hwi")]
             hw_receiver: None,
         }
     }
-    /// Returns the path to the signers' data directory.
-    pub fn path(data_dir: PathBuf, dir_name: &'static str) -> PathBuf {
-        let mut path = data_dir;
-        path.push(dir_name);
-        path.push(".signers");
-        path
-    }
-    /// Creates a `SigningManager` instance from a file.
-    pub fn from_file(data_dir: PathBuf, dir_name: &'static str) -> Self {
-        if let Ok(mut file) = File::open(Self::path(data_dir.clone(), dir_name)) {
-            let mut content = String::new();
-            let _ = file.read_to_string(&mut content);
-            let json_signers: Result<Vec<JsonSigner>, _> = serde_json::from_str(&content);
-            if let Ok(signers) = json_signers {
-                let bip32_signers = signers
-                    .into_iter()
-                    .map(|s| {
-                        let signer = HotSigner::from_json(s);
-                        (signer.fingerprint(), signer)
-                    })
-                    .collect();
-                let mut manager = SigningManager::new(data_dir, dir_name);
-                manager.bip32_signers = bip32_signers;
-                let sender = manager.sender.clone();
-                for signer in manager.bip32_signers.values_mut() {
-                    signer.init(sender.clone());
-                }
-                manager
-            } else {
-                SigningManager::new(data_dir, dir_name)
-            }
-        } else {
-            SigningManager::new(data_dir, dir_name)
-        }
-    }
 
-    /// Allow to disable persistance of data, useful for tests
-    pub fn enable_persist(mut self, persist: bool) -> Self {
-        self.persist = persist;
-        self
-    }
-
-    /// Persists the current state of the signers to a file.
-    pub fn persist(&self) {
-        if !self.persist {
-            return;
-        }
-        match File::create(Self::path(self.data_dir.clone(), self.dir_name)) {
-            Ok(mut file) => {
-                let content: Vec<_> = self
-                    .bip32_signers
-                    .clone()
-                    .into_values()
-                    .map(|s| s.to_json())
-                    .collect();
-                let str_content = serde_json::to_string_pretty(&content).expect("cannot_fail");
-                let _ = file.write(str_content.as_bytes());
-            }
-            Err(e) => {
-                log::error!("SigningManager::persist() fail to open file: {e}");
-            }
+    /// Persists pending changes through the backend.
+    pub fn persist(&mut self) {
+        if let Err(e) = self.store.flush() {
+            log::error!("SigningManager::persist() flush: {e}");
         }
     }
 
@@ -216,12 +237,29 @@ impl SigningManager {
     pub fn new_bip32_signer_from_mnemonic(&mut self, network: bitcoin::Network, mnemonic: String) {
         let mut signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
         signer.init(self.sender.clone());
-        self.bip32_signers.insert(signer.fingerprint(), signer);
+        let fg = signer.fingerprint();
+        if let Some(json) = signer.to_json() {
+            if let Err(e) = self.store.insert(fg, json) {
+                log::error!("SigningManager::new_bip32_signer insert: {e}");
+            }
+        }
+        self.bip32_signers.insert(fg, signer);
     }
 
     pub fn register_bip32_descriptor(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
         for signer in self.bip32_signers.values_mut() {
             signer.inner_register_descriptor(descriptor.clone());
+        }
+        // Re-snapshot so the new descriptor set survives a restart.
+        let snapshots: Vec<(bip32::Fingerprint, JsonSigner)> = self
+            .bip32_signers
+            .values()
+            .filter_map(|s| s.to_json().map(|j| (s.fingerprint(), j)))
+            .collect();
+        for (fg, json) in snapshots {
+            if let Err(e) = self.store.insert(fg, json) {
+                log::error!("SigningManager::register_bip32_descriptor insert: {e}");
+            }
         }
     }
 
@@ -433,11 +471,10 @@ mod tests {
     use bip32::Fingerprint;
 
     use super::*;
-    use std::str::FromStr;
 
     #[test]
     fn test_manager_bip32_signer() {
-        let mut manager = SigningManager::new(PathBuf::new(), ".bwk");
+        let mut manager = SigningManager::new();
         let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".to_string();
         manager.new_bip32_signer_from_mnemonic(bitcoin::Network::Regtest, mnemonic);
         if let SignerNotif::Info(fg, _info) = manager.poll().unwrap() {

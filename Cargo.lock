@@ -573,6 +573,7 @@ dependencies = [
  "bwk-descriptor",
  "bwk-hwi",
  "bwk-keys",
+ "bwk-persist",
  "bwk-utils",
  "crossbeam",
  "log",
