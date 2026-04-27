@@ -1524,6 +1524,16 @@ mod integration_tests {
         panic!("Timeout elapsed while waiting for condition.");
     }
 
+    /// Per-block wait budget for integration tests.
+    ///
+    /// `n_blocks * 3` was the historical formula but flaked in CI when
+    /// `random_range(2..15)` returned the low end (6 s isn't enough for
+    /// electrs to index + notify + bwk to process under load). Floor at
+    /// 30 s and use a higher per-block factor.
+    pub fn block_wait(blocks: u32) -> u64 {
+        ((blocks as u64) * 5).max(30)
+    }
+
     #[test]
     fn test_reorg() {
         // setup_logger();
@@ -1539,7 +1549,7 @@ mod integration_tests {
         let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 100);
 
-        const TIMEOUT: u64 = 15;
+        const TIMEOUT: u64 = 60;
         const BLOCKS: u32 = 1;
 
         let look_ahead = 20;
@@ -1663,7 +1673,7 @@ mod integration_tests {
         let (url, port, mut electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 110);
 
-        const TIMEOUT: u64 = 15;
+        const TIMEOUT: u64 = 60;
 
         let look_ahead = 20;
 
@@ -1857,7 +1867,7 @@ mod integration_tests {
                 let coins = account.coins();
                 coins.len() == 1
             },
-            (blocks as u64) * 3,
+            block_wait(blocks),
         );
         let (_, blocks) = spend(&mut account, &mut builder, &bitcoind, 100_000);
         wait_until_timeout(
@@ -1865,7 +1875,7 @@ mod integration_tests {
                 let payments = account.payment_history();
                 payments.len() == 2
             },
-            (blocks as u64) * 3,
+            block_wait(blocks),
         );
 
         let payments = account.payment_history();
@@ -1921,7 +1931,7 @@ mod integration_tests {
             for _ in 0..15 {
                 wait_until_timeout(
                     || !account.spendable_coins().coins.is_empty(),
-                    (prev_blocks as u64) * 3,
+                    block_wait(prev_blocks),
                 );
                 sleep(Duration::from_millis(1000));
                 let coins = account.spendable_coins();
@@ -1952,14 +1962,13 @@ mod integration_tests {
                     prev_blocks = receive(&mut account, &bitcoind, random_range(10_000..1_000_000));
                 }
             }
-            wait_until_timeout(
-                || {
-                    let payments = account.payment_history();
-                    payments.len() == 15
-                },
-                (prev_blocks as u64) * 3,
-            );
-            sleep(Duration::from_secs(3));
+            // Wait for the actual target (1 initial receive + 15 loop
+            // iterations = 16 payments) rather than `len() == 15` plus a
+            // 3 s grace. Use an absolute 120 s budget here: after 15
+            // iterations of generate-and-index, the listener thread can
+            // be queued up well past `block_wait(prev_blocks)`'s 30 s
+            // floor under CI / CPU pressure.
+            wait_until_timeout(|| account.payment_history().len() >= 16, 120);
             let payments = account.payment_history();
             assert_eq!(payments.len(), 16);
         }

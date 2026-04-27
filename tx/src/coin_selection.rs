@@ -32,13 +32,24 @@ pub struct Selection {
     pub outpoints: Vec<bitcoin::OutPoint>,
 }
 
+/// Fixed per-input non-witness weight in WU.
+///
+/// Each input occupies prevout(36 B) + script_sig_length(1 B) + sequence(4 B)
+/// = 41 B in the non-witness section, so 41 * 4 = 164 WU. This must be added
+/// to the satisfaction weight to match what `estimated_weight_raw` charges.
+/// Omitting it caused `Selection::spendable_amount` to overstate what the
+/// inputs actually leave after fees, leading to `NotEnoughForFee` after the
+/// builder simulated the real tx.
+const PER_INPUT_FIXED_WU: u64 = 164;
+
 impl Selection {
     pub fn new<T: CoinCandidate>(coins: Vec<&T>, feerate: u64 /* msats/vb */) -> Self {
         let mut spendable_amount = 0;
         let mut fees = 0;
         let mut outpoints = vec![];
         for c in coins {
-            let fee = Weight::from_wu(c.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000;
+            let input_wu = PER_INPUT_FIXED_WU + c.satisfaction_weight();
+            let fee = Weight::from_wu(input_wu).to_vbytes_ceil() * feerate / 1000;
             fees += fee;
             spendable_amount += c.value_sat() - fee;
             outpoints.push(c.outpoint());
@@ -53,7 +64,8 @@ impl Selection {
 }
 
 pub fn fees<T: CoinCandidate>(coin: &T, feerate: u64 /* msats/vb */) -> u64 {
-    Weight::from_wu(coin.satisfaction_weight()).to_vbytes_ceil() * feerate / 1000
+    let input_wu = PER_INPUT_FIXED_WU + coin.satisfaction_weight();
+    Weight::from_wu(input_wu).to_vbytes_ceil() * feerate / 1000
 }
 
 // Sort out coins if fees >= spendable value

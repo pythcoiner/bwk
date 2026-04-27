@@ -372,11 +372,13 @@ pub const DUST: u64 = 330;
 
 /// Wait until the backend has synced to at least the given height.
 ///
-/// Polls the backend every 100ms until `block_height()` returns at least `height`.
+/// Polls the backend every 500ms until `block_height()` returns at least `height`.
+/// 60 s flaked under CI load when the runner was indexing many regtest blocks
+/// in parallel; 120 s with finer polling is more robust.
 #[allow(dead_code)]
 pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(60);
+    let timeout = Duration::from_secs(120);
     loop {
         if start.elapsed() > timeout {
             panic!(
@@ -389,7 +391,7 @@ pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
                 return;
             }
         }
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_millis(500));
     }
 }
 
