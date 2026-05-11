@@ -10,6 +10,7 @@ use bitcoin::{
     psbt::Psbt,
 };
 use ledger_bitcoin_client::psbt::PartialSignature;
+use ledger_bitcoin_client::SignPsbtYieldedObject;
 
 use ledger_apdu::APDUAnswer;
 use ledger_transport_hidapi::TransportNativeHID;
@@ -162,18 +163,21 @@ impl<T: Transport> HWI for Ledger<T> {
 
     fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), HWIError> {
         if let Some((policy, hmac)) = &self.options.wallet {
-            let sigs = self.client.sign_psbt(psbt, policy, hmac.as_ref())?;
-            for (i, sig) in sigs {
+            let yielded_objects = self.client.sign_psbt(psbt, policy, hmac.as_ref())?;
+            for (i, obj) in yielded_objects {
                 let input = psbt.inputs.get_mut(i).ok_or(HWIError::DeviceDidNotSign)?;
-                match sig {
-                    PartialSignature::Sig(key, sig) => {
-                        input.partial_sigs.insert(key, sig);
-                    }
-                    PartialSignature::TapScriptSig(key, Some(tapleaf_hash), sig) => {
-                        input.tap_script_sigs.insert((key, tapleaf_hash), sig);
-                    }
-                    PartialSignature::TapScriptSig(_, None, sig) => {
-                        input.tap_key_sig = Some(sig);
+                // Ignore MuSig2 and unknown payloads.
+                if let SignPsbtYieldedObject::Partial(sig) = obj {
+                    match sig {
+                        PartialSignature::Sig(key, sig) => {
+                            input.partial_sigs.insert(key, sig);
+                        }
+                        PartialSignature::TapScriptSig(key, Some(tapleaf_hash), sig) => {
+                            input.tap_script_sigs.insert((key, tapleaf_hash), sig);
+                        }
+                        PartialSignature::TapScriptSig(_, None, sig) => {
+                            input.tap_key_sig = Some(sig);
+                        }
                     }
                 }
             }

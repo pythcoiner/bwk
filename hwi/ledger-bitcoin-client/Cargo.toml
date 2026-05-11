@@ -1,6 +1,6 @@
 [package]
 name = "ledger-bitcoin-client"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Fork of ledger_bitcoin_client (https://github.com/LedgerHQ/app-bitcoin-new) with async removed"
 license = "Apache-2.0"
@@ -8,6 +8,9 @@ license = "Apache-2.0"
 [dependencies]
 bitcoin = { version = "0.32", default-features = false }
 miniscript = { version = "12.2", features = ["no-std"], optional = true, default-features = false }
+
+[dev-dependencies]
+hex-literal = "1.1"
 
 [features]
 paranoid_client = ["miniscript"]
