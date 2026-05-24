@@ -4,6 +4,7 @@ pub mod account;
 pub mod address_store;
 pub mod coin_store;
 pub mod config;
+pub mod header_validator;
 pub mod label_store;
 pub mod log;
 pub mod profile;
