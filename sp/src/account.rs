@@ -661,6 +661,13 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
     /// Internal: Execute one-shot scan to current chain tip.
     fn scan_oneshot(&mut self) -> Result<(), AccountError> {
+        // Clear any stale cancel signal from a previous run before we hand
+        // the flag down to the scanner. Without this, a caller that flipped
+        // the flag via `cancel_flag()` for a prior scan would cause the next
+        // OneShot to bail at the first block (spdk-core's `process_blocks`
+        // returns Ok early when `should_interrupt()` is true).
+        self.scanner_stop.store(false, Ordering::Relaxed);
+
         let start_height = self.scan_state.lock().expect("poisoned").next_scan_start();
         let end_height = self.block_height()?;
 
@@ -877,6 +884,24 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .as_ref()
             .map(|h| !h.is_finished())
             .unwrap_or(false)
+    }
+
+    /// Returns a clone of the scanner cancellation flag.
+    ///
+    /// Setting this `AtomicBool` to `true` causes any in-flight OneShot or
+    /// Continuous scan to bail at the next per-block checkpoint inside
+    /// spdk-core's `process_blocks` (which calls `should_interrupt()` before
+    /// every block). The scan call returns `Ok(())` after persisting state
+    /// , i.e. cancellation is graceful, not an error.
+    ///
+    /// `scan_oneshot` resets this flag to `false` at the start of each run,
+    /// so leaving the flag in `true` between runs is harmless.
+    ///
+    /// Intended for consumers that hold an `Account` behind a `Mutex` and
+    /// need to interrupt a scan without first re-acquiring the mutex (which
+    /// the in-flight scan call still holds via `&mut self`).
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.scanner_stop.clone()
     }
 
     /// Scan a range of blocks for silent payment outputs.
