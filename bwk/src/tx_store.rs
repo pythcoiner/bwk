@@ -1,4 +1,4 @@
-use miniscript::bitcoin::{self, Txid};
+use miniscript::bitcoin::{self, BlockHash, Txid};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt::Debug, str::FromStr, sync::Arc};
 
@@ -24,6 +24,52 @@ pub fn encode_entry(v: &TxEntry) -> Result<Vec<u8>, PersistError> {
 }
 pub fn decode_entry(bytes: &[u8]) -> Result<TxEntry, PersistError> {
     serde_json::from_slice(bytes).map_err(|e| PersistError::Serde(format!("decode TxEntry: {e}")))
+}
+
+/// Confirmation state of a transaction.
+///
+/// Tracks the progression from "not seen in any block" to "server claims
+/// inclusion at height H" to "we have a verified merkle proof of
+/// inclusion at height H". Block hash is carried on the confirmed variants
+/// so consumers can reason about which chain the claim or proof refers to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Inclusion {
+    /// Mempool tx, or no inclusion info yet.
+    Unconfirmed,
+    /// Server reported inclusion at `height` in the block identified by
+    /// `block_hash`, but we haven't proved it via a merkle branch yet.
+    /// Named to mirror [`CoinStatus::ConfirmedUnverified`].
+    ConfirmedUnverified { height: u32, block_hash: BlockHash },
+    /// We have verified a merkle proof of inclusion at `height` /
+    /// `block_hash`. The proof itself is not retained: a reorg re-fetches it.
+    Verified { height: u32, block_hash: BlockHash },
+    /// A merkle proof for the claim at `height` / `block_hash` was fetched but
+    /// failed verification against our stored header. Terminal: not retried
+    /// until the stored header hash at `height` changes (a reorg).
+    VerifyFailed { height: u32, block_hash: BlockHash },
+}
+
+impl Inclusion {
+    /// Block height, if confirmed. `VerifyFailed` is not trusted as confirmed,
+    /// so it yields `None`.
+    pub fn height(&self) -> Option<u32> {
+        match self {
+            Inclusion::Unconfirmed | Inclusion::VerifyFailed { .. } => None,
+            Inclusion::ConfirmedUnverified { height, .. } | Inclusion::Verified { height, .. } => {
+                Some(*height)
+            }
+        }
+    }
+
+    /// Block hash, if confirmed. `VerifyFailed` is not trusted as confirmed,
+    /// so it yields `None`.
+    pub fn block_hash(&self) -> Option<BlockHash> {
+        match self {
+            Inclusion::Unconfirmed | Inclusion::VerifyFailed { .. } => None,
+            Inclusion::ConfirmedUnverified { block_hash, .. }
+            | Inclusion::Verified { block_hash, .. } => Some(*block_hash),
+        }
+    }
 }
 
 /// A structure to store Bitcoin transactions indexed by their txids.
@@ -120,7 +166,7 @@ impl<P: StorageProfile> TxStore<P> {
                 log::error!("TxStore::insert_updates: skipping incomplete update");
                 continue;
             }
-            for (txid, tx, height) in upd.txs {
+            for (txid, tx) in upd.txs {
                 match self.store.contains_key(&txid) {
                     Ok(true) => continue,
                     Ok(false) => {}
@@ -134,10 +180,14 @@ impl<P: StorageProfile> TxStore<P> {
                     continue;
                 };
                 let weight = tx.weight().to_wu();
+                // NOTE: pending claims move to Inclusion::ConfirmedUnverified
+                // once the corresponding block header is available via the
+                // HeaderStore pending-claims queue.
+                // For now every newly-inserted entry starts Unconfirmed
+                // regardless of the server-reported height.
                 let entry = TxEntry {
-                    height,
                     tx,
-                    merkle: Default::default(),
+                    inclusion: Inclusion::Unconfirmed,
                     inputs: BTreeMap::new(),
                     outputs: BTreeMap::new(),
                     fees: 0,
@@ -170,16 +220,17 @@ impl<P: StorageProfile> TxStore<P> {
         }
     }
 
-    /// Updates the height of a transaction in the store.
-    pub fn update_height(&mut self, txid: &Txid, height: Option<u64>) {
-        match self.store.modify(txid, |e| e.height = height) {
+    /// Replaces the inclusion state of a transaction in the store.
+    pub fn update_inclusion(&mut self, txid: &Txid, inclusion: Inclusion) {
+        match self.store.modify(txid, |e| e.inclusion = inclusion.clone()) {
             Ok(true) => {}
-            // The spk history can carry a height change for a tx the store has
-            // not fetched yet (sync race under load); skip it instead of
-            // panicking and poisoning the store lock — the height is set when
-            // the tx itself lands.
-            Ok(false) => log::debug!("TxStore::update_height: missing txid {txid}, skipping"),
-            Err(e) => log::error!("TxStore::update_height: {e}"),
+            // The txid may not be in the store yet: a History response can
+            // report a height change for a tx whose body has not arrived via
+            // the `Txs` round-trip. It will get the correct inclusion once its
+            // entry lands and `resolve_reported_heights` re-claims it, so this
+            // is a no-op rather than a panic (which would kill the listener).
+            Ok(false) => log::debug!("TxStore::update_inclusion: missing txid {txid}"),
+            Err(e) => log::error!("TxStore::update_inclusion: {e}"),
         }
     }
 
@@ -205,15 +256,13 @@ pub struct OutputMetadata {
 /// A structure representing a Bitcoin transaction entry.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TxEntry {
-    /// Blockheight at which the tx have been mined
-    height: Option<u64>,
     /// Bitcoin tx
     tx: bitcoin::Transaction,
-    /// Merkle proof
-    merkle: Vec<Vec<u8>>,
-    /// Inputs netadata
+    /// Confirmation / verification state.
+    inclusion: Inclusion,
+    /// Inputs metadata
     pub inputs: BTreeMap<usize, InputMetadata>,
-    /// Outputs metatdata
+    /// Outputs metadata
     pub outputs: BTreeMap<usize, OutputMetadata>,
     /// Tx fees in sats
     fees: u64,
@@ -224,9 +273,8 @@ pub struct TxEntry {
 impl Debug for TxEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TxEntry")
-            .field("height", &self.height)
             .field("tx", &self.tx.compute_txid())
-            .field("merkle", &self.merkle)
+            .field("inclusion", &self.inclusion)
             .field("inputs", &self.inputs)
             .field("outputs", &self.outputs)
             .field("fees", &self.fees)
@@ -236,17 +284,16 @@ impl Debug for TxEntry {
 }
 
 impl TxEntry {
-    /// Test-only constructor that wraps a raw tx + height in a
-    /// fully-defaulted [`TxEntry`]. Intended for in-crate tests
-    /// that need to seed the [`TxStore`] without going through the
-    /// Electrum update plumbing.
+    /// Test-only constructor that wraps a raw tx in a fully-defaulted
+    /// [`TxEntry`], starting `Inclusion::Unconfirmed` like the production
+    /// insert path. Tests that need a confirmed entry mutate the inclusion
+    /// via [`TxStore::update_inclusion`] after insertion.
     #[cfg(all(test, feature = "test"))]
-    pub(crate) fn for_test(tx: bitcoin::Transaction, height: Option<u64>) -> Self {
+    pub(crate) fn for_test(tx: bitcoin::Transaction) -> Self {
         let weight = tx.weight().to_wu();
         Self {
-            height,
             tx,
-            merkle: Default::default(),
+            inclusion: Inclusion::Unconfirmed,
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
             fees: 0,
@@ -257,20 +304,19 @@ impl TxEntry {
     pub fn txid(&self) -> Txid {
         self.tx.compute_txid()
     }
+    /// Block height of this tx, derived from its [`Inclusion`].
     pub fn height(&self) -> Option<u64> {
-        self.height
+        self.inclusion.height().map(u64::from)
     }
-    pub fn set_height(&mut self, height: Option<u64>) {
-        self.height = height;
+    /// Block hash of this tx, derived from its [`Inclusion`].
+    pub fn block_hash(&self) -> Option<BlockHash> {
+        self.inclusion.block_hash()
+    }
+    pub fn inclusion(&self) -> &Inclusion {
+        &self.inclusion
     }
     pub fn tx(&self) -> &bitcoin::Transaction {
         &self.tx
-    }
-    pub fn merkle(&self) -> Vec<Vec<u8>> {
-        self.merkle.clone()
-    }
-    pub fn set_merkle(&mut self, merkle: Vec<Vec<u8>>) {
-        self.merkle = merkle;
     }
     pub fn fees(&self) -> u64 {
         self.fees
@@ -286,5 +332,134 @@ impl TxEntry {
         let inputs_filled = self.tx().input.len() == self.inputs.len();
         let outputs_filled = self.tx().output.len() == self.outputs.len();
         inputs_filled && outputs_filled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miniscript::bitcoin::{
+        absolute::LockTime, transaction::Version, BlockHash, Transaction, TxIn, TxOut,
+    };
+    use std::str::FromStr;
+
+    fn dummy_tx() -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: bitcoin::Amount::from_sat(1000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        }
+    }
+
+    fn dummy_block_hash() -> BlockHash {
+        BlockHash::from_str("0000000000000000000000000000000000000000000000000000000000000001")
+            .unwrap()
+    }
+
+    fn entry_with(inclusion: Inclusion) -> TxEntry {
+        let tx = dummy_tx();
+        let weight = tx.weight().to_wu();
+        TxEntry {
+            tx,
+            inclusion,
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            fees: 0,
+            weight,
+        }
+    }
+
+    #[test]
+    fn height_accessor_matches_variant() {
+        let e = entry_with(Inclusion::Unconfirmed);
+        assert_eq!(e.height(), None);
+
+        let e = entry_with(Inclusion::ConfirmedUnverified {
+            height: 42,
+            block_hash: dummy_block_hash(),
+        });
+        assert_eq!(e.height(), Some(42));
+
+        let e = entry_with(Inclusion::Verified {
+            height: 7,
+            block_hash: dummy_block_hash(),
+        });
+        assert_eq!(e.height(), Some(7));
+
+        let e = entry_with(Inclusion::VerifyFailed {
+            height: 7,
+            block_hash: dummy_block_hash(),
+        });
+        assert_eq!(e.height(), None);
+    }
+
+    #[test]
+    fn block_hash_accessor_matches_variant() {
+        let e = entry_with(Inclusion::Unconfirmed);
+        assert_eq!(e.block_hash(), None);
+
+        let hash = dummy_block_hash();
+        let e = entry_with(Inclusion::ConfirmedUnverified {
+            height: 42,
+            block_hash: hash,
+        });
+        assert_eq!(e.block_hash(), Some(hash));
+
+        let e = entry_with(Inclusion::Verified {
+            height: 7,
+            block_hash: hash,
+        });
+        assert_eq!(e.block_hash(), Some(hash));
+
+        let e = entry_with(Inclusion::VerifyFailed {
+            height: 7,
+            block_hash: hash,
+        });
+        assert_eq!(e.block_hash(), None);
+    }
+
+    #[test]
+    fn inclusion_json_round_trip_unconfirmed() {
+        let v = Inclusion::Unconfirmed;
+        let s = serde_json::to_string(&v).unwrap();
+        let back: Inclusion = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn inclusion_json_round_trip_confirmed_unverified() {
+        let v = Inclusion::ConfirmedUnverified {
+            height: 12_345,
+            block_hash: dummy_block_hash(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: Inclusion = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn inclusion_json_round_trip_verified() {
+        let v = Inclusion::Verified {
+            height: 99,
+            block_hash: dummy_block_hash(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: Inclusion = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn inclusion_json_round_trip_verify_failed() {
+        let v = Inclusion::VerifyFailed {
+            height: 99,
+            block_hash: dummy_block_hash(),
+        };
+        let s = serde_json::to_string(&v).unwrap();
+        let back: Inclusion = serde_json::from_str(&s).unwrap();
+        assert_eq!(v, back);
     }
 }

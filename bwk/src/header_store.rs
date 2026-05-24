@@ -269,6 +269,32 @@ impl HeaderStore<RamStore<Arc<dyn PersistenceBackend>, u32, [u8; Header::SIZE]>>
         Ok(store)
     }
 
+    /// Start online against `url`/`port` when both are given, or open
+    /// file-backed/in-memory (idle) when no endpoint is configured. Shared
+    /// try-start-else-open branching for callers (e.g. `bwk::Account`,
+    /// `bwk_sp::Account`) that build one `HeaderStore` per config; whether an
+    /// endpoint is even attempted (e.g. an "offline" config flag) is the
+    /// caller's call, expressed by passing `None`.
+    ///
+    /// A missing endpoint is not an error: it opens idle. A failed connect
+    /// against a *given* endpoint is surfaced as [`StartError`] rather than
+    /// silently degrading to an idle store, matching [`start`](Self::start).
+    pub fn start_or_open(
+        url: Option<String>,
+        port: Option<u16>,
+        network: Network,
+        path: Option<PathBuf>,
+        min_height: Option<u32>,
+    ) -> Result<Arc<Self>, StartError> {
+        if let (Some(url), Some(port)) = (url, port) {
+            return Self::start(url, port, network, path, min_height);
+        }
+        Ok(match path {
+            Some(p) => Self::from_file(network, p)?,
+            None => Self::new_in_memory(network),
+        })
+    }
+
     /// Reconnect the background worker to `url:port` after the previous
     /// connection died. Clears the stop flag and bumps the writer token so the
     /// superseded worker self-exits and its in-flight mutations become no-ops,
@@ -284,6 +310,13 @@ impl HeaderStore<RamStore<Arc<dyn PersistenceBackend>, u32, [u8; Header::SIZE]>>
         })?;
         self.spawn_worker(client, min_height);
         Ok(())
+    }
+
+    /// Idle the background worker without spawning a replacement. Sets the stop
+    /// flag so the running worker self-exits the next time it checks in,
+    /// leaving the store worker-less until a later `restart` reconnects it.
+    pub fn stop(self: &Arc<Self>) {
+        self.stopped.store(true, Ordering::SeqCst);
     }
 
     /// Wire `client` to a fresh worker thread, recording the worker handle

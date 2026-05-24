@@ -19,7 +19,7 @@ use bwk_sign::signing_manager::{
     decode_fingerprint, decode_json_signer, encode_fingerprint, encode_json_signer,
 };
 use bwk_sign::JsonSigner;
-use miniscript::bitcoin::{bip32, ScriptBuf, Txid};
+use miniscript::bitcoin::{bip32, block::Header, ScriptBuf, Txid};
 
 use crate::{
     config::Tip,
@@ -37,6 +37,7 @@ pub type DefaultBackend = Arc<dyn PersistenceBackend>;
 pub trait StorageProfile: 'static + Send + Sync {
     type TxStore: Store<Key = Txid, Value = TxEntry> + Send + Sync + 'static;
     type LabelStore: Store<Key = LabelKey, Value = String> + Send + Sync + 'static;
+    type HeaderStore: Store<Key = u32, Value = [u8; Header::SIZE]> + Send + Sync + 'static;
     type StatusesStore: Store<Key = ScriptBuf, Value = (Option<String>, u32, u32)>
         + Send
         + Sync
@@ -65,6 +66,7 @@ impl<B: PersistenceBackend> std::fmt::Debug for RamProfile<B> {
 impl<B: PersistenceBackend + Clone + 'static> StorageProfile for RamProfile<B> {
     type TxStore = RamStore<B, Txid, TxEntry>;
     type LabelStore = RamStore<B, LabelKey, String>;
+    type HeaderStore = RamStore<B, u32, [u8; Header::SIZE]>;
     type StatusesStore = RamStore<B, ScriptBuf, (Option<String>, u32, u32)>;
     type AccountStore = RamStore<B, String, Vec<u8>>;
     type SignerStore = RamStore<B, bip32::Fingerprint, JsonSigner>;
@@ -193,7 +195,9 @@ pub struct Stores<P: StorageProfile> {
 /// [`bwk_persist::NoopBackend`] as `secrets_backend` so signer state
 /// never reaches the SQLite DB; otherwise both arguments are the same
 /// backend handle.
-pub trait OpenFromBackend: StorageProfile + Sized {
+pub trait OpenFromBackend:
+    StorageProfile<HeaderStore = RamStore<DefaultBackend, u32, [u8; Header::SIZE]>> + Sized
+{
     fn open(
         backend: Arc<dyn PersistenceBackend>,
         secrets_backend: Arc<dyn PersistenceBackend>,

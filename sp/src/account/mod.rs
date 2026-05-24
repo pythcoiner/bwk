@@ -111,20 +111,12 @@ pub enum AccountError {
     NoElectrumEndpoint,
     #[error("broadcast error: {0}")]
     Broadcast(#[from] bwk::bwk_electrum::client::Error),
+    #[error("failed to open account store: {0}")]
+    Open(#[from] bwk::OpenError),
+    #[error("failed to start header store: {0}")]
+    HeaderStart(#[from] bwk::header_store::StartError),
     #[error("persistence error: {0}")]
-    Persist(String),
-}
-
-impl From<bwk::persist::PersistError> for AccountError {
-    fn from(e: bwk::persist::PersistError) -> Self {
-        AccountError::Persist(e.to_string())
-    }
-}
-
-impl From<bwk::OpenError> for AccountError {
-    fn from(e: bwk::OpenError) -> Self {
-        AccountError::Persist(e.to_string())
-    }
+    Persist(#[from] bwk::persist::PersistError),
 }
 
 // Re-use unified Notification from bwk
@@ -206,6 +198,14 @@ pub struct Account<
     pub(crate) scanner_stop: Arc<AtomicBool>,
     // Sub-accounts use the default bwk RAM profile — independent of sp's P.
     sub_accounts: Vec<bwk::Account>,
+    /// Shared HeaderStore handle every BIP32 sub-account's chain-tip-advance
+    /// pass reads from.
+    header_store: Arc<bwk::header_store::HeaderStore>,
+    /// Electrum endpoint the shared HeaderStore currently follows, if any
+    /// (the first sub-account descriptor carrying one). Used by
+    /// `start_electrum` and `set_electrum_settings` to decide whether to
+    /// restart it; cleared by `stop_electrum`.
+    header_store_endpoint: Option<(String, u16)>,
 }
 
 // Constructors are tied to the default SpRamProfile because they open
@@ -236,6 +236,29 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         config: Config,
         config_store: Arc<dyn ConfigStore<Config>>,
     ) -> Result<Self, AccountError> {
+        let header_store = Self::build_header_store(&config)?;
+        Self::with_config_store_and_header_store(config, config_store, header_store)
+    }
+
+    /// Like [`Account::with_config_store`] but sharing an existing
+    /// [`bwk::header_store::HeaderStore`] handle across every BIP32
+    /// sub-account instead of building one.
+    pub fn with_header_store(
+        config: Config,
+        header_store: Arc<bwk::header_store::HeaderStore>,
+    ) -> Result<Self, AccountError> {
+        Self::with_config_store_and_header_store(
+            config,
+            Arc::new(NoopConfigStore::<Config>::default()),
+            header_store,
+        )
+    }
+
+    fn with_config_store_and_header_store(
+        config: Config,
+        config_store: Arc<dyn ConfigStore<Config>>,
+        header_store: Arc<bwk::header_store::HeaderStore>,
+    ) -> Result<Self, AccountError> {
         // Validate config
         if config.mnemonic.is_none() && config.scan_sk.is_none() {
             return Err(AccountError::MissingKeys);
@@ -254,6 +277,8 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
 
         // Create/load stores
         let (coin_store, label_store, tx_store, scan_state) = Self::create_or_load_stores(&config)?;
+
+        let header_store_endpoint = Self::header_store_endpoint(&config);
 
         // Create sub-accounts from config descriptors
         let sub_accounts = config
@@ -280,7 +305,11 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     skip_labels: true,
                     persist_kind: config.persist_kind,
                 };
-                bwk::Account::try_new_with_sender(bwk_config, sender.clone())
+                bwk::Account::try_new_with_sender_and_header_store(
+                    bwk_config,
+                    header_store.clone(),
+                    sender.clone(),
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -298,6 +327,8 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             scanner_handle: None,
             scanner_stop: Arc::new(AtomicBool::new(false)),
             sub_accounts,
+            header_store,
+            header_store_endpoint,
         })
     }
 
@@ -410,6 +441,36 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             Arc::new(Mutex::new(tx_store)),
             Arc::new(Mutex::new(scan_state)),
         ))
+    }
+
+    /// The electrum endpoint that drives the shared HeaderStore: the first
+    /// configured sub-account descriptor carrying one.
+    fn header_store_endpoint(config: &Config) -> Option<(String, u16)> {
+        config
+            .descriptors
+            .iter()
+            .find_map(|d| d.electrum_url.clone().zip(d.electrum_port))
+    }
+
+    /// Build the shared HeaderStore for this account's BIP32 sub-accounts:
+    /// online against [`Self::header_store_endpoint`] when one is
+    /// configured, file-backed/in-memory (idle) otherwise. Fails loud if a
+    /// configured endpoint cannot be reached rather than silently opening a
+    /// worker-less store.
+    fn build_header_store(
+        config: &Config,
+    ) -> Result<Arc<bwk::header_store::HeaderStore>, AccountError> {
+        let path = config
+            .persist
+            .then(|| config.account_dir().join(bwk::config::HEADERS_FILENAME));
+        let (url, port) = Self::header_store_endpoint(config).unzip();
+        Ok(bwk::header_store::HeaderStore::start_or_open(
+            url,
+            port,
+            config.network,
+            path,
+            None,
+        )?)
     }
 }
 
@@ -735,24 +796,57 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         Some((fg, xpriv))
     }
 
-    /// Stop electrum on all sub-accounts.
+    /// Stop electrum on all sub-accounts. Every sub-account is now offline,
+    /// so idle the shared `HeaderStore` too instead of leaving its worker
+    /// running against a connection none of them use anymore. Clears the
+    /// tracked endpoint so a later `start_electrum`/`set_electrum_settings`
+    /// call restarts the store even against the same endpoint as before.
     pub fn stop_electrum(&mut self) {
         for sub in &mut self.sub_accounts {
             sub.stop_electrum();
         }
+        self.header_store.stop();
+        self.header_store_endpoint = None;
     }
 
-    /// Start electrum on all sub-accounts.
+    /// Start electrum on all sub-accounts, restarting the shared
+    /// `HeaderStore` against the first sub-account endpoint if it isn't
+    /// already following it (e.g. after a prior `stop_electrum`).
     pub fn start_electrum(&mut self) {
         for sub in &mut self.sub_accounts {
             sub.start_electrum();
         }
+        let endpoint = self.sub_accounts.iter().find_map(|a| {
+            let config = a.get_config();
+            config.electrum_url.zip(config.electrum_port)
+        });
+        self.follow_header_store_endpoint(endpoint);
     }
 
     /// Set electrum URL and port on all sub-accounts without writing to file.
     pub fn set_electrum_settings(&mut self, url: Option<String>, port: Option<u16>) {
         for sub in &mut self.sub_accounts {
             sub.set_electrum_config(url.clone(), port);
+        }
+        self.follow_header_store_endpoint(url.zip(port));
+    }
+
+    /// Point the shared `HeaderStore` at `endpoint`: restart its worker
+    /// against a new endpoint, or idle it when every sub-account went
+    /// offline. No-op when already following `endpoint`.
+    fn follow_header_store_endpoint(&mut self, endpoint: Option<(String, u16)>) {
+        if endpoint == self.header_store_endpoint {
+            return;
+        }
+        match endpoint.clone() {
+            Some((url, port)) => match self.header_store.restart(url, port) {
+                Ok(()) => self.header_store_endpoint = endpoint,
+                Err(e) => log::warn!("sp::Account: header store restart failed: {e}"),
+            },
+            None => {
+                self.header_store.stop();
+                self.header_store_endpoint = endpoint;
+            }
         }
     }
 
@@ -1597,6 +1691,50 @@ mod tests {
     // Note: Full Account creation tests require a working blindbit backend
     // which is not available in unit tests. Integration tests would test
     // the full flow.
+
+    // with_header_store: shares one HeaderStore across sub-accounts
+
+    fn offline_sub_account_config(mnemonic: &str, network: Network) -> config::SubAccountConfig {
+        use bwk_sign::{bwk_descriptor, HotSigner};
+        use miniscript::bitcoin::bip32::ChildNumber;
+
+        let signer = HotSigner::new_from_mnemonics(network, mnemonic).unwrap();
+        let path =
+            bwk_descriptor::wpkh_path(network, ChildNumber::from_hardened_idx(0).unwrap()).unwrap();
+        let xpub = signer.xpub(&path);
+        let descriptor = bwk_descriptor::SpkDerivator::new_wpkh(xpub, network)
+            .unwrap()
+            .descriptor();
+        config::SubAccountConfig {
+            descriptor,
+            mnemonic: None,
+            electrum_url: None,
+            electrum_port: None,
+        }
+    }
+
+    #[test]
+    fn with_header_store_shares_one_instance_across_sub_accounts() {
+        let mut config = test_config();
+        let mnemonic = config
+            .mnemonic
+            .clone()
+            .expect("test_config carries a mnemonic");
+        config.descriptors = vec![
+            offline_sub_account_config(&mnemonic, config.network),
+            offline_sub_account_config(&mnemonic, config.network),
+        ];
+
+        let shared = bwk::header_store::HeaderStore::new_in_memory(config.network);
+        let account =
+            Account::with_header_store(config, shared.clone()).expect("with_header_store");
+
+        assert!(Arc::ptr_eq(&account.header_store, &shared));
+        assert_eq!(account.sub_accounts().len(), 2);
+        for sub in account.sub_accounts() {
+            assert!(Arc::ptr_eq(sub.header_store(), &shared));
+        }
+    }
 
     // -----------------------------------------------------------------
     // owned_addresses — aggregate view across BIP32 subs + SP

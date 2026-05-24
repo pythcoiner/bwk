@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    ops::ControlFlow,
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,23 +12,26 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinError, CoinRequest, CoinResponse};
-use bwk_persist::{ConfigStore, NoopConfigStore, PersistError, PersistenceBackend, Store};
+use bwk_persist::{
+    ConfigStore, NoopBackend, NoopConfigStore, PersistError, PersistenceBackend, Store,
+};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
 
 use miniscript::{
-    bitcoin::{self, OutPoint, ScriptBuf},
+    bitcoin::{self, OutPoint, ScriptBuf, Txid},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
-    coin_store::{CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
+    coin_store::{ClaimAt, CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
     config::{Config, Tip},
+    header_store::{HeaderStore, InvalidCause},
     label_store::{LabelKey, LabelStore},
     profile::{self, DefaultBackend, OpenFromBackend, RamProfile, StorageProfile, Stores},
-    tx_store::{TxEntry, TxStore},
+    tx_store::{Inclusion, TxEntry, TxStore},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -37,6 +41,8 @@ pub enum AddrAccount {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// `confirmed_*` includes `ConfirmedUnverified` coins: confirmed on-chain,
+/// SPV proof still pending.
 pub struct CoinState {
     pub coins: BTreeMap<OutPoint, Coin>,
     pub confirmed_coins: usize,
@@ -87,8 +93,21 @@ pub enum Notification {
     InvalidLookAhead,
     Stopped,
     Error(Error),
+    /// A CTA pass mutated tx state in response to a HeaderStore update.
+    HeaderStoreUpdated,
+    /// A merkle proof failed verification, or the header store itself
+    /// failed validation; the affected entry was refused promotion.
+    ValidationFailed(ValidationFailure),
     #[cfg(feature = "sp")]
     Sp(SpNotification),
+}
+
+#[derive(Debug, Clone)]
+pub enum ValidationFailure {
+    /// Merkle proof for a tx at a height did not verify against the header.
+    MerkleProof { txid: Txid, height: u32 },
+    /// The header store rejected its own replay validation.
+    HeaderStore(InvalidCause),
 }
 
 impl From<TxListenerNotif> for Notification {
@@ -133,6 +152,10 @@ pub enum OpenError {
     /// could not be read (e.g. the account directory is already locked,
     /// or a stored blob failed to decode).
     Persist(PersistError),
+    /// The configured Electrum endpoint could not be reached while building
+    /// the account's [`HeaderStore`]. Fails loud rather than silently
+    /// opening a worker-less store (see [`Account::build_header_store`]).
+    HeaderStore(crate::header_store::StartError),
 }
 
 impl std::fmt::Display for OpenError {
@@ -140,6 +163,7 @@ impl std::fmt::Display for OpenError {
         match self {
             OpenError::EmptyAccount => write!(f, "account name must not be empty"),
             OpenError::Persist(e) => write!(f, "{e}"),
+            OpenError::HeaderStore(e) => write!(f, "{e}"),
         }
     }
 }
@@ -149,6 +173,12 @@ impl std::error::Error for OpenError {}
 impl From<PersistError> for OpenError {
     fn from(e: PersistError) -> Self {
         OpenError::Persist(e)
+    }
+}
+
+impl From<crate::header_store::StartError> for OpenError {
+    fn from(e: crate::header_store::StartError) -> Self {
+        OpenError::HeaderStore(e)
     }
 }
 
@@ -190,6 +220,9 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     /// Owned by the Electrum listener thread once it spawns; `take()`-n
     /// in `start_listen_txs` and moved into `listen_txs`.
     statuses_store: Option<P::StatusesStore>,
+    /// Validated header chain. Shared across Accounts; the Account
+    /// reads `block_hash` / `tip` on every CTA to promote claims.
+    header_store: Arc<HeaderStore<P::HeaderStore>>,
 }
 
 impl<P: StorageProfile> std::fmt::Debug for Account<P> {
@@ -220,11 +253,13 @@ impl Account<RamProfile<DefaultBackend>> {
     #[allow(dead_code)]
     fn from_ram_stores(
         config: Config,
+        header_store: Arc<HeaderStore>,
         sender: mpsc::Sender<Notification>,
         ram: profile::RamStores<DefaultBackend>,
     ) -> Self {
         Self::from_stores(
             config,
+            header_store,
             sender,
             default_config_store(),
             Stores {
@@ -253,6 +288,11 @@ impl<P: OpenFromBackend> Account<P> {
     /// the [`RamProfile<DefaultBackend>`] storage strategy via the
     /// `Account` struct's default type parameter.
     ///
+    /// Builds its own [`HeaderStore`] from `config` (see
+    /// [`Account::build_header_store`]); use
+    /// [`Account::try_new_with_header_store`] to share an existing one
+    /// instead.
+    ///
     /// Config persistence defaults to [`NoopConfigStore`]; use
     /// [`Account::try_with_config_store`] to wire a concrete impl
     /// ([`bwk_persist::FileConfigStore`] for file-backed,
@@ -263,8 +303,19 @@ impl<P: OpenFromBackend> Account<P> {
     /// cannot be built (e.g. the account directory is already locked by
     /// another instance), or a stored blob fails to decode.
     pub fn try_new(config: Config) -> Result<Self, OpenError> {
+        let header_store = Self::build_header_store(&config)?;
+        Self::try_new_with_header_store(config, header_store)
+    }
+
+    /// Like [`Account::try_new`] but sharing an existing [`HeaderStore`]
+    /// handle instead of building one.
+    pub fn try_new_with_header_store(
+        config: Config,
+        header_store: Arc<HeaderStore<P::HeaderStore>>,
+    ) -> Result<Self, OpenError> {
         let (sender, receiver) = mpsc::channel();
-        let mut account = Self::try_new_inner(config, sender, default_config_store())?;
+        let mut account =
+            Self::try_new_inner(config, header_store, sender, default_config_store())?;
         account.receiver = Some(receiver);
         Ok(account)
     }
@@ -274,8 +325,9 @@ impl<P: OpenFromBackend> Account<P> {
         config: Config,
         config_store: Arc<dyn ConfigStore<Config>>,
     ) -> Result<Self, OpenError> {
+        let header_store = Self::build_header_store(&config)?;
         let (sender, receiver) = mpsc::channel();
-        let mut account = Self::try_new_inner(config, sender, config_store)?;
+        let mut account = Self::try_new_inner(config, header_store, sender, config_store)?;
         account.receiver = Some(receiver);
         Ok(account)
     }
@@ -285,7 +337,20 @@ impl<P: OpenFromBackend> Account<P> {
         config: Config,
         sender: mpsc::Sender<Notification>,
     ) -> Result<Self, OpenError> {
-        Self::try_new_inner(config, sender, default_config_store())
+        let header_store = Self::build_header_store(&config)?;
+        Self::try_new_inner(config, header_store, sender, default_config_store())
+    }
+
+    /// Like [`Account::try_new_with_sender`] but sharing an existing
+    /// [`HeaderStore`] handle instead of building one. Used to fan a
+    /// shared chain across several accounts routed through the same
+    /// notification channel (e.g. `bwk_sp::Account`'s BIP32 sub-accounts).
+    pub fn try_new_with_sender_and_header_store(
+        config: Config,
+        header_store: Arc<HeaderStore<P::HeaderStore>>,
+        sender: mpsc::Sender<Notification>,
+    ) -> Result<Self, OpenError> {
+        Self::try_new_inner(config, header_store, sender, default_config_store())
     }
 
     /// Infallible test helper. Not exposed to consumers: production
@@ -303,8 +368,36 @@ impl<P: OpenFromBackend> Account<P> {
             .expect("Account::with_config_store: failed to open stores")
     }
 
+    /// Build this account's own [`HeaderStore`]: online (via
+    /// [`HeaderStore::start`]) when `config` carries an Electrum endpoint
+    /// and is not offline, file-backed/in-memory otherwise. Headers are
+    /// always binary-backed through [`bwk_persist::HeaderBackend`] at
+    /// [`Config::headers_path`], independent of the account's own
+    /// persistence kind.
+    ///
+    /// Returns [`OpenError::HeaderStore`] if a configured (non-offline)
+    /// endpoint cannot be reached: header-sync progress gates wallet
+    /// `Verified` state, so a dead store must fail loud rather than open
+    /// silently degraded.
+    fn build_header_store(config: &Config) -> Result<Arc<HeaderStore<P::HeaderStore>>, OpenError> {
+        let path = config.persist.then(|| config.headers_path());
+        let (url, port) = if config.offline() {
+            (None, None)
+        } else {
+            (config.electrum_url.clone(), config.electrum_port)
+        };
+        Ok(HeaderStore::start_or_open(
+            url,
+            port,
+            config.network,
+            path,
+            None,
+        )?)
+    }
+
     fn try_new_inner(
         config: Config,
+        header_store: Arc<HeaderStore<P::HeaderStore>>,
         sender: mpsc::Sender<Notification>,
         config_store: Arc<dyn ConfigStore<Config>>,
     ) -> Result<Self, OpenError> {
@@ -321,16 +414,57 @@ impl<P: OpenFromBackend> Account<P> {
                 backend.clone()
             };
         let stores = P::open(backend, secrets_backend)?;
-        Ok(Self::from_stores(config, sender, config_store, stores))
+        Ok(Self::from_stores(
+            config,
+            header_store,
+            sender,
+            config_store,
+            stores,
+        ))
     }
 
     /// Recreate the Account with the same config, online.
     pub fn restart_electrum(&mut self) -> Result<(), OpenError> {
-        let store = self.config_store.clone();
-        let mut new_account = Account::<P>::try_with_config_store(self.config.clone(), store)?;
+        let config = self.config.clone();
+        let header_store = self.header_store.clone();
+        let config_store = self.config_store.clone();
+
+        // The persistence backend holds an exclusive lock on the account
+        // directory, so the old Account (and every Arc clone it and its
+        // listener thread hold of that backend) must be fully dropped
+        // before `try_new_inner` reopens the same path. Swap in a
+        // throwaway NoopBackend-backed account to force that drop now,
+        // instead of at the reassignment below (too late: by then
+        // `try_new_inner` has already tried, and failed, to reopen it).
+        let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
+        let placeholder_stores = P::open(noop.clone(), noop)?;
+        let (placeholder_sender, _placeholder_receiver) = mpsc::channel();
+        let mut placeholder_config = config.clone();
+        placeholder_config.set_offline(true);
+        *self = Self::from_stores(
+            placeholder_config,
+            header_store.clone(),
+            placeholder_sender,
+            config_store.clone(),
+            placeholder_stores,
+        );
+
+        let (sender, receiver) = mpsc::channel();
+        let mut new_account = Self::try_new_inner(config, header_store, sender, config_store)?;
+        new_account.receiver = Some(receiver);
         new_account.config.set_offline(false);
         new_account.persist_config();
         *self = new_account;
+        // The previous connection died with the old Account; the shared
+        // HeaderStore worker still holds the same dead socket, so reconnect
+        // it too or `Verified` promotions would stall.
+        if let (Some(url), Some(port)) =
+            (self.config.electrum_url.clone(), self.config.electrum_port)
+        {
+            if let Err(e) = self.header_store.restart(url, port) {
+                log::warn!("Account::restart_electrum: header store restart failed: {e}");
+            }
+        }
         Ok(())
     }
 }
@@ -338,6 +472,7 @@ impl<P: OpenFromBackend> Account<P> {
 impl<P: StorageProfile> Account<P> {
     fn from_stores(
         config: Config,
+        header_store: Arc<HeaderStore<P::HeaderStore>>,
         sender: mpsc::Sender<Notification>,
         config_store: Arc<dyn ConfigStore<Config>>,
         stores: Stores<P>,
@@ -381,6 +516,7 @@ impl<P: StorageProfile> Account<P> {
             config_store,
             signing_manager,
             statuses_store: Some(stores.statuses),
+            header_store,
         };
         if !account.config.offline() {
             account.start_electrum();
@@ -676,6 +812,10 @@ impl<P: StorageProfile> Account<P> {
             .statuses_store
             .take()
             .expect("statuses store available when starting Electrum listener");
+        let header_store = self.header_store.clone();
+        // Register a fresh CTA receiver and hand it straight to the
+        // listener thread; the Account never needs to hold it.
+        let chain_rx = self.header_store.register();
 
         let poller = thread::spawn(move || {
             let client = match bwk_electrum::client::Client::new(&addr, port) {
@@ -701,6 +841,8 @@ impl<P: StorageProfile> Account<P> {
                 request,
                 response,
                 statuses_store,
+                header_store,
+                chain_rx,
             );
         });
         self.tx_listener = Some(poller);
@@ -760,6 +902,13 @@ impl<P: StorageProfile> Account<P> {
 
     pub fn electrum_offline(&self) -> bool {
         self.config.offline()
+    }
+
+    /// Test-only accessor for the account's `HeaderStore` handle, used to
+    /// assert store identity (`Arc::ptr_eq`) across accounts sharing one.
+    #[cfg(any(test, feature = "test"))]
+    pub fn header_store(&self) -> &Arc<HeaderStore<P::HeaderStore>> {
+        &self.header_store
     }
 
     /// Sets the look-ahead value for the account.
@@ -827,21 +976,24 @@ macro_rules! send_electrum {
 /// * `address_tip` - The receiver for address tips.
 /// * `stop_request` - The stop flag for the listener.
 #[allow(clippy::too_many_arguments)]
-fn listen_txs<T, P>(
+fn listen_txs<P>(
     coin_store: Arc<Mutex<CoinStore<P>>>,
     derivator: SpkDerivator,
-    notification: mpsc::Sender<T>,
+    notification: mpsc::Sender<Notification>,
     address_tip: mpsc::Receiver<AddressTip>,
     stop_request: Arc<AtomicBool>,
     request: mpsc::Sender<CoinRequest>,
     response: mpsc::Receiver<CoinResponse>,
     mut statuses: P::StatusesStore,
+    header_store: Arc<HeaderStore<P::HeaderStore>>,
+    chain_rx: mpsc::Receiver<()>,
 ) where
-    T: From<TxListenerNotif>,
     P: StorageProfile,
 {
     log::info!("listen_txs(): started");
     send_notif!(notification, request, TxListenerNotif::Started);
+
+    requeue_confirmed_unverified(&coin_store, &request);
 
     let initial_keys: Vec<ScriptBuf> = match statuses.keys() {
         Ok(it) => it.collect(),
@@ -854,11 +1006,7 @@ fn listen_txs<T, P>(
         send_electrum!(request, notification, CoinRequest::Subscribe(initial_keys));
     }
 
-    fn flush_statuses<S: bwk_persist::Store>(statuses: &mut S) {
-        if let Err(e) = statuses.flush() {
-            log::error!("listen_txs(): statuses flush: {e}");
-        }
-    }
+    refresh_unconfirmed_history(&coin_store, &request);
 
     let mut backoff = Backoff::new_ms(20);
     loop {
@@ -875,40 +1023,11 @@ fn listen_txs<T, P>(
         match address_tip.try_recv() {
             Ok(tip) => {
                 log::debug!("listen_txs() receive {tip:?}");
-                let AddressTip { recv, change } = tip;
                 received = true;
-                let mut sub = vec![];
-                let r_spk = derivator.receive_at(recv).script_pubkey();
-                if !statuses.contains_key(&r_spk).unwrap_or(false) {
-                    // FIXME: here we can be smart an not start at 0 but at `actual_tip`
-                    for i in 0..recv {
-                        let spk = derivator.receive_at(i).script_pubkey();
-                        if !statuses.contains_key(&spk).unwrap_or(false) {
-                            if let Err(e) = statuses.insert(spk.clone(), (None, 0, i)) {
-                                log::error!("listen_txs(): statuses insert: {e}");
-                                continue;
-                            }
-                            sub.push(spk);
-                        }
-                    }
-                }
-                let c_spk = derivator.change_at(change).script_pubkey();
-                if !statuses.contains_key(&c_spk).unwrap_or(false) {
-                    // FIXME: here we can be smart an not start at 0 but at `actual_tip`
-                    for i in 0..change {
-                        let spk = derivator.change_at(i).script_pubkey();
-                        if !statuses.contains_key(&spk).unwrap_or(false) {
-                            if let Err(e) = statuses.insert(spk.clone(), (None, 1, i)) {
-                                log::error!("listen_txs(): statuses insert: {e}");
-                                continue;
-                            }
-                            sub.push(spk);
-                        }
-                    }
-                }
-                if !sub.is_empty() {
-                    flush_statuses(&mut statuses);
-                    send_electrum!(request, notification, CoinRequest::Subscribe(sub));
+                if handle_address_tip::<P>(tip, &derivator, &mut statuses, &request, &notification)
+                    .is_break()
+                {
+                    return;
                 }
             }
             Err(e) => match e {
@@ -934,80 +1053,39 @@ fn listen_txs<T, P>(
                 received = true;
                 match rsp {
                     CoinResponse::Status(elct_status) => {
-                        let mut history = vec![];
-                        let mut dirty = false;
-                        for (spk, status) in elct_status {
-                            match statuses.get(&spk) {
-                                Ok(Some((s, _, _))) => {
-                                    // status is registered
-                                    if s != status {
-                                        // status changed
-                                        if status.is_some() {
-                                            // not empty: ask for tx changes
-                                            history.push(spk.clone());
-                                        } else {
-                                            // Some(_) -> None: clear coin_store
-                                            let mut store = coin_store.lock().expect("poisoned");
-                                            let mut map = BTreeMap::new();
-                                            map.insert(spk.clone(), vec![]);
-                                            let _ = store.handle_history_response(map);
-                                            store.generate();
-                                        }
-                                        // record the local status change
-                                        let new_status = status.clone();
-                                        match statuses.modify(&spk, |v| v.0 = new_status.clone()) {
-                                            Ok(true) => dirty = true,
-                                            Ok(false) => {
-                                                // race-free under single-listener thread:
-                                                // we just observed the entry above
-                                            }
-                                            Err(e) => {
-                                                log::error!("listen_txs(): statuses modify: {e}");
-                                            }
-                                        }
-                                    }
-                                }
-                                Ok(None) => {
-                                    // not registered: previous behaviour was an
-                                    // `entry(spk).and_modify(...)`, which is a no-op
-                                    // for vacant entries. Preserve that — only the
-                                    // history-side effect remains.
-                                    if status.is_some() {
-                                        history.push(spk);
-                                    } else {
-                                        let mut store = coin_store.lock().expect("poisoned");
-                                        let mut map = BTreeMap::new();
-                                        map.insert(spk.clone(), vec![]);
-                                        let _ = store.handle_history_response(map);
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("listen_txs(): statuses get: {e}");
-                                }
-                            }
-                        }
-                        if !history.is_empty() {
-                            let hist = CoinRequest::History(history);
-                            log::debug!("listen_txs() send {}", hist.summary());
-                            send_electrum!(request, notification, hist);
-                        }
-                        if dirty {
-                            flush_statuses(&mut statuses);
+                        if handle_status_response(
+                            elct_status,
+                            &mut statuses,
+                            &coin_store,
+                            &request,
+                            &notification,
+                        )
+                        .is_break()
+                        {
+                            return;
                         }
                     }
                     CoinResponse::History(map) => {
-                        let mut store = coin_store.lock().expect("poisoned");
-                        let (height_updated, missing_txs) = store.handle_history_response(map);
-                        if !missing_txs.is_empty() {
-                            send_electrum!(request, notification, CoinRequest::Txs(missing_txs));
-                        }
-                        if height_updated {
-                            store.generate();
+                        if handle_history_response_msg(
+                            map,
+                            &coin_store,
+                            &header_store,
+                            &request,
+                            &notification,
+                        )
+                        .is_break()
+                        {
+                            return;
                         }
                     }
                     CoinResponse::Txs(txs) => {
-                        let mut store = coin_store.lock().expect("poisoned");
-                        store.handle_txs_response(txs);
+                        handle_txs_response_msg(
+                            txs,
+                            &coin_store,
+                            &header_store,
+                            &request,
+                            &notification,
+                        );
                     }
                     CoinResponse::TxMerkle { .. } => {}
                     CoinResponse::Stopped => {
@@ -1032,10 +1110,311 @@ fn listen_txs<T, P>(
             },
         }
 
+        // Drain the HeaderStore CTA receiver. Multiple () are coalesced
+        // into a single on_chain_update pass.
+        let mut chain_tick = false;
+        loop {
+            match chain_rx.try_recv() {
+                Ok(()) => {
+                    chain_tick = true;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // HeaderStore was dropped. Stop draining; the
+                    // Account itself still owns its Arc, so this only
+                    // fires once the public Account is gone.
+                    break;
+                }
+            }
+        }
+        if chain_tick {
+            received = true;
+            on_chain_update(&coin_store, &header_store, &request, &notification);
+        }
+
         if received {
             continue;
         }
         backoff.snooze();
+    }
+}
+
+fn flush_statuses<S: Store>(statuses: &mut S) {
+    if let Err(e) = statuses.flush() {
+        log::error!("listen_txs(): statuses flush: {e}");
+    }
+}
+
+/// Replicate the `send_electrum!`/`send_notif!` failure path: tell the consumer
+/// the listener stopped, and if even that fails, ask the client to stop. Returns
+/// `Break` so the caller can end the listener thread.
+fn signal_stopped(
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) -> ControlFlow<()> {
+    if notification.send(TxListenerNotif::Stopped.into()).is_err() {
+        let _ = request.send(CoinRequest::Stop);
+    }
+    ControlFlow::Break(())
+}
+
+/// Grow the watched spk set for an `AddressTip`: register the new receive/change
+/// gaps in `statuses`, then subscribe to them. `Break` ends the listener thread.
+fn handle_address_tip<P: StorageProfile>(
+    tip: AddressTip,
+    derivator: &SpkDerivator,
+    statuses: &mut P::StatusesStore,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) -> ControlFlow<()> {
+    let AddressTip { recv, change } = tip;
+    let mut sub = vec![];
+    let r_spk = derivator.receive_at(recv).script_pubkey();
+    if !statuses.contains_key(&r_spk).unwrap_or(false) {
+        // FIXME: here we can be smart and not start at 0 but at `actual_tip`
+        for i in 0..recv {
+            let spk = derivator.receive_at(i).script_pubkey();
+            if !statuses.contains_key(&spk).unwrap_or(false) {
+                if let Err(e) = statuses.insert(spk.clone(), (None, 0, i)) {
+                    log::error!("listen_txs(): statuses insert: {e}");
+                    continue;
+                }
+                sub.push(spk);
+            }
+        }
+    }
+    let c_spk = derivator.change_at(change).script_pubkey();
+    if !statuses.contains_key(&c_spk).unwrap_or(false) {
+        // FIXME: here we can be smart and not start at 0 but at `actual_tip`
+        for i in 0..change {
+            let spk = derivator.change_at(i).script_pubkey();
+            if !statuses.contains_key(&spk).unwrap_or(false) {
+                if let Err(e) = statuses.insert(spk.clone(), (None, 1, i)) {
+                    log::error!("listen_txs(): statuses insert: {e}");
+                    continue;
+                }
+                sub.push(spk);
+            }
+        }
+    }
+    if !sub.is_empty() {
+        flush_statuses(statuses);
+        if request.send(CoinRequest::Subscribe(sub)).is_err() {
+            return signal_stopped(request, notification);
+        }
+    }
+    ControlFlow::Continue(())
+}
+
+/// Fold an Electrum `Status` response: diff against the local statuses, request
+/// history for changed-non-empty scripthashes, clear the cleared ones, and flush
+/// if any local status changed. `Break` ends the listener thread.
+fn handle_status_response<P: StorageProfile>(
+    elct_status: BTreeMap<ScriptBuf, Option<String>>,
+    statuses: &mut P::StatusesStore,
+    coin_store: &Mutex<CoinStore<P>>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) -> ControlFlow<()> {
+    let mut history = vec![];
+    let mut dirty = false;
+    for (spk, status) in elct_status {
+        match statuses.get(&spk) {
+            Ok(Some((s, _, _))) => {
+                // status is registered
+                if s != status {
+                    // status changed
+                    if status.is_some() {
+                        // not empty: ask for tx changes
+                        history.push(spk.clone());
+                    } else {
+                        // Some(_) -> None: clear coin_store
+                        let mut store = coin_store.lock().expect("poisoned");
+                        let mut map = BTreeMap::new();
+                        map.insert(spk.clone(), vec![]);
+                        let _ = store.handle_history_response(map);
+                        store.generate();
+                    }
+                    // record the local status change
+                    let new_status = status.clone();
+                    match statuses.modify(&spk, |v| v.0 = new_status.clone()) {
+                        Ok(true) => dirty = true,
+                        Ok(false) => {
+                            // race-free under single-listener thread:
+                            // we just observed the entry above
+                        }
+                        Err(e) => {
+                            log::error!("listen_txs(): statuses modify: {e}");
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                // not registered: previous behaviour was an
+                // `entry(spk).and_modify(...)`, which is a no-op
+                // for vacant entries. Preserve that, only the
+                // history-side effect remains.
+                if status.is_some() {
+                    history.push(spk);
+                } else {
+                    let mut store = coin_store.lock().expect("poisoned");
+                    let mut map = BTreeMap::new();
+                    map.insert(spk.clone(), vec![]);
+                    let _ = store.handle_history_response(map);
+                }
+            }
+            Err(e) => {
+                log::error!("listen_txs(): statuses get: {e}");
+            }
+        }
+    }
+    if !history.is_empty() {
+        let hist = CoinRequest::History(history);
+        log::debug!("listen_txs() send {}", hist.summary());
+        if request.send(hist).is_err() {
+            return signal_stopped(request, notification);
+        }
+    }
+    if dirty {
+        flush_statuses(statuses);
+    }
+    ControlFlow::Continue(())
+}
+
+/// Fold a `History` response into the coin store, fetch any missing txs, and
+/// resolve the reported heights. `Break` ends the listener thread.
+fn handle_history_response_msg<P: StorageProfile>(
+    map: BTreeMap<ScriptBuf, Vec<(Txid, Option<u64>)>>,
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) -> ControlFlow<()> {
+    let mut store = coin_store.lock().expect("poisoned");
+    let outcome = store.handle_history_response(map);
+    if !outcome.missing_txs.is_empty()
+        && request.send(CoinRequest::Txs(outcome.missing_txs)).is_err()
+    {
+        return signal_stopped(request, notification);
+    }
+    // Promote (or queue) heights now that the history is folded into the tx store.
+    let promo = store.resolve_reported_heights(header_store, &outcome.reported);
+    if outcome.height_updated || promo.changed {
+        store.tx_store_mut().persist();
+        store.generate();
+    }
+    drop(store);
+    queue_merkle_fetches(request, promo.to_fetch);
+    ControlFlow::Continue(())
+}
+
+/// Fold a `Txs` response into the coin store, then run a resolve-only pass:
+/// newly-inserted txs may have a `(txid, height)` already queued in
+/// `pending_claims` from a prior `History`, so promote them now instead of
+/// waiting for the next header tick. Only `resolve_pending_claims` runs here;
+/// `reverify_remined_entries` stays on the chain-tick path.
+fn handle_txs_response_msg<P: StorageProfile>(
+    txs: Vec<bitcoin::Transaction>,
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) {
+    let mut store = coin_store.lock().expect("poisoned");
+    store.handle_txs_response(txs);
+    if !header_store.is_validated() {
+        return;
+    }
+    let promote = store.resolve_pending_claims(header_store);
+    if promote.changed {
+        store.tx_store_mut().persist();
+        store.generate();
+    }
+    drop(store);
+    queue_merkle_fetches(request, promote.to_fetch);
+    if promote.changed {
+        let _ = notification.send(Notification::HeaderStoreUpdated);
+    }
+}
+
+/// Chain-tip-advance pass: promote-only, resolves pending claims and queues merkle fetches against the validated chain.
+fn on_chain_update<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    electrum_req: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+) {
+    if !header_store.is_validated() {
+        if let Some(reason) = header_store.validation_failed_reason() {
+            let _ = notification.send(Notification::ValidationFailed(
+                ValidationFailure::HeaderStore(reason),
+            ));
+        }
+        return;
+    }
+
+    let mut store = coin_store.lock().expect("poisoned");
+
+    let reverify = store.reverify_remined_entries(header_store);
+    let promote = store.resolve_pending_claims(header_store);
+    let changed = reverify.changed || promote.changed;
+    let mut to_fetch = reverify.to_fetch;
+    to_fetch.extend(promote.to_fetch);
+
+    if changed {
+        // `generate()` itself emits the `CoinUpdate` notification.
+        store.tx_store_mut().persist();
+        store.generate();
+    }
+    drop(store);
+
+    queue_merkle_fetches(electrum_req, to_fetch);
+
+    if changed {
+        let _ = notification.send(Notification::HeaderStoreUpdated);
+    }
+}
+
+/// Dispatch the collected merkle-proof fetches outside the CoinStore lock.
+fn queue_merkle_fetches(electrum_req: &mpsc::Sender<CoinRequest>, to_fetch: Vec<ClaimAt>) {
+    for ClaimAt { txid, height } in to_fetch {
+        let _ = electrum_req.send(CoinRequest::GetTxMerkle { txid, height });
+    }
+}
+
+/// Re-queue a `GetTxMerkle` fetch for every `ConfirmedUnverified` entry on
+/// every listener (re)connect. A merkle fetch is single-attempt, so a
+/// transient failure or a dropped connection would otherwise strand the
+/// entry unverified until the next reorg re-stamps its hash; reconnect is
+/// the retry boundary.
+fn requeue_confirmed_unverified<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    electrum_req: &mpsc::Sender<CoinRequest>,
+) {
+    let to_fetch = coin_store
+        .lock()
+        .expect("poisoned")
+        .confirmed_unverified_claims();
+    queue_merkle_fetches(electrum_req, to_fetch);
+}
+
+/// On listener (re)connect, force a `History` refresh for every spk that
+/// owns a still-`Inclusion::Unconfirmed` tx. `pending_claims` is an
+/// in-memory cache a restart wipes, and the resubscribed status matches the
+/// persisted `StatusesStore`, so no status-diff `History` fires on its own;
+/// without this a tx already confirmed at some height would stay Unconfirmed
+/// until an unrelated status change. The server re-reports the height, which
+/// `resolve_reported_heights` turns back into a promotion or a fresh claim.
+fn refresh_unconfirmed_history<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    electrum_req: &mpsc::Sender<CoinRequest>,
+) {
+    let spks = coin_store
+        .lock()
+        .expect("poisoned")
+        .spks_with_unconfirmed_txs();
+    if !spks.is_empty() {
+        let _ = electrum_req.send(CoinRequest::History(spks));
     }
 }
 
@@ -1132,8 +1511,12 @@ mod tests {
             let cloned_stop = stop.clone();
             let cloned_derivator = derivator.clone();
 
+            let header_store = HeaderStore::new_in_memory(Network::Regtest);
+            let chain_rx = header_store.register();
+            let header_store_t = header_store.clone();
+
             let listener_handle = thread::spawn(move || {
-                listen_txs::<Notification, RamProfile<DefaultBackend>>(
+                listen_txs::<RamProfile<DefaultBackend>>(
                     coin_store,
                     cloned_derivator,
                     notif_sender,
@@ -1142,6 +1525,8 @@ mod tests {
                     req_sender,
                     resp_receiver,
                     statuses_store,
+                    header_store_t,
+                    chain_rx,
                 );
             });
 
@@ -1307,12 +1692,18 @@ mod tests {
         // NOTE: coin_store already have the tx it should not ask it
         assert!(matches!(mock.request.try_recv(), Err(TryRecvError::Empty)));
 
-        // the coin is now confirmed
+        // The server reports inclusion at height 1. `insert_history`
+        // resets the entry to `Unconfirmed`, then `resolve_reported_heights`
+        // tries to re-claim it, but this mock's HeaderStore is empty, so
+        // there is no header at height 1 and the claim is queued in
+        // `pending_claims` rather than promoted. The derived coin height
+        // therefore stays None and the status stays Unconfirmed until a
+        // header at that height arrives.
         let mut coins = mock.coins();
         assert_eq!(coins.len(), 1);
         let coin = coins.pop_first().unwrap().1;
-        assert_eq!(coin.height(), Some(1));
-        assert_eq!(coin.status(), CoinStatus::Confirmed);
+        assert_eq!(coin.height(), None);
+        assert_eq!(coin.status(), CoinStatus::Unconfirmed);
         (tx_0, mock)
     }
 
@@ -1416,8 +1807,276 @@ mod tests {
         assert_eq!(coins.len(), 1);
         let coin = coins.pop_first().unwrap().1;
 
-        // the coin have a confirmation height of 2
-        assert_eq!(coin.height(), Some(2));
+        // The server reorgs the entry to height 2. The reported-height
+        // change drives `insert_history` to reset the entry to
+        // `Inclusion::Unconfirmed` (this is the demotion path, owned by
+        // history, not by `on_chain_update`). `resolve_reported_heights`
+        // then re-claims it at height 2, but this mock's HeaderStore is
+        // empty so the claim is only queued in `pending_claims` and the
+        // entry stays Unconfirmed, hence the derived coin height is None.
+        assert_eq!(coin.height(), None);
+    }
+
+    // Build a bare `CoinStore` (no listener thread) for testing the
+    // CTA helpers directly.
+    fn bare_coin_store() -> (Arc<Mutex<CoinStore>>, SpkDerivator) {
+        let (notif_sender, _notif_recv) = mpsc::channel();
+        let mnemo = Mnemonic::generate(12).unwrap();
+        let dummy_config = Config::new(
+            Some(mnemo.to_string()),
+            "dummy".into(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            PathBuf::default(),
+            String::new(),
+            false,
+        )
+        .unwrap();
+        let signer =
+            HotSigner::new_from_mnemonics(bitcoin::Network::Regtest, &mnemo.to_string()).unwrap();
+        let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1").unwrap());
+        let descriptor = wpkh(xpub);
+        let derivator = SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
+        let label_store = Arc::new(Mutex::new(LabelStore::new()));
+        let backend: Arc<dyn bwk_persist::PersistenceBackend> = Arc::new(NoopBackend);
+        let account_store = Arc::new(Mutex::new(bwk_persist::RamStore::empty(
+            backend,
+            bwk_persist::ACCOUNT_STORE_KEY,
+            crate::profile::encode_account_key,
+            crate::profile::encode_account_value,
+        )));
+        let coin_store = Arc::new(Mutex::new(CoinStore::new(
+            bitcoin::Network::Regtest,
+            descriptor,
+            notif_sender,
+            0,
+            0,
+            20,
+            TxStore::new(),
+            label_store,
+            dummy_config,
+            account_store,
+        )));
+        (coin_store, derivator)
+    }
+
+    /// Build a regtest header chain of `len` blocks (heights `0..len`),
+    /// returning the (height -> raw) map and the tip block hash.
+    fn build_header_map(len: u32) -> (BTreeMap<u32, [u8; 80]>, miniscript::bitcoin::BlockHash) {
+        use miniscript::bitcoin::{
+            block::{Header, Version},
+            hashes::Hash,
+            BlockHash, CompactTarget, TxMerkleNode,
+        };
+        let bits = CompactTarget::from_consensus(0x207fffff);
+        let mut map = BTreeMap::new();
+        let mut prev = BlockHash::all_zeros();
+        let mut tip = prev;
+        for h in 0..len {
+            let hdr = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_700_000_000 + h,
+                bits,
+                nonce: h,
+            };
+            prev = hdr.block_hash();
+            tip = prev;
+            let bytes = miniscript::bitcoin::consensus::serialize(&hdr);
+            let mut arr = [0u8; 80];
+            arr.copy_from_slice(&bytes);
+            map.insert(h, arr);
+        }
+        (map, tip)
+    }
+
+    // Refusal path: when the HeaderStore itself is Invalid, `on_chain_update`
+    // must refuse to promote any pending claim and instead notify
+    // `ValidationFailed(HeaderStore(_))`.
+    #[test]
+    fn invalid_header_store_blocks_promotion() {
+        use crate::header_store::{HeaderStore, HeaderValidationState, InvalidCause};
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 3;
+
+        // Header at H is present, so a Valid store would promote the claim;
+        // the Invalid state below is what must block it.
+        let (map, _tip) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+        header_store
+            .set_validation_state_for_test(HeaderValidationState::Invalid(InvalidCause::Sanity));
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(&txid, Inclusion::Unconfirmed);
+            store.insert_pending_claim(ClaimAt { txid, height: h });
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        let notif = notif_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("refusal must notify ValidationFailed");
+        assert!(
+            matches!(
+                notif,
+                Notification::ValidationFailed(ValidationFailure::HeaderStore(_))
+            ),
+            "expected ValidationFailed(HeaderStore(_)), got {notif:?}"
+        );
+
+        assert!(
+            req_rx.try_recv().is_err(),
+            "no merkle fetch should be queued while the header store is invalid"
+        );
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(
+            matches!(entry.inclusion(), Inclusion::Unconfirmed),
+            "claim wrongly promoted to {:?} despite invalid header store",
+            entry.inclusion(),
+        );
+    }
+
+    // FIX A: after a restart, `pending_claims` (a non-persisted cache) is
+    // empty while a confirmed tx sits `Unconfirmed`. The reconnect refresh
+    // must issue a `History` for that tx's spk so the server re-reports its
+    // height and the claim is rebuilt.
+    #[test]
+    fn reconnect_refreshes_history_for_unconfirmed_spk() {
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, deriv) = bare_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx = funding_tx(spk.clone(), 0.1);
+        let txid = tx.compute_txid();
+        {
+            let mut store = coin_store.lock().unwrap();
+            store.tx_store_mut().update(TxEntry::for_test(tx));
+            store
+                .tx_store_mut()
+                .update_inclusion(&txid, Inclusion::Unconfirmed);
+            store.generate();
+            // As after a restart: the in-memory pending-claims cache is empty.
+            assert!(store.pending_claims_snapshot().is_empty());
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        refresh_unconfirmed_history(&coin_store, &req_tx);
+
+        match req_rx.try_recv() {
+            Ok(CoinRequest::History(spks)) => assert!(
+                spks.contains(&spk),
+                "History must cover the spk owning the Unconfirmed tx"
+            ),
+            other => panic!("expected History for the unconfirmed spk, got {other:?}"),
+        }
+    }
+
+    // FIX B: a pending claim whose txid was removed from the tx store (a
+    // reorg dropped it) must be dropped by `resolve_pending_claims` rather
+    // than left queued forever.
+    // Regression: a claim whose tx is still in flight (History folded, Txs
+    // response not yet) must survive a CTA pass. Dropping it as "removed
+    // from the chain" wedges the tx Unconfirmed forever once it folds.
+    #[test]
+    fn pending_claim_survives_tx_fetch_in_flight() {
+        use crate::header_store::HeaderStore;
+
+        let (coin_store, derivator) = bare_coin_store();
+
+        let spk = derivator.receive_at(0).script_pubkey();
+        let tx = funding_tx(spk.clone(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 6;
+
+        let (map, hash_at_h) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        let (req_tx, req_rx) = mpsc::channel::<CoinRequest>();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        // History reports the confirmed tx before its bytes are known: the
+        // update stays incomplete and the claim is queued, not promoted.
+        {
+            let mut store = coin_store.lock().unwrap();
+            let mut hist = BTreeMap::new();
+            hist.insert(spk, vec![(txid, Some(h as u64))]);
+            let outcome = store.handle_history_response(hist);
+            assert_eq!(outcome.missing_txs, vec![txid], "tx bytes must be missing");
+            let promo = store.resolve_reported_heights(&header_store, &outcome.reported);
+            assert!(promo.to_fetch.is_empty(), "nothing to fetch yet");
+        }
+
+        // CTA fires while the Txs response is still in flight: the claim
+        // must survive (the txid is referenced by an incomplete update).
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        {
+            let store = coin_store.lock().unwrap();
+            let snapshot = store.pending_claims_snapshot();
+            assert!(
+                snapshot.get(&h).map(|s| s.contains(&txid)).unwrap_or(false),
+                "in-flight claim was dropped: {snapshot:?}",
+            );
+        }
+
+        // The Txs response folds the tx, then the next CTA promotes it.
+        coin_store.lock().unwrap().handle_txs_response(vec![tx]);
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            assert_eq!(
+                entry.inclusion(),
+                &Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+                "claim was not promoted after the tx folded",
+            );
+        }
+        match req_rx.try_recv() {
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) => {
+                assert_eq!(t, txid);
+                assert_eq!(height, h);
+            }
+            other => panic!("expected GetTxMerkle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_pending_claims_drops_removed_txid() {
+        let (coin_store, _deriv) = bare_coin_store();
+        let (map, _tip) = build_header_map(5);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        let txid = funding_tx(bitcoin::ScriptBuf::new(), 0.1).compute_txid();
+        let h: u32 = 3;
+        {
+            let mut store = coin_store.lock().unwrap();
+            store.insert_pending_claim(ClaimAt { txid, height: h });
+            assert!(!store.pending_claims_snapshot().is_empty());
+        }
+
+        let mut store = coin_store.lock().unwrap();
+        let outcome = store.resolve_pending_claims(&header_store);
+        assert!(!outcome.changed, "no promotion for an absent txid");
+        assert!(
+            store.pending_claims_snapshot().is_empty(),
+            "stale claim for a removed txid must be dropped"
+        );
     }
 }
 
@@ -1430,6 +2089,7 @@ mod integration_tests {
     use crate::{
         coin_store::Payment,
         config::{maybe_create_dir, Config},
+        header_store::HeaderStore,
         log::INIT,
         Account,
     };
@@ -1672,7 +2332,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url);
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account: Account = Account::new(config);
@@ -1794,7 +2454,7 @@ mod integration_tests {
         )
         .unwrap();
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url);
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account: Account = Account::new(config);
@@ -1837,7 +2497,9 @@ mod integration_tests {
         let coins_height: BTreeMap<_, _> =
             coins.into_iter().map(|(c, e)| (c, e.height())).collect();
 
-        // all coins are confirmed
+        // With the pending-claims queue and merkle verification in
+        // place, both coins are confirmed at this point and should carry
+        // a height.
         assert!(coins_height.iter().all(|(_, e)| e.is_some()));
 
         let height_before_reorg = get_block_height(&bitcoind);
@@ -1953,7 +2615,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url);
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
@@ -2012,7 +2674,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url);
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let saved_config = config.clone();

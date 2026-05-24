@@ -71,6 +71,7 @@ Account (bwk/src/account.rs)
 ├── TxStore (transaction history)
 ├── LabelStore (user labels)
 ├── SigningManager (hot signers)
+├── HeaderStore (validated header chain for SPV verification)
 └── Electrum client thread (background sync)
 ```
 

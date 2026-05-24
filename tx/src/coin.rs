@@ -48,6 +48,11 @@ impl From<u32> for KeyChain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum CoinStatus {
     Unconfirmed,
+    /// Server claims this coin's tx is confirmed at some height, but we
+    /// haven't yet proved inclusion via a merkle branch verified
+    /// against a stored header. Spendable, but consumers that gate on
+    /// "fully verified confirmed" should not treat it as `Confirmed`.
+    ConfirmedUnverified,
     Confirmed,
     BeingSpend,
     Spent,

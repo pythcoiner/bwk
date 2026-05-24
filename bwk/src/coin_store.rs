@@ -19,10 +19,23 @@ use crate::{
     account::{CoinState, Notification},
     address_store::{AddressEntry, AddressStatus, AddressStore, AddressTip},
     config::Config,
+    header_store::HeaderStore,
     label_store::{LabelKey, LabelStore},
     profile::{DefaultBackend, RamProfile, StorageProfile},
-    tx_store::{InputMetadata, OutputMetadata, TxEntry, TxStore},
+    tx_store::{Inclusion, InputMetadata, OutputMetadata, TxEntry, TxStore},
 };
+
+impl From<&Inclusion> for CoinStatus {
+    fn from(inclusion: &Inclusion) -> Self {
+        match inclusion {
+            // A failed merkle proof is not trusted as confirmed: surface it as
+            // unconfirmed so it is never counted spendable-as-confirmed.
+            Inclusion::Unconfirmed | Inclusion::VerifyFailed { .. } => CoinStatus::Unconfirmed,
+            Inclusion::ConfirmedUnverified { .. } => CoinStatus::ConfirmedUnverified,
+            Inclusion::Verified { .. } => CoinStatus::Confirmed,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum PaymentType {
@@ -109,6 +122,10 @@ pub struct CoinStore<P: StorageProfile = RamProfile<DefaultBackend>> {
     derivator: SpkDerivator,
     notification: mpsc::Sender<Notification>,
     config: Config,
+    /// Pending claims indexed by server-reported height. A txid lands
+    /// here when the server reports it at height H but the HeaderStore
+    /// doesn't yet have a header at H; the next CTA resolves it.
+    pending_claims: BTreeMap<u32, BTreeSet<Txid>>,
 }
 
 #[derive(Debug, Default)]
@@ -129,6 +146,29 @@ pub struct HistoryDiff {
     pub added: BTreeMap<bitcoin::Txid, Option<u64>>,
     pub changed: BTreeMap<bitcoin::Txid, Option<u64>>,
     pub removed: BTreeMap<bitcoin::Txid, Option<u64>>,
+}
+
+/// A claim that transaction `txid` is confirmed at block `height`, awaiting
+/// header lookup and merkle-proof verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimAt {
+    pub txid: Txid,
+    pub height: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct HistoryOutcome {
+    pub height_updated: bool,
+    pub missing_txs: Vec<Txid>,
+    pub reported: Vec<ClaimAt>,
+}
+
+/// What a CTA sub-pass produced: merkle fetches to queue and whether it
+/// mutated any tx state.
+#[derive(Debug, Default)]
+pub struct ChainUpdateOutcome {
+    pub to_fetch: Vec<ClaimAt>,
+    pub changed: bool,
 }
 
 impl SpkHistory {
@@ -226,6 +266,7 @@ impl<P: StorageProfile> CoinStore<P> {
             notification,
             derivator,
             config,
+            pending_claims: BTreeMap::new(),
         }
     }
 
@@ -329,22 +370,35 @@ impl<P: StorageProfile> CoinStore<P> {
     /// Handles the response containing transaction history for SPKs.
     ///
     /// This method processes the history and updates the internal state of the
-    /// `CoinStore`. It returns a list of transaction IDs that are missing.
+    /// `CoinStore`.
     ///
     /// # Parameters
     /// - `hist`: A map of script public keys to their transaction history.
     ///
     /// # Returns
-    /// A vector of `Txid` representing missing transactions.
+    /// A [`HistoryOutcome`] carrying the missing txids to fetch, the
+    /// server-reported heights, and whether any stored height changed.
     pub fn handle_history_response(
         &mut self,
         hist: BTreeMap<ScriptBuf, Vec<(bitcoin::Txid, Option<u64>)>>,
-    ) -> (bool /* height_updated */, Vec<Txid>) {
+    ) -> HistoryOutcome {
         let mut updates = vec![];
         let mut height_updated = false;
 
+        // Server-reported confirmation heights, captured here before the
+        // history is folded into `Inclusion::Unconfirmed`.
+        let mut reported: Vec<ClaimAt> = Vec::new();
+
         // generate diff & drop double spent txs
         for (spk, history) in hist {
+            for (txid, h) in &history {
+                if let Some(height) = h.and_then(|h| u32::try_from(h).ok()) {
+                    reported.push(ClaimAt {
+                        txid: *txid,
+                        height,
+                    });
+                }
+            }
             self.recv_coin_at(&spk);
             let update = self.update_spk_history(spk, history);
             updates.push(update);
@@ -395,7 +449,11 @@ impl<P: StorageProfile> CoinStore<P> {
         } // <- release &mut tx_store
 
         self.updates.append(&mut updates);
-        (height_updated, txids)
+        HistoryOutcome {
+            height_updated,
+            missing_txs: txids,
+            reported,
+        }
     }
 
     /// Updates the history for a specific script public key (SPK).
@@ -434,10 +492,18 @@ impl<P: StorageProfile> CoinStore<P> {
             for txid in diff.removed.keys() {
                 store.remove(txid);
             }
-            for (txid, height) in &diff.changed {
-                store.update_height(txid, *height);
+            // Reset to Unconfirmed; re-claim handled in resolve_reported_heights.
+            for txid in diff.changed.keys() {
+                store.update_inclusion(txid, Inclusion::Unconfirmed);
             }
         } // <- release &mut tx_store
+
+        // A demoted tx must not keep a stale pending claim, or a later CTA
+        // would re-promote it at the old height. Still-confirmed txs are
+        // re-queued by resolve_reported_heights in the same history pass.
+        for txid in diff.changed.keys() {
+            self.drop_all_pending_claims(txid);
+        }
 
         (!diff.changed.is_empty(), Update::from_diff(spk, diff))
     }
@@ -455,7 +521,7 @@ impl<P: StorageProfile> CoinStore<P> {
         for new_tx in txs {
             let new_txid = new_tx.compute_txid();
             for Update { txs, .. } in &mut self.updates {
-                txs.iter_mut().for_each(|(txid, tx, _)| {
+                txs.iter_mut().for_each(|(txid, tx)| {
                     if (*txid == new_txid) && tx.is_none() {
                         *tx = Some(new_tx.clone());
                     }
@@ -516,11 +582,7 @@ impl<P: StorageProfile> CoinStore<P> {
                         vout: vout as u32,
                     };
                     let height = entry.height();
-                    let status = if height.is_some() {
-                        CoinStatus::Confirmed
-                    } else {
-                        CoinStatus::Unconfirmed
-                    };
+                    let status = CoinStatus::from(entry.inclusion());
                     let spk = match addr.account() {
                         coin::KeyChain::Receive => self.derivator.receive_at(addr.index()),
                         coin::KeyChain::Change => self.derivator.change_at(addr.index()),
@@ -738,9 +800,10 @@ impl<P: StorageProfile> CoinStore<P> {
             .clone()
             .into_iter()
             .filter_map(|(_, coin)| match coin.coin.status {
-                CoinStatus::Unconfirmed | CoinStatus::Confirmed | CoinStatus::BeingSpend => {
-                    Some(coin)
-                }
+                CoinStatus::Unconfirmed
+                | CoinStatus::ConfirmedUnverified
+                | CoinStatus::Confirmed
+                | CoinStatus::BeingSpend => Some(coin),
                 CoinStatus::Spent => None,
             })
             .collect();
@@ -758,11 +821,15 @@ impl<P: StorageProfile> CoinStore<P> {
                     state.unconfirmed_coins += 1;
                     state.unconfirmed_balance += entry.coin.txout.value.to_sat();
                 }
-                CoinStatus::Confirmed => {
+                // ConfirmedUnverified is on-chain confirmed; only its SPV
+                // proof is pending, so it counts as confirmed.
+                CoinStatus::Confirmed | CoinStatus::ConfirmedUnverified => {
                     state.confirmed_coins += 1;
                     state.confirmed_balance += entry.coin.txout.value.to_sat();
                 }
-                _ => {}
+                // BeingSpend is selectable but excluded from displayed
+                // balance; Spent is filtered out above.
+                CoinStatus::BeingSpend | CoinStatus::Spent => {}
             }
         }
         state.coins = coins.into_iter().map(|c| (*c.outpoint(), c.coin)).collect();
@@ -806,6 +873,309 @@ impl<P: StorageProfile> CoinStore<P> {
     pub fn address_store(&self) -> Arc<Mutex<AddressStore<P>>> {
         self.address_store.clone()
     }
+
+    /// Mutable access to the embedded [`TxStore`]. Required by the CTA
+    /// persist in `bwk::account::on_chain_update`.
+    pub fn tx_store_mut(&mut self) -> &mut TxStore<P> {
+        &mut self.tx_store
+    }
+
+    /// Queues a pending claim, to be promoted by a future CTA once the
+    /// HeaderStore has a header at that height.
+    pub(crate) fn insert_pending_claim(&mut self, claim: ClaimAt) {
+        self.pending_claims
+            .entry(claim.height)
+            .or_default()
+            .insert(claim.txid);
+    }
+
+    /// Drops `keep.txid` from every pending-claim height set other than
+    /// `keep.height`. A reorg can re-report the same tx at a new height;
+    /// this keeps at most one pending claim per txid so a later CTA never
+    /// promotes it at a stale height.
+    pub(crate) fn prune_pending_claim(&mut self, keep: ClaimAt) {
+        self.pending_claims.retain(|height, set| {
+            if *height != keep.height {
+                set.remove(&keep.txid);
+            }
+            !set.is_empty()
+        });
+    }
+
+    /// Drops `txid` from every pending-claim height set. Used when a tx falls
+    /// back to the mempool so no later CTA can promote it at a stale height.
+    pub(crate) fn drop_all_pending_claims(&mut self, txid: &Txid) {
+        self.pending_claims.retain(|_height, set| {
+            set.remove(txid);
+            !set.is_empty()
+        });
+    }
+
+    /// Snapshot of the pending-claims queue.
+    pub(crate) fn pending_claims_snapshot(&self) -> BTreeMap<u32, BTreeSet<Txid>> {
+        self.pending_claims.clone()
+    }
+
+    /// Removes a single resolved claim from the queue.
+    pub(crate) fn remove_pending_claim(&mut self, claim: ClaimAt) {
+        if let Some(set) = self.pending_claims.get_mut(&claim.height) {
+            set.remove(&claim.txid);
+            if set.is_empty() {
+                self.pending_claims.remove(&claim.height);
+            }
+        }
+    }
+
+    /// Clone each tx's inclusion once so a CTA pass can walk a stable snapshot.
+    fn snapshot_inclusions(&self) -> Vec<(Txid, Inclusion)> {
+        self.tx_store
+            .iter()
+            .into_iter()
+            .map(|(txid, e)| (txid, e.inclusion().clone()))
+            .collect()
+    }
+
+    /// Promote `txid` to `ConfirmedUnverified` at `height`/`block_hash` and
+    /// record a merkle-proof fetch for it. Shared by the live history path
+    /// and the queued-claim resolver.
+    fn promote_claim(
+        tx_store: &mut TxStore<P>,
+        txid: &Txid,
+        height: u32,
+        block_hash: bitcoin::BlockHash,
+        to_fetch: &mut Vec<ClaimAt>,
+    ) {
+        tx_store.update_inclusion(txid, Inclusion::ConfirmedUnverified { height, block_hash });
+        to_fetch.push(ClaimAt {
+            txid: *txid,
+            height,
+        });
+    }
+
+    /// Promote server-reported `(txid, height)` claims with a known header,
+    /// queue the rest in `pending_claims`. The caller persists, regenerates
+    /// and dispatches the returned fetches.
+    pub fn resolve_reported_heights(
+        &mut self,
+        header_store: &HeaderStore<P::HeaderStore>,
+        reported: &[ClaimAt],
+    ) -> ChainUpdateOutcome {
+        let mut to_fetch: Vec<ClaimAt> = Vec::new();
+        for &ClaimAt { txid, height } in reported {
+            // `reported` carries EVERY confirmed tx in each scripthash history,
+            // not just the ones whose height changed. This pass is promote-only:
+            // only an `Unconfirmed` tx may move forward. Demotion is owned solely
+            // by history (`update_spk_history` resets changed txs to Unconfirmed),
+            // so a tx already ConfirmedUnverified or Verified is left untouched.
+            let current = self.tx_store.get(&txid).map(|e| e.inclusion().clone());
+            let have_header = header_store.block_hash(height);
+
+            // Invariant: a txid has AT MOST ONE pending claim, its latest
+            // server-reported height. A reorg can re-report the same tx at a
+            // new height; without this cleanup an earlier claim at the old height
+            // would linger and, because `on_chain_update` iterates ascending,
+            // promote the tx to the wrong (lower) height, wedging it
+            // ConfirmedUnverified forever (its merkle proof at the old height
+            // fails). So before inserting/queueing this claim, drop `txid` from
+            // every OTHER height-set.
+            //
+            // (A tx fully removed from the chain, `diff.removed` -> `store.remove`,
+            // is not re-reported here and so keeps its stale pending entry until
+            // the next CTA: `resolve_pending_claims` drops any claim whose txid is
+            // absent from the tx store.)
+            self.prune_pending_claim(ClaimAt { txid, height });
+
+            match current {
+                // Unconfirmed with a known header: promote and fetch its proof.
+                Some(Inclusion::Unconfirmed) if have_header.is_some() => {
+                    let block_hash = have_header.expect("header present");
+                    Self::promote_claim(
+                        &mut self.tx_store,
+                        &txid,
+                        height,
+                        block_hash,
+                        &mut to_fetch,
+                    );
+                }
+                // Unconfirmed but no header yet, or tx not in the store yet:
+                // queue the claim for a future CTA to promote.
+                Some(Inclusion::Unconfirmed) | None => {
+                    self.insert_pending_claim(ClaimAt { txid, height });
+                }
+                // Already ConfirmedUnverified or Verified: never demote here.
+                Some(_) => {}
+            }
+        }
+        let changed = !to_fetch.is_empty();
+        ChainUpdateOutcome { to_fetch, changed }
+    }
+
+    /// Queue merkle fetches for `ConfirmedUnverified` entries and re-verify
+    /// `Verified` entries whose stored `block_hash` differs from the header
+    /// at the same height.
+    pub fn reverify_remined_entries(
+        &mut self,
+        header_store: &HeaderStore<P::HeaderStore>,
+    ) -> ChainUpdateOutcome {
+        let mut to_fetch: Vec<ClaimAt> = Vec::new();
+        let mut changed = false;
+        for (txid, inclusion) in self.snapshot_inclusions() {
+            match inclusion {
+                // Only (re)fetch when the header at this height changed (a
+                // reorg): refresh the stored hash and re-queue. The first
+                // proof fetch is queued when the claim is promoted, so the
+                // steady state needs no per-tick re-request.
+                Inclusion::ConfirmedUnverified { height, block_hash }
+                | Inclusion::Verified { height, block_hash } => {
+                    if let Some(current) = header_store.block_hash(height) {
+                        if current != block_hash {
+                            self.tx_store.update_inclusion(
+                                &txid,
+                                Inclusion::ConfirmedUnverified {
+                                    height,
+                                    block_hash: current,
+                                },
+                            );
+                            changed = true;
+                            to_fetch.push(ClaimAt { txid, height });
+                        }
+                    }
+                }
+                // A failed proof is terminal: never re-queued while the header
+                // at this height is unchanged. Only a reorg (a new hash) clears
+                // it back to ConfirmedUnverified and re-fetches a fresh proof.
+                Inclusion::VerifyFailed { height, block_hash } => {
+                    if let Some(current) = header_store.block_hash(height) {
+                        if current != block_hash {
+                            self.tx_store.update_inclusion(
+                                &txid,
+                                Inclusion::ConfirmedUnverified {
+                                    height,
+                                    block_hash: current,
+                                },
+                            );
+                            changed = true;
+                            to_fetch.push(ClaimAt { txid, height });
+                        }
+                    }
+                }
+                Inclusion::Unconfirmed => {}
+            }
+        }
+        ChainUpdateOutcome { to_fetch, changed }
+    }
+
+    /// Promote pending claims whose header is now known, drop claims for txs
+    /// already `Verified` at another height.
+    pub fn resolve_pending_claims(
+        &mut self,
+        header_store: &HeaderStore<P::HeaderStore>,
+    ) -> ChainUpdateOutcome {
+        let tip = header_store.tip();
+        let pending_snapshot = self.pending_claims_snapshot();
+        let mut to_fetch: Vec<ClaimAt> = Vec::new();
+        let mut changed = false;
+        // Per-claim removals so we never drop a still-pending sibling.
+        let mut to_remove: Vec<ClaimAt> = Vec::new();
+        for (h, txids) in &pending_snapshot {
+            let hash = header_store.block_hash(*h);
+            let header_ready = tip.map(|t| t >= *h).unwrap_or(false) && hash.is_some();
+            for txid in txids {
+                let entry = self.tx_store.get(txid);
+                match entry.as_ref().map(|e| e.inclusion()) {
+                    None => {
+                        // Absent from the tx store AND from the in-flight
+                        // updates: fully removed from the chain (a reorg
+                        // dropped it via `store.remove`); drop the dead claim
+                        // so `pending_claims` cannot accumulate stale entries.
+                        // A txid still referenced by an incomplete update is
+                        // just waiting for its `Txs` response; dropping its
+                        // claim then would wedge the entry Unconfirmed forever.
+                        if !self.update_in_flight(txid) {
+                            to_remove.push(ClaimAt {
+                                txid: *txid,
+                                height: *h,
+                            });
+                        }
+                    }
+                    Some(Inclusion::Verified { height, .. }) if *height != *h => {
+                        // Verified elsewhere; this queued claim is dead.
+                        to_remove.push(ClaimAt {
+                            txid: *txid,
+                            height: *h,
+                        });
+                    }
+                    Some(Inclusion::Unconfirmed) if header_ready => {
+                        if let Some(hash) = hash {
+                            Self::promote_claim(&mut self.tx_store, txid, *h, hash, &mut to_fetch);
+                            changed = true;
+                        }
+                        to_remove.push(ClaimAt {
+                            txid: *txid,
+                            height: *h,
+                        });
+                    }
+                    Some(Inclusion::ConfirmedUnverified { .. })
+                    | Some(Inclusion::Verified { .. }) => {
+                        // Already promoted by a prior pass; drop the queue entry.
+                        to_remove.push(ClaimAt {
+                            txid: *txid,
+                            height: *h,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for claim in &to_remove {
+            self.remove_pending_claim(*claim);
+        }
+        ChainUpdateOutcome { to_fetch, changed }
+    }
+
+    /// True while `txid` is referenced by an incomplete update, i.e. its
+    /// `Txs` response has not been folded into the tx store yet.
+    fn update_in_flight(&self, txid: &Txid) -> bool {
+        self.updates
+            .iter()
+            .any(|u| u.txs.iter().any(|(t, _)| t == txid))
+    }
+
+    /// `ClaimAt` for every `ConfirmedUnverified` entry, so the listener can
+    /// re-queue their merkle fetches on (re)connect.
+    pub fn confirmed_unverified_claims(&self) -> Vec<ClaimAt> {
+        self.snapshot_inclusions()
+            .into_iter()
+            .filter_map(|(txid, inclusion)| match inclusion {
+                Inclusion::ConfirmedUnverified { height, .. } => Some(ClaimAt { txid, height }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Distinct spks that own at least one coin whose funding tx is still
+    /// `Inclusion::Unconfirmed`. Used on listener reconnect to force a
+    /// `History` refresh: `pending_claims` is an in-memory cache that a
+    /// restart wipes, so without re-reporting these spks a tx already
+    /// confirmed at some height would stay Unconfirmed forever.
+    pub fn spks_with_unconfirmed_txs(&self) -> Vec<ScriptBuf> {
+        let unconfirmed: BTreeSet<Txid> = self
+            .tx_store
+            .iter()
+            .into_iter()
+            .filter_map(|(txid, e)| matches!(e.inclusion(), Inclusion::Unconfirmed).then_some(txid))
+            .collect();
+        if unconfirmed.is_empty() {
+            return Vec::new();
+        }
+        let mut spks = BTreeSet::new();
+        for (op, ce) in &self.store {
+            if unconfirmed.contains(&op.txid) {
+                spks.insert(ce.spk());
+            }
+        }
+        spks.into_iter().collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -816,7 +1186,9 @@ impl<P: StorageProfile> CoinStore<P> {
 pub struct Update {
     #[allow(unused)]
     spk: ScriptBuf,
-    pub txs: Vec<(bitcoin::Txid, Option<bitcoin::Transaction>, Option<u64>)>,
+    /// Confirmation heights are not carried here: they flow through
+    /// `HistoryOutcome.reported` into the pending-claims path.
+    pub txs: Vec<(bitcoin::Txid, Option<bitcoin::Transaction>)>,
 }
 
 impl Update {
@@ -834,7 +1206,7 @@ impl Update {
             txs: diff
                 .added
                 .into_iter()
-                .map(|(txid, height)| (txid, None, height))
+                .map(|(txid, _)| (txid, None))
                 .collect(),
         }
     }
@@ -847,7 +1219,7 @@ impl Update {
     /// # Returns
     /// `true` if the update is complete, otherwise `false`.
     pub fn is_complete(&self) -> bool {
-        self.txs.iter().all(|(_, tx, _)| tx.is_some())
+        self.txs.iter().all(|(_, tx)| tx.is_some())
     }
 
     /// Returns a list of missing transaction IDs in the update.
@@ -857,7 +1229,7 @@ impl Update {
     pub fn missing(&self) -> Vec<Txid> {
         self.txs
             .iter()
-            .filter_map(|(txid, tx, _)| if tx.is_none() { Some(*txid) } else { None })
+            .filter_map(|(txid, tx)| if tx.is_none() { Some(*txid) } else { None })
             .collect()
     }
 }
@@ -1088,8 +1460,7 @@ mod tests {
         let spk = deriv.receive_spk_at(2);
         let tx = funding_tx(spk.clone(), 0.5);
         let txid = tx.compute_txid();
-        cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(tx, Some(101)));
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
         cs.generate();
         let entry = cs.address_info(&spk).expect("entry");
         assert_eq!(entry.status(), AddressStatus::Used);
@@ -1105,10 +1476,8 @@ mod tests {
         let tx_a = funding_tx(spk.clone(), 0.5);
         let tx_b = funding_tx(spk.clone(), 0.25);
         let (txid_a, txid_b) = (tx_a.compute_txid(), tx_b.compute_txid());
-        cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(tx_a, Some(101)));
-        cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(tx_b, Some(102)));
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx_a));
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx_b));
         cs.generate();
         let entry = cs.address_info(&spk).expect("entry");
         assert_eq!(entry.status(), AddressStatus::Reused);
@@ -1122,8 +1491,7 @@ mod tests {
         let (mut cs, deriv) = build_coin_store();
         let spk = deriv.receive_spk_at(3);
         let tx = funding_tx(spk.clone(), 0.5);
-        cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(tx, Some(101)));
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
         cs.generate();
         let entry = cs.address_info(&spk).expect("entry");
         assert!(entry.spending_txids().is_empty());
@@ -1140,7 +1508,7 @@ mod tests {
         // The spk we paid is at the LAST output (funding_tx appends it).
         let funded_vout = (funding.output.len() - 1) as u32;
         cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(funding, Some(101)));
+            .update(crate::tx_store::TxEntry::for_test(funding));
 
         // Spend the freshly-funded outpoint.
         let outpoint = OutPoint {
@@ -1150,7 +1518,7 @@ mod tests {
         let spending = spending_tx(outpoint);
         let spending_txid = spending.compute_txid();
         cs.tx_store
-            .update(crate::tx_store::TxEntry::for_test(spending, Some(102)));
+            .update(crate::tx_store::TxEntry::for_test(spending));
 
         cs.generate();
         let entry = cs.address_info(&spk).expect("entry");
@@ -1158,5 +1526,148 @@ mod tests {
         assert!(entry.spending_txids().contains(&spending_txid));
         // Funding still recorded too.
         assert!(entry.funding_txids().contains(&funding_txid));
+    }
+
+    fn dummy_block_hash() -> bitcoin::BlockHash {
+        use std::str::FromStr;
+        bitcoin::BlockHash::from_str(
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap()
+    }
+
+    /// Helper: fund spk at index 2, set the funding tx's inclusion to
+    /// `inclusion`, regenerate, and return the resulting status of the
+    /// single produced coin.
+    fn status_for_inclusion(inclusion: Inclusion) -> CoinStatus {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
+        cs.tx_store.update_inclusion(&txid, inclusion);
+        cs.generate();
+        let coins = cs.coins();
+        assert_eq!(coins.len(), 1);
+        coins.into_iter().next().unwrap().1.status()
+    }
+
+    #[test]
+    fn unconfirmed_inclusion_yields_unconfirmed_status() {
+        assert_eq!(
+            status_for_inclusion(Inclusion::Unconfirmed),
+            CoinStatus::Unconfirmed
+        );
+    }
+
+    #[test]
+    fn claimed_inclusion_yields_confirmed_unverified_status() {
+        assert_eq!(
+            status_for_inclusion(Inclusion::ConfirmedUnverified {
+                height: 100,
+                block_hash: dummy_block_hash(),
+            }),
+            CoinStatus::ConfirmedUnverified
+        );
+    }
+
+    #[test]
+    fn verified_inclusion_yields_confirmed_status() {
+        assert_eq!(
+            status_for_inclusion(Inclusion::Verified {
+                height: 100,
+                block_hash: dummy_block_hash(),
+            }),
+            CoinStatus::Confirmed
+        );
+    }
+
+    // Regression: a ConfirmedUnverified coin is in the spendable set, so it
+    // must be counted in the confirmed balance, not silently dropped from
+    // both balance buckets.
+    #[test]
+    fn confirmed_unverified_counts_in_confirmed_balance() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
+        cs.tx_store.update_inclusion(
+            &txid,
+            Inclusion::ConfirmedUnverified {
+                height: 100,
+                block_hash: dummy_block_hash(),
+            },
+        );
+        cs.generate();
+
+        let state = cs.spendable_coins();
+        assert_eq!(state.coins.len(), 1);
+        assert_eq!(state.confirmed_coins, 1);
+        assert_eq!(state.confirmed_balance, 50_000_000);
+        assert_eq!(state.unconfirmed_coins, 0);
+        assert_eq!(state.unconfirmed_balance, 0);
+    }
+
+    // Regression: a tx queued in pending_claims that falls back to the
+    // mempool must be dropped from the queue, so syncing its header does not
+    // re-promote it at the stale height.
+    #[test]
+    fn demoted_tx_is_not_repromoted_from_stale_pending_claim() {
+        use miniscript::bitcoin::{
+            block::{Header, Version},
+            consensus::serialize,
+            hashes::Hash,
+            CompactTarget, TxMerkleNode,
+        };
+
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(2);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
+
+        // Server reports the tx confirmed at height H. With no synced header,
+        // resolve_reported_heights queues it and leaves it Unconfirmed.
+        let height = 200u32;
+        cs.update_spk_history(spk.clone(), vec![(txid, Some(height as u64))]);
+        let no_header = HeaderStore::new_in_memory(bitcoin::Network::Regtest);
+        cs.resolve_reported_heights(&no_header, &[ClaimAt { txid, height }]);
+        assert!(cs
+            .pending_claims_snapshot()
+            .get(&height)
+            .is_some_and(|set| set.contains(&txid)));
+        assert_eq!(
+            cs.tx_store.get(&txid).unwrap().inclusion(),
+            &Inclusion::Unconfirmed
+        );
+
+        // The tx falls back to the mempool: its stale pending claim is dropped.
+        cs.update_spk_history(spk.clone(), vec![(txid, None)]);
+        assert!(cs.pending_claims_snapshot().is_empty());
+
+        // Now header H is synced. With the claim gone, resolve_pending_claims
+        // has nothing to promote: the tx stays Unconfirmed.
+        let hdr = Header {
+            version: Version::ONE,
+            prev_blockhash: bitcoin::BlockHash::all_zeros(),
+            merkle_root: TxMerkleNode::all_zeros(),
+            time: 0,
+            bits: CompactTarget::from_consensus(0x207fffff),
+            nonce: 0,
+        };
+        let raw: [u8; Header::SIZE] = serialize(&hdr).try_into().expect("header is 80 bytes");
+        let synced =
+            HeaderStore::from_map(bitcoin::Network::Regtest, BTreeMap::from([(height, raw)]));
+        cs.resolve_pending_claims(&synced);
+        assert_eq!(
+            cs.tx_store.get(&txid).unwrap().inclusion(),
+            &Inclusion::Unconfirmed
+        );
+
+        cs.generate();
+        let state = cs.spendable_coins();
+        assert_eq!(state.confirmed_balance, 0);
+        assert_eq!(state.unconfirmed_balance, 50_000_000);
     }
 }
