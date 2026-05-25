@@ -10,6 +10,7 @@ use bitcoin::{
     psbt::Psbt,
 };
 use ledger_bitcoin_client::psbt::PartialSignature;
+use ledger_bitcoin_client::SignPsbtYieldedObject;
 
 use ledger_apdu::APDUAnswer;
 use ledger_transport_hidapi::TransportNativeHID;
@@ -162,18 +163,21 @@ impl<T: Transport> HWI for Ledger<T> {
 
     fn sign_tx(&self, psbt: &mut Psbt) -> Result<(), HWIError> {
         if let Some((policy, hmac)) = &self.options.wallet {
-            let sigs = self.client.sign_psbt(psbt, policy, hmac.as_ref())?;
-            for (i, sig) in sigs {
+            let yielded_objects = self.client.sign_psbt(psbt, policy, hmac.as_ref())?;
+            for (i, obj) in yielded_objects {
                 let input = psbt.inputs.get_mut(i).ok_or(HWIError::DeviceDidNotSign)?;
-                match sig {
-                    PartialSignature::Sig(key, sig) => {
-                        input.partial_sigs.insert(key, sig);
-                    }
-                    PartialSignature::TapScriptSig(key, Some(tapleaf_hash), sig) => {
-                        input.tap_script_sigs.insert((key, tapleaf_hash), sig);
-                    }
-                    PartialSignature::TapScriptSig(_, None, sig) => {
-                        input.tap_key_sig = Some(sig);
+                // Ignore MuSig2 and unknown payloads.
+                if let SignPsbtYieldedObject::Partial(sig) = obj {
+                    match sig {
+                        PartialSignature::Sig(key, sig) => {
+                            input.partial_sigs.insert(key, sig);
+                        }
+                        PartialSignature::TapScriptSig(key, Some(tapleaf_hash), sig) => {
+                            input.tap_script_sigs.insert((key, tapleaf_hash), sig);
+                        }
+                        PartialSignature::TapScriptSig(_, None, sig) => {
+                            input.tap_key_sig = Some(sig);
+                        }
                     }
                 }
             }
@@ -247,8 +251,17 @@ impl Transport for TransportHID {
 pub type LedgerSimulator = Ledger<TransportTcp>;
 
 impl LedgerSimulator {
+    /// Connect to a Speculos simulator on the default address (`127.0.0.1:9999`).
     pub fn try_connect() -> Result<Self, HWIError> {
-        let transport = TransportTcp::new().map_err(|_| HWIError::DeviceNotFound)?;
+        Self::try_connect_on(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            9999,
+        ))
+    }
+
+    /// Connect to a Speculos simulator at `addr`.
+    pub fn try_connect_on(addr: SocketAddr) -> Result<Self, HWIError> {
+        let transport = TransportTcp::new_on(addr).map_err(|_| HWIError::DeviceNotFound)?;
         Ok(Ledger {
             client: BitcoinClient::new(transport),
             options: CommandOptions::default(),
@@ -263,8 +276,16 @@ pub struct TransportTcp {
 }
 
 impl TransportTcp {
+    /// Connect to Speculos on the default address (`127.0.0.1:9999`).
     pub fn new() -> Result<Self, Box<dyn Error>> {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 9999);
+        Self::new_on(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            9999,
+        ))
+    }
+
+    /// Connect to Speculos at the given address.
+    pub fn new_on(addr: SocketAddr) -> Result<Self, Box<dyn Error>> {
         let stream = std::net::TcpStream::connect(addr)?;
         Ok(Self {
             connection: Mutex::new(stream),
