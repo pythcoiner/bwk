@@ -14,6 +14,7 @@ pub use sync::SyncEstimator;
 #[cfg(feature = "sp")]
 pub use account::SpNotification;
 pub use account::{Account, Error, Notification, TxListenerNotif};
+pub use bwk_electrum::{parse_electrum_url, ElectrumScheme};
 pub use config::Config;
 
 // Re-exports
