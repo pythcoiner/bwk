@@ -14,6 +14,10 @@ use bitcoin::bip32::DerivationPath;
 
 use crate::Error;
 
+/// Witness satisfaction weight (WU) of a single taproot key-spend input:
+/// Schnorr sig 64 + sighash byte 1 + witness-stack length byte 1 = 66.
+pub const TAPROOT_KEYSPEND_SATISFACTION_WU: u64 = 66;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyChain {
     Receive,

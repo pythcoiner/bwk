@@ -238,6 +238,14 @@ impl TxBuilder {
             false,
         )
     }
+    /// Set the feerate from a sat/vB value, converting to the msat/vB unit the
+    /// builder uses internally (saturating to avoid overflow on absurd inputs).
+    ///
+    /// Convenience over [`Self::feerate`] (which expects msat/vB) so callers do
+    /// not have to hand-multiply by 1_000.
+    pub fn feerate_sat_vb(self, sat_vb: u64) -> Self {
+        self.feerate(sat_vb.saturating_mul(1_000))
+    }
     pub fn select_coins(&self, target: u64, feerate: u64 /* msats/vb */) -> Vec<Coin> {
         // NOTE: target must contains fees for base tx + outputs
         if let Some(source) = &self.coin_source {
@@ -246,6 +254,29 @@ impl TxBuilder {
         } else {
             vec![]
         }
+    }
+    /// Run the configured coin selection for `target` (which must already
+    /// include fees for the base tx + outputs) at `feerate` (msat/vB) and add
+    /// the selected coins as inputs via [`Self::add_input`].
+    pub fn auto_select_coins(
+        &mut self,
+        target: u64,
+        feerate: u64, /* msats/vb */
+    ) -> Vec<Coin> {
+        let coins = self.select_coins(target, feerate);
+        for c in &coins {
+            self.add_input(c.clone());
+        }
+        coins
+    }
+    /// Materialize a single spendable [`Coin`] by its outpoint WITHOUT running
+    /// coin selection.
+    pub fn coin_by_outpoint(&self, outpoint: bitcoin::OutPoint) -> Option<Coin> {
+        self.coin_source
+            .as_ref()?
+            .spendable_coins()
+            .into_iter()
+            .find(|c| c.outpoint == outpoint)
     }
     fn pay_with_label(
         &mut self,
@@ -774,6 +805,76 @@ mod tests {
     use bwk_utils::test::bitcoind_with_txindex;
     use test::sum_inputs;
     use test::sum_outputs;
+
+    #[test]
+    fn test_feerate_sat_vb_converts_to_msat() {
+        let (_signer, derivator) = wpkh_signer();
+        let builder = test::builder_from_derivator(derivator).feerate_sat_vb(7);
+        assert!(matches!(
+            builder.tx_template.fees,
+            crate::Fees::MilliSatsVb(7_000)
+        ));
+    }
+
+    #[test]
+    fn test_feerate_sat_vb_saturates() {
+        let (_signer, derivator) = wpkh_signer();
+        let builder = test::builder_from_derivator(derivator).feerate_sat_vb(u64::MAX);
+        assert!(matches!(
+            builder.tx_template.fees,
+            crate::Fees::MilliSatsVb(u64::MAX)
+        ));
+    }
+
+    #[test]
+    fn test_auto_select_coins_adds_inputs() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone());
+        // Put two spendable coins into the coin source.
+        builder.receive_coin(test::receive_coin(100_000, &derivator, 0));
+        builder.receive_coin(test::receive_coin(200_000, &derivator, 1));
+
+        assert!(builder.tx_template.inputs.is_empty());
+        let selected = builder.auto_select_coins(50_000, 1_000);
+        assert!(!selected.is_empty(), "selection should find coins");
+        // The selected coins must now be present as builder inputs.
+        assert_eq!(builder.tx_template.inputs.len(), selected.len());
+        for c in &selected {
+            assert!(builder.tx_template.inputs.contains(c));
+        }
+    }
+
+    #[test]
+    fn test_coin_by_outpoint_bypasses_selection() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone());
+        // 25 coins: more than the >20 short-circuit in all_coins_combinations,
+        // so select_coins(u64::MAX/2, ..) would return nothing, but
+        // coin_by_outpoint must still find the specific coin.
+        let mut target_outpoint = None;
+        for i in 0..25u32 {
+            let coin = test::receive_coin(10_000 + i as u64, &derivator, i);
+            if i == 12 {
+                target_outpoint = Some(coin.outpoint);
+            }
+            builder.receive_coin(coin);
+        }
+        let outpoint = target_outpoint.expect("set");
+
+        // Selection short-circuits with >20 coins.
+        assert!(builder.select_coins(u64::MAX / 2, 1_000).is_empty());
+
+        // Direct lookup succeeds.
+        let got = builder.coin_by_outpoint(outpoint).expect("coin found");
+        assert_eq!(got.outpoint, outpoint);
+
+        // Unknown outpoint yields None.
+        let bogus = bitcoin::OutPoint {
+            txid: got.outpoint.txid,
+            vout: 9999,
+        };
+        assert!(builder.coin_by_outpoint(bogus).is_none());
+    }
 
     #[test]
     fn test_segwit_offline() {
