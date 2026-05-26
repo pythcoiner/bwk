@@ -81,3 +81,15 @@ pub enum TxRequestError {
     #[error("builder error: {0}")]
     Builder(String),
 }
+
+impl From<crate::transaction::Error> for TxRequestError {
+    /// A failed auto-selection (`CoinSelection`) means there weren't enough
+    /// spendable coins, so it surfaces as `InsufficientFunds`; other errors
+    /// are reported verbatim via `Builder`.
+    fn from(err: crate::transaction::Error) -> Self {
+        match err {
+            crate::transaction::Error::CoinSelection => TxRequestError::InsufficientFunds,
+            other => TxRequestError::Builder(format!("{other:?}")),
+        }
+    }
+}

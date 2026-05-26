@@ -200,11 +200,24 @@ impl TxBuilder {
         };
         self.tx_template.outputs.push(Box::new(recipient));
     }
-    /// Try to craft a transaction from the current TxTemplate and output a TransactionResult
+    /// The `(selector, source)` pair used for auto coin selection,
+    /// when this builder has a coin source configured.
+    fn selection(&self) -> Option<(&dyn CoinSelector, &dyn CoinSource)> {
+        self.coin_source
+            .as_deref()
+            .map(|src| (self.coin_selector.as_ref(), src))
+    }
+
+    /// Try to craft a transaction from the current TxTemplate and output a TransactionResult.
+    ///
+    /// When the template has no inputs, inputs are auto-selected using the
+    /// registered coin selector + coin source (see [`Self::coin_selector`] /
+    /// [`Self::coin_source`]). Pre-adding inputs bypasses selection.
     pub fn simulate(&self) -> TransactionResult {
         process_transaction(
             self.tx_template.clone(),
             Some(self.change_provider.as_ref()),
+            self.selection(),
         )
     }
 
@@ -213,6 +226,7 @@ impl TxBuilder {
         let res = process_transaction(
             self.tx_template.clone(),
             Some(self.change_provider.as_ref()),
+            self.selection(),
         );
 
         if let Some(error) = res.error {
@@ -842,6 +856,72 @@ mod tests {
         for c in &selected {
             assert!(builder.tx_template.inputs.contains(c));
         }
+    }
+
+    #[test]
+    fn process_transaction_auto_selects_when_no_inputs() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone());
+        builder.receive_coin(test::receive_coin(100_000, &derivator, 0));
+        builder.receive_coin(test::receive_coin(200_000, &derivator, 1));
+        builder.dummy_external_output(50_000); // Amount::Value output
+
+        assert!(builder.tx_template.inputs.is_empty());
+        // Default feerate is MilliSatsVb(1_000): the engine selects at the TODO.
+        let res = builder.simulate();
+        assert!(res.error.is_none(), "expected success, got {:?}", res.error);
+        assert!(
+            !res.tx_template.inputs.is_empty(),
+            "engine should have auto-selected inputs"
+        );
+    }
+
+    #[test]
+    fn process_transaction_no_selector_keeps_no_inputs_error() {
+        // The engine, called directly with no selector, keeps the manual-inputs
+        // contract: empty inputs is an error. (Via the builder, simulate() would
+        // auto-select from the registered source, so we exercise the engine.)
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone());
+        builder.dummy_external_output(50_000);
+
+        let res = process_transaction(
+            builder.tx_template.clone(),
+            Some(builder.change_provider.as_ref()),
+            None,
+        );
+        assert!(matches!(res.error, Some(Error::NoInputs)));
+    }
+
+    #[test]
+    fn process_transaction_absolute_fee_rejects_auto_select() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone()).fee(500); // Fees::Sats
+        builder.receive_coin(test::receive_coin(100_000, &derivator, 0));
+        builder.dummy_external_output(50_000); // Value output -> reaches the feerate check
+
+        let res = builder.simulate();
+        assert!(matches!(
+            res.error,
+            Some(Error::CoinSelectionRequiresFeerate)
+        ));
+    }
+
+    #[test]
+    fn process_transaction_sweep_selects_all_spendable() {
+        let (_signer, derivator) = wpkh_signer();
+        let mut builder = test::builder_from_derivator(derivator.clone());
+        builder.receive_coin(test::receive_coin(100_000, &derivator, 0));
+        builder.receive_coin(test::receive_coin(200_000, &derivator, 1));
+        builder.dummy_external_output_max(); // Amount::Max -> sweep
+
+        let res = builder.simulate();
+        assert!(res.error.is_none(), "expected success, got {:?}", res.error);
+        assert_eq!(
+            res.tx_template.inputs.len(),
+            2,
+            "sweep must spend all spendable coins"
+        );
     }
 
     #[test]

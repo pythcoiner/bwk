@@ -1104,7 +1104,6 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
         let mut has_max = false;
         let mut max_addr: Option<RecipientAddress> = None;
-        let mut output_total: u64 = 0;
         let mut recipients: Vec<SpRecipientAddress> = Vec::new();
 
         for output in &request.outputs {
@@ -1121,7 +1120,6 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                 has_max = true;
                 max_addr = Some(addr);
             } else {
-                output_total += output.amount;
                 recipients.push(SpRecipientAddress::new(addr, output.amount, network));
             }
         }
@@ -1143,6 +1141,10 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             builder.add_output(recip);
         }
 
+        // Caller-specified inputs are pre-added (this bypasses auto-selection).
+        // When none are given, leave the template inputs empty: the builder's
+        // registered coin selector + source auto-select on simulate()/generate()
+        // (Value outputs select for the target; a Max output sweeps all coins).
         if !request.input_outpoints.is_empty() {
             let sp_coins = self.coins();
             for outpoint in &request.input_outpoints {
@@ -1171,16 +1173,6 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                     return Err(TxRequestError::CoinNotFound(*outpoint));
                 }
             }
-        } else if has_max {
-            builder.drain_inputs();
-        } else {
-            let coins = builder.select_coins(output_total, feerate_msats_vb);
-            if coins.is_empty() {
-                return Err(TxRequestError::InsufficientFunds);
-            }
-            for coin in coins {
-                builder.add_input(coin);
-            }
         }
 
         Ok(builder)
@@ -1192,9 +1184,11 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         request: &bwk_tx::TxRequest,
     ) -> Result<bwk_tx::TxSimulation, bwk_tx::TxRequestError> {
         let builder = self.tx_builder_from_request(request)?;
-        let result = builder.simulate();
-        if let Some(err) = &result.error {
-            return Err(bwk_tx::TxRequestError::Builder(format!("{err:?}")));
+        // Inputs auto-selected from the builder's registered selector/source
+        // when the request did not specify input_outpoints.
+        let mut result = builder.simulate();
+        if let Some(err) = result.error.take() {
+            return Err(err.into());
         }
         let weight = bwk_tx::transaction::tx_estimated_weight(&result.tx_template);
         let input_total: bitcoin::Amount = result
@@ -1228,9 +1222,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         request: &bwk_tx::TxRequest,
     ) -> Result<bitcoin::Psbt, bwk_tx::TxRequestError> {
         let mut builder = self.tx_builder_from_request(request)?;
-        builder
-            .generate()
-            .map_err(|e| bwk_tx::TxRequestError::Builder(format!("{e:?}")))
+        builder.generate().map_err(Into::into)
     }
 
     /// SP spendable summary plus every sub-account's spendable summary, summed.

@@ -113,7 +113,7 @@ fn auto_select_on_empty_wallet_is_insufficient_funds() {
         fee: 0,
         input_outpoints: vec![],
     };
-    match acc.tx_builder_from_request(&request) {
+    match acc.simulate(&request) {
         Err(TxRequestError::InsufficientFunds) => {}
         Err(other) => panic!("expected InsufficientFunds, got {other:?}"),
         Ok(_) => panic!("expected InsufficientFunds, got Ok"),

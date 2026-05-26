@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     coin::shuffle_coins,
+    coin_selection::CoinSelector,
     recipient::{FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider},
+    tx_builder::CoinSource,
     Coin, DUST_AMOUNT,
 };
 
@@ -26,6 +28,9 @@ pub enum Error {
     Output,
     CoinSelection,
     CoinSelectionFee,
+    /// Auto coin selection was requested (no inputs + a selector supplied) but
+    /// the fee is absolute (`Fees::Sats`); selection needs a per-vB feerate.
+    CoinSelectionRequiresFeerate,
     NoSpProvider,
     SpPartialSecret,
     ChangeAlreadyAdded,
@@ -589,14 +594,39 @@ pub fn process_fees(
     result
 }
 
+fn select_inputs(
+    tx_template: &TxTemplate,
+    outputs_total: u64,
+    maxed_output: Option<usize>,
+    coin_selection: Option<(&dyn CoinSelector, &dyn CoinSource)>,
+) -> Result<Vec<Coin>, Error> {
+    let (selector, source) = coin_selection.ok_or(Error::NoInputs)?;
+    let selected = if maxed_output.is_some() {
+        source.spendable_coins()
+    } else {
+        let rate = match tx_template.fees {
+            Fees::MilliSatsVb(rate) => rate,
+            Fees::Sats(_) => return Err(Error::CoinSelectionRequiresFeerate),
+        };
+        let base_weight_vb = tx_estimated_weight(tx_template).to_vbytes_ceil();
+        let base_fee = base_weight_vb * rate / 1000;
+        let target = outputs_total + base_fee;
+        selector.select_coins(source.spendable_coins(), target, rate)
+    };
+    if selected.is_empty() {
+        return Err(Error::CoinSelection);
+    }
+    Ok(selected)
+}
+
 /// Preprocesses a transaction based on the provided `TransactionTemplate`.
 #[allow(clippy::type_complexity)]
 pub fn process_transaction(
     tx_template: TxTemplate,
     change_recipient: Option<&dyn RecipientProvider>,
+    coin_selection: Option<(&dyn CoinSelector, &dyn CoinSource)>,
 ) -> TransactionResult {
-    // TODO: implement coin selection if no or not enough input provided
-
+    let mut tx_template = tx_template;
     let mut result = TransactionResult::from_template(&tx_template);
 
     if tx_template.fees.is_null() {
@@ -604,12 +634,9 @@ pub fn process_transaction(
         return result;
     }
 
-    if tx_template.inputs.is_empty() {
-        // FIXME: Coin selection
-        result.error = Some(Error::NoInputs);
-        return result;
-    }
-
+    // Sum the outputs before coin selection: the target is
+    // outputs_total + base_fee. Only the inputs are unknown before
+    // selection; the target already includes the base tx and outputs.
     let mut outputs_total = 0;
     let mut maxed_output = None;
     for (pos, o) in tx_template.outputs.iter().enumerate() {
@@ -625,6 +652,20 @@ pub fn process_transaction(
                 // to be re-processed
             }
             Amount::Anchor => { /* anchor has 0 sats outputs */ }
+        }
+    }
+
+    // Coin selection: when no inputs were provided, trigger auto coin selection
+    if tx_template.inputs.is_empty() {
+        match select_inputs(&tx_template, outputs_total, maxed_output, coin_selection) {
+            Ok(selected) => {
+                tx_template.inputs = selected.clone();
+                result.tx_template.inputs = selected;
+            }
+            Err(e) => {
+                result.error = Some(e);
+                return result;
+            }
         }
     }
 
@@ -738,7 +779,7 @@ mod test {
             descriptor: Some(descriptor.clone()),
         };
 
-        let res = process_transaction(template.clone(), Some(&change_proto));
+        let res = process_transaction(template.clone(), Some(&change_proto), None);
 
         assert!(res.error.is_none());
         assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_788)));
@@ -816,7 +857,7 @@ mod test {
             fees: Fees::Sats(89_000),
         };
 
-        let res = process_transaction(template.clone(), None);
+        let res = process_transaction(template.clone(), None, None);
         assert!(res.error.is_none());
 
         // Should fail: actual fee (90k) > 10% of paid_outputs (1k) AND > max_amount (50k)
