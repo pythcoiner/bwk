@@ -236,14 +236,76 @@ impl RecipientProvider for SpRecipientAddress {
 
 // TxBuilderSpExt
 
+/// Error returned when adding a Silent Payment recipient fails validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpRecipientError {
+    /// The SP address network is incompatible with the builder's network
+    /// (e.g. a mainnet `sp1...` address on a non-mainnet wallet).
+    NetworkMismatch {
+        address: spdk_core::silentpayments::Network,
+        builder: Network,
+    },
+}
+
+impl std::fmt::Display for SpRecipientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SpRecipientError::NetworkMismatch { address, builder } => write!(
+                f,
+                "silent payment address network ({address:?}) does not match wallet network ({builder:?})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SpRecipientError {}
+
+/// Returns `true` if the SP `address` network is compatible with `builder`
+/// (the wallet's `bitcoin::Network`).
+///
+/// A mainnet SP address (`sp1...`) is only valid on `Network::Bitcoin`; a
+/// non-mainnet SP address is only valid on a non-mainnet wallet. This mirrors
+/// the guard wallet wrappers previously applied caller-side.
+fn sp_network_matches(address: spdk_core::silentpayments::Network, builder: Network) -> bool {
+    let address_is_mainnet = matches!(address, spdk_core::silentpayments::Network::Mainnet);
+    let builder_is_mainnet = matches!(builder, Network::Bitcoin);
+    address_is_mainnet == builder_is_mainnet
+}
+
 pub trait TxBuilderSpExt {
     fn send_to_sp(&mut self, address: SilentPaymentAddress, amount: u64);
+
+    /// Validate the SP `address` network against the builder's configured
+    /// `bitcoin::Network` and add it as an output. Returns
+    /// [`SpRecipientError::NetworkMismatch`] without mutating the builder when
+    /// the networks are incompatible.
+    fn try_send_to_sp(
+        &mut self,
+        address: SilentPaymentAddress,
+        amount: u64,
+    ) -> Result<(), SpRecipientError>;
 }
 
 impl TxBuilderSpExt for bwk_tx::TxBuilder {
     fn send_to_sp(&mut self, address: SilentPaymentAddress, amount: u64) {
         let network = self.network();
         self.add_output(SpRecipientAddress::from_sp(address, amount, network));
+    }
+
+    fn try_send_to_sp(
+        &mut self,
+        address: SilentPaymentAddress,
+        amount: u64,
+    ) -> Result<(), SpRecipientError> {
+        let network = self.network();
+        if !sp_network_matches(address.get_network(), network) {
+            return Err(SpRecipientError::NetworkMismatch {
+                address: address.get_network(),
+                builder: network,
+            });
+        }
+        self.add_output(SpRecipientAddress::from_sp(address, amount, network));
+        Ok(())
     }
 }
 
@@ -604,5 +666,68 @@ impl SpPartialSecretProvider for Account {
         partial_secret: spdk_core::bitcoin::secp256k1::SecretKey,
     ) {
         batch_derive_sp_scripts(outputs, partial_secret);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spdk_core::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use spdk_core::silentpayments::Network as SpNetwork;
+
+    fn sp_net(n: Network) -> SpNetwork {
+        if matches!(n, Network::Bitcoin) {
+            SpNetwork::Mainnet
+        } else {
+            SpNetwork::Testnet
+        }
+    }
+
+    /// Build a SilentPaymentAddress for `network` from deterministic keys.
+    fn sp_address(network: SpNetwork) -> SilentPaymentAddress {
+        let secp = Secp256k1::new();
+        let scan = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[1u8; 32]).unwrap());
+        let spend = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[2u8; 32]).unwrap());
+        SilentPaymentAddress::new(scan, spend, network, 0).unwrap()
+    }
+
+    /// A minimal TxBuilder bound to `network` (SP change provider only).
+    fn builder(network: Network) -> bwk_tx::TxBuilder {
+        let change = SpChangeRecipientProvider::new(sp_address(sp_net(network)), network);
+        bwk_tx::TxBuilder::new(Box::new(change))
+    }
+
+    #[test]
+    fn try_send_to_sp_rejects_mainnet_address_on_non_mainnet_builder() {
+        let mut b = builder(Network::Regtest);
+        let addr = sp_address(SpNetwork::Mainnet);
+        let res = b.try_send_to_sp(addr, 10_000);
+        assert!(matches!(res, Err(SpRecipientError::NetworkMismatch { .. })));
+        assert!(b.tx_template.outputs.is_empty());
+    }
+
+    #[test]
+    fn try_send_to_sp_rejects_testnet_address_on_mainnet_builder() {
+        let mut b = builder(Network::Bitcoin);
+        let addr = sp_address(SpNetwork::Testnet);
+        let res = b.try_send_to_sp(addr, 10_000);
+        assert!(matches!(res, Err(SpRecipientError::NetworkMismatch { .. })));
+        assert!(b.tx_template.outputs.is_empty());
+    }
+
+    #[test]
+    fn try_send_to_sp_accepts_matching_mainnet() {
+        let mut b = builder(Network::Bitcoin);
+        let addr = sp_address(SpNetwork::Mainnet);
+        assert!(b.try_send_to_sp(addr, 10_000).is_ok());
+        assert_eq!(b.tx_template.outputs.len(), 1);
+    }
+
+    #[test]
+    fn try_send_to_sp_accepts_matching_non_mainnet() {
+        let mut b = builder(Network::Regtest);
+        let addr = sp_address(SpNetwork::Testnet);
+        assert!(b.try_send_to_sp(addr, 10_000).is_ok());
+        assert_eq!(b.tx_template.outputs.len(), 1);
     }
 }

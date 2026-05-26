@@ -1704,10 +1704,10 @@ pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
 }
 
 /// Build a [`bwk_tx::Coin`] from an SP outpoint + entry, suitable for
-/// `TxBuilder::add_input`. The taproot key-spend satisfaction weight (66 wu)
-/// is hardcoded — SP outputs are always single-key taproot.
-fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx::Coin {
-    const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
+/// `TxBuilder::add_input`. The taproot key-spend satisfaction weight
+/// ([`bwk_tx::TAPROOT_KEYSPEND_SATISFACTION_WU`]) is used because SP outputs
+/// are always single-key taproot.
+pub fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx::Coin {
     bwk_tx::Coin {
         txout: bitcoin::TxOut {
             value: entry.amount(),
@@ -1718,7 +1718,7 @@ fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx::Coi
         sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
         status: bwk_tx::CoinStatus::Confirmed,
         label: None,
-        satisfaction_size: TR_KEYSPEND_SATISFACTION_WEIGHT,
+        satisfaction_size: bwk_tx::TAPROOT_KEYSPEND_SATISFACTION_WU,
         spend_info: bwk_tx::CoinSpendInfo::Sp {
             derivation: bitcoin::bip32::DerivationPath::default(),
             tweak: *entry.tweak(),

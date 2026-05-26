@@ -16,7 +16,8 @@ pub use profile::{SpRamProfile, SpStorageProfile};
 
 // Internal types
 pub use account::{
-    backend_block_height, backend_info, Account, AccountError, Payment, PaymentType, ScanMode,
+    backend_block_height, backend_info, sp_coin_entry_to_coin, Account, AccountError, Payment,
+    PaymentType, ScanMode,
 };
 pub use backend_blindbit_native_non_async::InfoResponse;
 pub use bwk;
@@ -35,6 +36,6 @@ pub use bwk_tx;
 pub use bwk_tx::{
     Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
 };
-pub use recipient::{SpRecipient, SpRecipientAddress, TxBuilderSpExt};
+pub use recipient::{SpRecipient, SpRecipientAddress, SpRecipientError, TxBuilderSpExt};
 pub use silentpayments;
 pub use spdk_core;
