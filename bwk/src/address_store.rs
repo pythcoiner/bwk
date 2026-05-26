@@ -451,7 +451,7 @@ impl<P: StorageProfile> AddressStore<P> {
             .store
             .iter()
             .filter_map(|(_, entry)| {
-                (entry.account == KeyChain::Receive && entry.index <= self.change_generated_tip)
+                (entry.account == KeyChain::Receive && entry.index <= self.recv_generated_tip)
                     .then_some(entry)
             })
             .cloned()
@@ -679,6 +679,39 @@ mod tests {
             }
             _ => panic!("Expected PsbtOutputInfo::Bip32"),
         }
+    }
+
+    #[test]
+    fn get_generated_addresses_returns_freshly_generated_receive() {
+        // Regression test for the receive bound bug: the RECEIVE filter must
+        // compare against recv_generated_tip, not change_generated_tip. With
+        // recv tip bumped (here index 1) while change tip stays at 0, the
+        // newly-generated receive address must still be returned.
+        let (tx, _rx) = mpsc::channel();
+        let derivator = test_derivator();
+        let descriptor = derivator.descriptor();
+        let config = test_config(descriptor);
+
+        let mut store = AddressStore::new(
+            derivator, tx, 0,  // recv_tip
+            0,  // change_tip stays at 0
+            20, // look_ahead
+            config,
+        );
+
+        // Generate a fresh receive address; this bumps recv_generated_tip to 1
+        // and leaves change_generated_tip at 0.
+        let addr = store.new_recv_addr();
+        let spk = addr.script_pubkey();
+
+        let (recv, _change) = store.get_generated_addresses();
+        assert!(
+            recv.iter().any(|e| e.address().assume_checked().script_pubkey() == spk),
+            "freshly generated receive address (index 1) must be returned even though change tip is 0"
+        );
+        // Index 1 entry must be present (it would be filtered out by the old
+        // buggy `<= change_generated_tip` (0) bound).
+        assert!(recv.iter().any(|e| e.index() == 1));
     }
 
     #[test]
