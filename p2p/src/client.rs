@@ -374,7 +374,7 @@ mod tests {
         const SUCCESS_THRESHOLD_PERCENT: usize = 40;
 
         for attempt in 1..=MAX_RETRIES {
-            println!("Attempt {}/{}", attempt, MAX_RETRIES);
+            println!("Attempt {attempt}/{MAX_RETRIES}");
 
             let peers = fetch_peers("seed.bitcoin.sipa.be").unwrap();
 
@@ -405,7 +405,7 @@ mod tests {
             }
 
             let success = len - failed;
-            println!("Success: {}/{}", success, len);
+            println!("Success: {success}/{len}");
 
             if success * 100 >= len * SUCCESS_THRESHOLD_PERCENT {
                 return;
@@ -501,8 +501,7 @@ mod tests {
             mempool.iter().map(|s| s.parse().unwrap()).collect();
         assert!(
             mempool_txids.contains(&broadcast_txid),
-            "Transaction {} not found in Node B's mempool after confirmed P2P broadcast",
-            broadcast_txid
+            "Transaction {broadcast_txid} not found in Node B's mempool after confirmed P2P broadcast"
         );
     }
 }

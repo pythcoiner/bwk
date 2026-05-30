@@ -111,6 +111,7 @@ impl Clone for Box<dyn RecipientProvider> {
 }
 
 /// PSBT output metadata - needed by signers
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum PsbtOutputInfo {
     /// Descriptor-based wallets (BIP32 derivation paths)

@@ -80,7 +80,7 @@ fn test_account_new_invalid_no_keys() {
         Err(AccountError::Config(msg)) => {
             assert!(msg.contains("mnemonic or scan_sk"));
         }
-        Err(other) => panic!("expected Config error, got {:?}", other),
+        Err(other) => panic!("expected Config error, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -105,7 +105,7 @@ fn test_account_new_invalid_bad_mnemonic() {
         Err(AccountError::Config(msg)) => {
             assert!(msg.contains("invalid mnemonic"));
         }
-        Err(other) => panic!("expected Config error about mnemonic, got {:?}", other),
+        Err(other) => panic!("expected Config error about mnemonic, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -149,7 +149,7 @@ fn test_account_new_invalid_empty_url() {
         Err(AccountError::Config(msg)) => {
             assert!(msg.contains("blindbit_url"));
         }
-        Err(other) => panic!("expected Config error about blindbit_url, got {:?}", other),
+        Err(other) => panic!("expected Config error about blindbit_url, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -446,7 +446,7 @@ fn test_concurrent_writes_different_stores() {
                 direction: bwk_sp::TxDirection::Incoming,
                 amount: 1000 * (i as u64 + 1),
                 fee: None,
-                label: Some(format!("tx {}", i)),
+                label: Some(format!("tx {i}")),
                 height: Some(100 + i),
                 timestamp: None,
             });
@@ -496,7 +496,7 @@ fn test_notification_debug_clone() {
         current: 100,
         end: 200,
     });
-    let debug = format!("{:?}", notif);
+    let debug = format!("{notif:?}");
     assert!(debug.contains("ScanProgress"));
     assert!(debug.contains("100"));
 
@@ -526,7 +526,7 @@ fn test_payment_structures() {
     assert_eq!(payment.payment_type, PaymentType::Receive);
     assert_ne!(payment.payment_type, PaymentType::Send);
 
-    let debug = format!("{:?}", payment);
+    let debug = format!("{payment:?}");
     assert!(debug.contains("Payment"));
     assert!(debug.contains("abc123"));
 }

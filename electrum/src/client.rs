@@ -131,7 +131,7 @@ impl Debug for CoinResponse {
                 f.debug_tuple("History").field(&map).finish()
             }
             Self::Stopped => write!(f, "Stopped"),
-            Self::Error(e) => write!(f, "Error({})", e),
+            Self::Error(e) => write!(f, "Error({e})"),
         }
     }
 }
@@ -272,7 +272,7 @@ impl Client {
                                     {
                                         retry += 1;
                                         if retry > 10 {
-                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {:?}", e)).into()).expect("caller dropped");
+                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).expect("caller dropped");
                                         }
                                         thread::sleep(Duration::from_millis(50));
                                     }
@@ -302,7 +302,7 @@ impl Client {
                                     {
                                         retry += 1;
                                         if retry > 10 {
-                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {:?}", e)).into()).expect("caller dropped");
+                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).expect("caller dropped");
                                         }
                                         thread::sleep(Duration::from_millis(50));
                                     }
@@ -328,7 +328,7 @@ impl Client {
                                         self.inner.try_send_batch(batch.iter().collect())
                                     {
                                         retry += 1;
-                                        if retry > 10 && send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {:?}", e)).into()).is_err() {
+                                        if retry > 10 && send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).is_err() {
                                         // NOTE: caller has dropped the channel
                                         // == Close request
                                         return;
@@ -613,7 +613,7 @@ impl Client {
     ///   - get a wrong response
     pub fn broadcast(&mut self, tx: &Transaction) -> Result<(), Error> {
         let raw_tx = serialize_hex(tx);
-        log::debug!("electrum::Client().broadcast(): {:?}", raw_tx);
+        log::debug!("electrum::Client().broadcast(): {raw_tx:?}");
         let request = Request::tx_broadcast(raw_tx);
         self.inner.try_send(&request)?;
         let req_id = request.id;
@@ -625,10 +625,7 @@ impl Client {
                 return Err(e.into());
             }
         };
-        log::debug!(
-            "electrum::Client().broadcast(): receive response: {:?}",
-            resp
-        );
+        log::debug!("electrum::Client().broadcast(): receive response: {resp:?}");
         for r in resp {
             if let Response::TxBroadcast(TxBroadcastResponse { id, .. }) = r {
                 if req_id == id {

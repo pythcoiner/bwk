@@ -77,7 +77,7 @@ fn test_account_connects_to_blindbitd() {
     // 5. Test assertions
     assert!(account.backend_online());
     let height = account.block_height().unwrap();
-    assert!(height >= 100, "Expected height >= 100, got {}", height);
+    assert!(height >= 100, "Expected height >= 100, got {height}");
 }
 
 /// Test 10.4.1.2: Account reports correct block height as chain grows.
@@ -105,7 +105,7 @@ fn test_account_block_height_growth() {
 
     // 5. Verify initial height
     let height1 = account.block_height().unwrap();
-    assert!(height1 >= 50, "Expected height >= 50, got {}", height1);
+    assert!(height1 >= 50, "Expected height >= 50, got {height1}");
 
     // 6. Generate 50 more blocks
     bwk_test::generate_blocks(bitcoind, 50);
@@ -113,7 +113,7 @@ fn test_account_block_height_growth() {
 
     // 7. Verify height increased
     let height2 = account.block_height().unwrap();
-    assert!(height2 >= 100, "Expected height >= 100, got {}", height2);
+    assert!(height2 >= 100, "Expected height >= 100, got {height2}");
     assert!(height2 > height1, "Height should have grown");
 }
 
@@ -1555,8 +1555,7 @@ fn test_watch_only_mode() {
     let addr_str = sp_address.to_string();
     assert!(
         addr_str.starts_with("sp") || addr_str.starts_with("tsp"),
-        "SP address should start with 'sp' or 'tsp', got: {}",
-        addr_str
+        "SP address should start with 'sp' or 'tsp', got: {addr_str}"
     );
 }
 
@@ -1593,7 +1592,6 @@ fn test_sp_address_generation() {
     // 7. Verify address format - should start with 'sp' or 'tsp' (testnet/regtest)
     assert!(
         addr_str.starts_with("sp") || addr_str.starts_with("tsp"),
-        "SP address should start with 'sp' or 'tsp', got: {}",
-        addr_str
+        "SP address should start with 'sp' or 'tsp', got: {addr_str}"
     );
 }

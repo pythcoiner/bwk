@@ -453,10 +453,7 @@ impl Transport for SerialTransport {
         params: Option<S>,
     ) -> Result<api::Response<D>, JadeError> {
         let mut guard = self.stream.lock().map_err(|e| {
-            JadeError::Transport(TransportError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )))
+            JadeError::Transport(TransportError::Io(std::io::Error::other(e.to_string())))
         })?;
         exchange(guard.as_mut(), method, params)
     }

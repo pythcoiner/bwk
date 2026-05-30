@@ -281,29 +281,29 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     fn create_sp_client(config: &Config) -> Result<SpClient, AccountError> {
         if let Some(ref mnemonic) = config.mnemonic {
             let mnemonic = bip39::Mnemonic::parse(mnemonic)
-                .map_err(|e| AccountError::Config(format!("invalid mnemonic: {}", e)))?;
+                .map_err(|e| AccountError::Config(format!("invalid mnemonic: {e}")))?;
             SpClient::new_from_mnemonic(mnemonic, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {}", e)))
+                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {e}")))
         } else if let Some(ref scan_sk_hex) = config.scan_sk {
             // Create from raw keys
             let scan_sk_bytes = hex::decode(scan_sk_hex)
-                .map_err(|e| AccountError::Config(format!("invalid scan_sk hex: {}", e)))?;
+                .map_err(|e| AccountError::Config(format!("invalid scan_sk hex: {e}")))?;
             let scan_sk = bitcoin::secp256k1::SecretKey::from_slice(&scan_sk_bytes)
-                .map_err(|e| AccountError::Config(format!("invalid scan_sk: {}", e)))?;
+                .map_err(|e| AccountError::Config(format!("invalid scan_sk: {e}")))?;
 
             let spend_key = if let Some(ref spend_key_hex) = config.spend_key {
                 let spend_key_bytes = hex::decode(spend_key_hex)
-                    .map_err(|e| AccountError::Config(format!("invalid spend_key hex: {}", e)))?;
+                    .map_err(|e| AccountError::Config(format!("invalid spend_key hex: {e}")))?;
 
                 if spend_key_bytes.len() == 32 {
                     // Secret key
                     let sk = bitcoin::secp256k1::SecretKey::from_slice(&spend_key_bytes)
-                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {}", e)))?;
+                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
                     spdk_core::SpendKey::Secret(sk)
                 } else if spend_key_bytes.len() == 33 {
                     // Public key
                     let pk = bitcoin::secp256k1::PublicKey::from_slice(&spend_key_bytes)
-                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {}", e)))?;
+                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
                     spdk_core::SpendKey::Public(pk)
                 } else {
                     return Err(AccountError::Config(
@@ -317,7 +317,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             };
 
             SpClient::new(scan_sk, spend_key, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {}", e)))
+                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {e}")))
         } else {
             Err(AccountError::Config(
                 "either mnemonic or scan_sk must be provided".to_string(),
@@ -676,9 +676,9 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         }
 
         let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {}", e)))?;
+            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
         let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
+            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
         let scan_backend = create_backend(&self.config)?;
@@ -796,7 +796,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                 let chain_height = match backend.block_height() {
                     Ok(h) => h.to_consensus_u32(),
                     Err(e) => {
-                        log::warn!("scanner: failed to get block height: {}", e);
+                        log::warn!("scanner: failed to get block height: {e}");
                         let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
                             message: e.to_string(),
                         }));
@@ -928,9 +928,9 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         }
 
         let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {}", e)))?;
+            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
         let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {}", e)))?;
+            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
         let scan_backend = create_backend(&self.config)?;
@@ -1547,7 +1547,7 @@ impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
 fn create_backend(config: &Config) -> Result<BlindbitBackend<UreqClient>, AccountError> {
     let http_client = UreqClient::new();
     BlindbitBackend::new(config.blindbit_url.clone(), http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))
 }
 
 /// Internal struct that implements the Updater trait for scanning.
@@ -1669,7 +1669,7 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
     let try_url = |url: &str| -> Result<InfoResponse, AccountError> {
         let http_client = UreqClient::new();
         let backend = BlindbitBackend::new(url.to_string(), http_client)
-            .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+            .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))?;
         backend
             .info()
             .map_err(|e| AccountError::Network(e.to_string()))
@@ -1682,12 +1682,12 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
     }
 
     // No scheme — try http:// then https://.
-    let http_url = format!("http://{}", blindbit_url);
+    let http_url = format!("http://{blindbit_url}");
     if let Ok(info) = try_url(&http_url) {
         return Ok((info, http_url));
     }
 
-    let https_url = format!("https://{}", blindbit_url);
+    let https_url = format!("https://{blindbit_url}");
     let info = try_url(&https_url)?;
     Ok((info, https_url))
 }
@@ -1696,7 +1696,7 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
 pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
     let http_client = UreqClient::new();
     let backend = BlindbitBackend::new(blindbit_url, http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {}", e)))?;
+        .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))?;
     backend
         .block_height()
         .map(|h| h.to_consensus_u32())
@@ -1886,7 +1886,7 @@ mod tests {
             height: Some(1),
         };
 
-        let debug_str = format!("{:?}", payment);
+        let debug_str = format!("{payment:?}");
         assert!(debug_str.contains("Payment"));
         assert!(debug_str.contains("abc"));
         assert!(debug_str.contains("Send"));

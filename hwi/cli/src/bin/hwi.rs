@@ -25,6 +25,7 @@ struct Args {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     #[command(subcommand)]
     Address(AddressCommands),

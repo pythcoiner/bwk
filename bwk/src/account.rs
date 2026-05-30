@@ -615,13 +615,13 @@ impl<P: StorageProfile> Account<P> {
             let client = match bwk_electrum::client::Client::new(&addr, port) {
                 Ok(c) => c,
                 Err(e) => {
-                    log::error!("start_listen_txs(): fail to create electrum client {}", e);
+                    log::error!("start_listen_txs(): fail to create electrum client {e}");
                     let _ = notification.send(TxListenerNotif::Error(e.to_string()).into());
                     return;
                 }
             };
 
-            let addr = format!("{}:{}", addr, port);
+            let addr = format!("{addr}:{port}");
             let _ = notification.send(TxListenerNotif::Connected(addr).into());
 
             let (request, response) = client.listen::<CoinRequest, CoinResponse>();
@@ -922,7 +922,7 @@ fn listen_txs<T, P>(
                         }
                         if !history.is_empty() {
                             let hist = CoinRequest::History(history);
-                            log::debug!("listen_txs() send {:#?}", hist);
+                            log::debug!("listen_txs() send {hist:#?}");
                             send_electrum!(request, notification, hist);
                         }
                         if dirty {
@@ -1435,7 +1435,7 @@ mod integration_tests {
             .client
             .send_to_address(addr, amount, None, None, None, None, None, None)
             .unwrap();
-        log::debug!("send_to_address({}, {}) => {}", addr, amount, txid);
+        log::debug!("send_to_address({addr}, {amount}) => {txid}");
         txid
     }
 
@@ -1484,12 +1484,12 @@ mod integration_tests {
             .call::<Value>("invalidateblock", &[block_hash.clone().into()])
             .unwrap();
 
-        log::info!("Invalidated block with hash: {}", block_hash);
+        log::info!("Invalidated block with hash: {block_hash}");
     }
 
     pub fn dump_logs(e: &mut ElectrsD) {
         while let Ok(msg) = e.logs.try_recv() {
-            println!("{}", msg);
+            println!("{msg}");
         }
     }
 

@@ -207,8 +207,7 @@ fn test_real_backend_connection() {
     let height = account.block_height().expect("block_height should work");
     assert!(
         height >= 100,
-        "Block height should be at least 100, got {}",
-        height
+        "Block height should be at least 100, got {height}"
     );
 }
 
@@ -600,13 +599,13 @@ fn test_scan_handles_network_error() {
                 // Scan failed as expected - verify it's a proper error
                 let err = scan_result.unwrap_err();
                 // Just verify we got an error (any AccountError is acceptable)
-                let _ = format!("{:?}", err); // Should not panic
+                let _ = format!("{err:?}"); // Should not panic
             }
         }
         Err(e) => {
             // Account creation failed - that's acceptable for invalid URL
             // Just verify the error is properly formatted
-            let _ = format!("{:?}", e); // Should not panic
+            let _ = format!("{e:?}"); // Should not panic
         }
     }
 }
@@ -1215,7 +1214,7 @@ fn test_scan_state_consistent_after_crash() {
             }
             Err(e) => {
                 // Failed with error - this is acceptable
-                let err_str = format!("{:?}", e);
+                let err_str = format!("{e:?}");
                 assert!(
                     !err_str.is_empty(),
                     "Error should have a meaningful message"
@@ -1563,8 +1562,7 @@ fn test_mempool_tx_not_counted_in_balance() {
     };
     assert!(
         account.coins().contains_key(&expected_op),
-        "Should find output at {}:0",
-        sp_txid
+        "Should find output at {sp_txid}:0"
     );
     assert!(
         account.balance() > 0,
@@ -1790,9 +1788,7 @@ fn test_notification_order_full_sequence() {
     // Verify order: save comes after output
     assert!(
         output_idx < save_idx,
-        "OutputFound (index {}) should come before SaveCalled (index {})",
-        output_idx,
-        save_idx
+        "OutputFound (index {output_idx}) should come before SaveCalled (index {save_idx})"
     );
 
     // Verify the output notification has correct outpoint
@@ -2034,8 +2030,7 @@ fn test_notification_multiple_outputs_same_block() {
         .sum();
     assert_eq!(
         total_outputs_in_target_block, 2,
-        "Should have 2 outputs recorded for block {}, got {}",
-        sp_tx_height, total_outputs_in_target_block
+        "Should have 2 outputs recorded for block {sp_tx_height}, got {total_outputs_in_target_block}"
     );
 }
 
@@ -2207,8 +2202,7 @@ fn test_birthday_height_misses_earlier_outputs() {
     // Verify SP output is at a height BEFORE our birthday
     assert!(
         sp_tx_height < 110,
-        "SP output should be at height < 110 for test to work, got {}",
-        sp_tx_height
+        "SP output should be at height < 110 for test to work, got {sp_tx_height}"
     );
 
     // 11. Create Account with birthday_height = 110 (AFTER the SP output)
@@ -2784,8 +2778,7 @@ fn test_sp_address_format_valid() {
     // BIP-352 specifies: sp1... for mainnet, tsp1... for testnet/regtest
     assert!(
         addr_str.starts_with("sp") || addr_str.starts_with("tsp"),
-        "SP address should start with 'sp' or 'tsp', got: {}",
-        addr_str
+        "SP address should start with 'sp' or 'tsp', got: {addr_str}"
     );
 }
 
@@ -3103,8 +3096,7 @@ fn test_receive_with_sp_label() {
     assert_eq!(
         captured_output.label.as_ref().unwrap(),
         &label,
-        "Output should have the correct label (index {})",
-        label_index
+        "Output should have the correct label (index {label_index})"
     );
 }
 
@@ -3210,7 +3202,7 @@ fn test_concurrent_label_updates() {
         let handle = thread::spawn(move || {
             for (i, outpoint) in outpoints_clone.iter().enumerate() {
                 // Each thread sets a different label for each outpoint
-                let label = format!("thread-{}-label-{}", thread_id, i);
+                let label = format!("thread-{thread_id}-label-{i}");
 
                 // Acquire lock, update, release - same pattern as Account
                 {

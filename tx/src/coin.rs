@@ -52,6 +52,7 @@ pub enum CoinStatus {
 type Label = String;
 
 /// Signing-specific information for a coin.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CoinSpendInfo {
     /// Descriptor-based coin (standard wallets)

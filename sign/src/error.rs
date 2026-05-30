@@ -31,7 +31,7 @@ impl Display for Error {
         match self {
             Error::SighashFail => write!(f, "Sighash id not SIGHASH_ALL | SIGHASH_ANYONE_CAN_PAY"),
             Error::InvalidSignature => write!(f, "Signature processed is invalid"),
-            Error::Bip39(e) => write!(f, "{}", e),
+            Error::Bip39(e) => write!(f, "{e}"),
             Error::XPrivFromSeed => write!(f, "Fail to generate XPriv from seed"),
             Error::InputNotOwned => write!(f, "this input is not owned"),
             Error::MissingWitnessUtxo => write!(f, "witness_utxo field is missing in PSBT"),

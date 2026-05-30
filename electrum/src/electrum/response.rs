@@ -139,7 +139,7 @@ impl Response {
 
         // the we handle the case we need to match request/response id
         let rr: RawResponse = serde_json::from_str(raw)
-            .map_err(|e| Error::RawResponseParsing(format!("Fail to parse `{}`: {:?}", raw, e)))?;
+            .map_err(|e| Error::RawResponseParsing(format!("Fail to parse `{raw}`: {e:?}")))?;
         let request = index.get(&rr.id).ok_or(Error::ResponseId(rr.id))?;
         match request.method {
             Method::Ping => parse!(Ping, PingResponse, raw),

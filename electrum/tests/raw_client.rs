@@ -278,7 +278,7 @@ fn block_header() {
                     }
                 }
                 r => {
-                    panic!("wrong response: {:?}", r);
+                    panic!("wrong response: {r:?}");
                 }
             }
         }

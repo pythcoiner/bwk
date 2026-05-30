@@ -381,10 +381,7 @@ pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
     let timeout = Duration::from_secs(120);
     loop {
         if start.elapsed() > timeout {
-            panic!(
-                "wait_until_sync_at_height: timed out waiting for height {}",
-                height
-            );
+            panic!("wait_until_sync_at_height: timed out waiting for height {height}");
         }
         if let Ok(h) = backend.block_height() {
             if h.to_consensus_u32() >= height {
