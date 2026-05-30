@@ -826,7 +826,7 @@ fn listen_txs<T, P>(
                         }
                     }
                 }
-                let c_spk = derivator.change_at(recv).script_pubkey();
+                let c_spk = derivator.change_at(change).script_pubkey();
                 if !statuses.contains_key(&c_spk).unwrap_or(false) {
                     // FIXME: here we can be smart an not start at 0 but at `actual_tip`
                     for i in 0..change {
