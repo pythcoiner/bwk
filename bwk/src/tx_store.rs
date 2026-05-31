@@ -115,11 +115,11 @@ impl<P: StorageProfile> TxStore<P> {
 
     /// Inserts updates (only txids not already in the store).
     pub fn insert_updates(&mut self, updates: Vec<Update>) {
-        updates.iter().for_each(|u| {
-            assert!(u.is_complete());
-        });
-
         for upd in updates {
+            if !upd.is_complete() {
+                log::error!("TxStore::insert_updates: skipping incomplete update");
+                continue;
+            }
             for (txid, tx, height) in upd.txs {
                 match self.store.contains_key(&txid) {
                     Ok(true) => continue,
@@ -129,7 +129,10 @@ impl<P: StorageProfile> TxStore<P> {
                         continue;
                     }
                 }
-                let tx = tx.expect("all txs populated");
+                let Some(tx) = tx else {
+                    log::error!("TxStore::insert_updates: missing tx for {txid}");
+                    continue;
+                };
                 let weight = tx.weight().to_wu();
                 let entry = TxEntry {
                     height,

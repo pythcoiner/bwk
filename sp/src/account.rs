@@ -1415,11 +1415,27 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     } // Persistence
 
     /// Persist all stores to disk.
+    ///
+    /// This runs from `Drop`; a poisoned lock here would otherwise
+    /// double-panic and abort the process. Recover the guard and
+    /// persist best-effort instead.
     pub fn persist(&self) {
-        self.coin_store.lock().expect("poisoned").persist();
-        self.label_store.lock().expect("poisoned").persist();
-        self.tx_store.lock().expect("poisoned").persist();
-        self.scan_state.lock().expect("poisoned").persist();
+        self.coin_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .persist();
+        self.label_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .persist();
+        self.tx_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .persist();
+        self.scan_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .persist();
     }
 
     /// Aggregated view of every address this wallet owns, across

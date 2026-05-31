@@ -303,8 +303,14 @@ impl HotSigner {
 
     pub fn sign(&self, psbt: &mut Psbt) {
         for descr in &self.descriptors {
-            if let Err(e) = self.inner_sign(psbt, descr) {
-                println!("fail to sign: {e:?}");
+            match self.inner_sign(psbt, descr) {
+                Ok(()) => {}
+                // A descriptor that signs no input simply doesn't apply to
+                // this PSBT (normal in multi-account signing), not a failure.
+                Err(Error::SigningInfo) => {
+                    log::debug!("signer: descriptor matched no input");
+                }
+                Err(e) => log::warn!("fail to sign: {e:?}"),
             }
         }
     }
