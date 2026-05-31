@@ -6,8 +6,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bitcoin::Network;
+use bitcoin::{bip32::ChildNumber, Network};
 use bwk::miniscript::{Descriptor, DescriptorPublicKey};
+use bwk_sign::{bwk_descriptor, HotSigner};
 use serde::{Deserialize, Serialize};
 
 /// Default filename a [`bwk::persist::FileConfigStore`] uses for an
@@ -74,6 +75,12 @@ pub struct SubAccountConfig {
     pub electrum_url: Option<String>,
     /// Electrum server port
     pub electrum_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SubAccountKind {
+    Segwit,
+    Taproot,
 }
 
 impl Config {
@@ -212,6 +219,64 @@ impl Config {
         self.birthday_height = height;
     }
 
+    /// Add a default embedded BIP84 (P2WPKH) sub-account derived from this
+    /// config's mnemonic at account index 0.
+    pub fn add_default_segwit_sub_account(&mut self) -> Result<(), ConfigError> {
+        let mnemonic = self.mnemonic.clone().ok_or(ConfigError::MissingMnemonic)?;
+        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Segwit)
+    }
+
+    /// Add a default embedded BIP86 (P2TR) sub-account derived from this
+    /// config's mnemonic at account index 0.
+    pub fn add_default_taproot_sub_account(&mut self) -> Result<(), ConfigError> {
+        let mnemonic = self.mnemonic.clone().ok_or(ConfigError::MissingMnemonic)?;
+        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Taproot)
+    }
+
+    fn add_sub_account_from_mnemonic(
+        &mut self,
+        mnemonic: &str,
+        kind: SubAccountKind,
+    ) -> Result<(), ConfigError> {
+        let signer = HotSigner::new_from_mnemonics(self.network, mnemonic)
+            .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+        let account = ChildNumber::from_hardened_idx(0).expect("hardcoded account index");
+        let descriptor = match kind {
+            SubAccountKind::Segwit => {
+                let path = bwk_descriptor::wpkh_path(self.network, account)
+                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+                bwk_descriptor::SpkDerivator::new_wpkh(signer.xpub(&path), self.network)
+                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?
+                    .descriptor()
+            }
+            SubAccountKind::Taproot => {
+                let path = bwk_descriptor::tr_path(self.network, account)
+                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+                bwk_descriptor::SpkDerivator::new_tr(signer.xpub(&path), self.network)
+                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?
+                    .descriptor()
+            }
+        };
+
+        self.push_descriptor_maybe(descriptor);
+        Ok(())
+    }
+
+    fn push_descriptor_maybe(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
+        if self
+            .descriptors
+            .iter()
+            .any(|sub| sub.descriptor == descriptor)
+        {
+            return;
+        }
+        self.descriptors.push(SubAccountConfig {
+            descriptor,
+            electrum_url: None,
+            electrum_port: None,
+        });
+    }
+
     /// Enable or disable persistence (builder pattern).
     pub fn enable_persist(mut self, persist: bool) -> Self {
         self.persist = persist;
@@ -282,6 +347,12 @@ pub enum ConfigError {
     /// Invalid key format or value
     #[error("invalid key: {0}")]
     InvalidKey(String),
+    /// Default sub-accounts require this config to contain mnemonic signer material.
+    #[error("missing mnemonic")]
+    MissingMnemonic,
+    /// Descriptor derivation failed
+    #[error("derivation error: {0}")]
+    Derivation(String),
 }
 
 #[cfg(test)]
@@ -313,6 +384,83 @@ mod tests {
         assert!(config.persist); // Default is true
         assert!(config.dust_limit.is_none());
         assert!(config.birthday_height.is_none());
+    }
+
+    #[test]
+    fn test_add_default_segwit_sub_account() {
+        let mut config = test_config();
+
+        config
+            .add_default_segwit_sub_account()
+            .expect("segwit sub-account descriptor");
+
+        assert_eq!(config.descriptors.len(), 1);
+        assert!(config.descriptors[0]
+            .descriptor
+            .to_string()
+            .starts_with("wpkh("));
+        assert!(config.descriptors[0].electrum_url.is_none());
+        assert!(config.descriptors[0].electrum_port.is_none());
+    }
+
+    #[test]
+    fn test_add_default_taproot_sub_account() {
+        let mut config = test_config();
+
+        config
+            .add_default_taproot_sub_account()
+            .expect("taproot sub-account descriptor");
+
+        assert_eq!(config.descriptors.len(), 1);
+        assert!(config.descriptors[0]
+            .descriptor
+            .to_string()
+            .starts_with("tr("));
+        assert!(config.descriptors[0].electrum_url.is_none());
+        assert!(config.descriptors[0].electrum_port.is_none());
+    }
+
+    #[test]
+    fn test_default_sub_account_helpers_are_idempotent() {
+        let mut config = test_config();
+
+        config
+            .add_default_segwit_sub_account()
+            .expect("first segwit insert");
+        config
+            .add_default_taproot_sub_account()
+            .expect("first taproot insert");
+        config
+            .add_default_segwit_sub_account()
+            .expect("second segwit insert");
+        config
+            .add_default_taproot_sub_account()
+            .expect("second taproot insert");
+
+        assert_eq!(config.descriptors.len(), 2);
+    }
+
+    #[test]
+    fn test_default_sub_account_helpers_require_mnemonic() {
+        let mut config = Config::from_keys(
+            "bob".to_string(),
+            Network::Bitcoin,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+            "https://blindbit.example.com".to_string(),
+            PathBuf::from("/tmp/bwk-test"),
+        )
+        .expect("valid keys");
+
+        assert!(matches!(
+            config.add_default_segwit_sub_account(),
+            Err(ConfigError::MissingMnemonic)
+        ));
+        assert!(matches!(
+            config.add_default_taproot_sub_account(),
+            Err(ConfigError::MissingMnemonic)
+        ));
+        assert!(config.descriptors.is_empty());
     }
 
     #[test]
