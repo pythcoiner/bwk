@@ -71,6 +71,13 @@ pub struct Config {
 pub struct SubAccountConfig {
     /// Miniscript descriptor (e.g. wpkh or tr)
     pub descriptor: Descriptor<DescriptorPublicKey>,
+    /// Optional mnemonic used to sign this sub-account.
+    ///
+    /// When absent, [`Account`](crate::Account) uses the parent SP config's
+    /// mnemonic. This field is only needed for externally supplied sub-account
+    /// mnemonics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mnemonic: Option<String>,
     /// Electrum server URL (optional, offline if not set)
     pub electrum_url: Option<String>,
     /// Electrum server port
@@ -223,20 +230,47 @@ impl Config {
     /// config's mnemonic at account index 0.
     pub fn add_default_segwit_sub_account(&mut self) -> Result<(), ConfigError> {
         let mnemonic = self.mnemonic.clone().ok_or(ConfigError::MissingMnemonic)?;
-        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Segwit)
+        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Segwit, None)
     }
 
     /// Add a default embedded BIP86 (P2TR) sub-account derived from this
     /// config's mnemonic at account index 0.
     pub fn add_default_taproot_sub_account(&mut self) -> Result<(), ConfigError> {
         let mnemonic = self.mnemonic.clone().ok_or(ConfigError::MissingMnemonic)?;
-        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Taproot)
+        self.add_sub_account_from_mnemonic(&mnemonic, SubAccountKind::Taproot, None)
+    }
+
+    /// Add an embedded BIP84 (P2WPKH) sub-account derived from an external
+    /// mnemonic at account index 0.
+    pub fn add_segwit_sub_account_from_mnemonic(
+        &mut self,
+        mnemonic: &str,
+    ) -> Result<(), ConfigError> {
+        self.add_sub_account_from_mnemonic(
+            mnemonic,
+            SubAccountKind::Segwit,
+            Some(mnemonic.to_string()),
+        )
+    }
+
+    /// Add an embedded BIP86 (P2TR) sub-account derived from an external
+    /// mnemonic at account index 0.
+    pub fn add_taproot_sub_account_from_mnemonic(
+        &mut self,
+        mnemonic: &str,
+    ) -> Result<(), ConfigError> {
+        self.add_sub_account_from_mnemonic(
+            mnemonic,
+            SubAccountKind::Taproot,
+            Some(mnemonic.to_string()),
+        )
     }
 
     fn add_sub_account_from_mnemonic(
         &mut self,
         mnemonic: &str,
         kind: SubAccountKind,
+        sub_account_mnemonic: Option<String>,
     ) -> Result<(), ConfigError> {
         let signer = HotSigner::new_from_mnemonics(self.network, mnemonic)
             .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
@@ -258,11 +292,15 @@ impl Config {
             }
         };
 
-        self.push_descriptor_maybe(descriptor);
+        self.push_descriptor_maybe(descriptor, sub_account_mnemonic);
         Ok(())
     }
 
-    fn push_descriptor_maybe(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
+    fn push_descriptor_maybe(
+        &mut self,
+        descriptor: Descriptor<DescriptorPublicKey>,
+        mnemonic: Option<String>,
+    ) {
         if self
             .descriptors
             .iter()
@@ -272,6 +310,7 @@ impl Config {
         }
         self.descriptors.push(SubAccountConfig {
             descriptor,
+            mnemonic,
             electrum_url: None,
             electrum_port: None,
         });
@@ -328,6 +367,9 @@ impl Config {
             stripped.mnemonic = None;
             stripped.scan_sk = None;
             stripped.spend_key = None;
+            for descriptor in &mut stripped.descriptors {
+                descriptor.mnemonic = None;
+            }
             stripped
         } else {
             self.clone()
@@ -399,6 +441,7 @@ mod tests {
             .descriptor
             .to_string()
             .starts_with("wpkh("));
+        assert!(config.descriptors[0].mnemonic.is_none());
         assert!(config.descriptors[0].electrum_url.is_none());
         assert!(config.descriptors[0].electrum_port.is_none());
     }
@@ -416,6 +459,7 @@ mod tests {
             .descriptor
             .to_string()
             .starts_with("tr("));
+        assert!(config.descriptors[0].mnemonic.is_none());
         assert!(config.descriptors[0].electrum_url.is_none());
         assert!(config.descriptors[0].electrum_port.is_none());
     }
@@ -461,6 +505,34 @@ mod tests {
             Err(ConfigError::MissingMnemonic)
         ));
         assert!(config.descriptors.is_empty());
+    }
+
+    #[test]
+    fn test_external_mnemonic_sub_account_helpers_store_signer_material() {
+        let mut config = test_config();
+        let external_mnemonic =
+            "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+        config
+            .add_segwit_sub_account_from_mnemonic(external_mnemonic)
+            .expect("external segwit descriptor");
+        config
+            .add_taproot_sub_account_from_mnemonic(external_mnemonic)
+            .expect("external taproot descriptor");
+
+        assert_eq!(config.descriptors.len(), 2);
+        assert!(config.descriptors[0]
+            .descriptor
+            .to_string()
+            .starts_with("wpkh("));
+        assert!(config.descriptors[1]
+            .descriptor
+            .to_string()
+            .starts_with("tr("));
+        assert!(config
+            .descriptors
+            .iter()
+            .all(|sub| sub.mnemonic.as_deref() == Some(external_mnemonic)));
     }
 
     #[test]
@@ -698,12 +770,16 @@ mod tests {
         );
         config.scan_sk = Some(unique_scan_sk.clone());
         config.spend_key = Some(unique_spend_key.clone());
+        config
+            .add_segwit_sub_account_from_mnemonic(&unique_mnemonic)
+            .expect("external sub-account");
         config.persist_kind = bwk::persist::PersistenceKind::Sqlite;
 
         let view = config.for_persistence();
         assert!(view.mnemonic.is_none());
         assert!(view.scan_sk.is_none());
         assert!(view.spend_key.is_none());
+        assert!(view.descriptors.iter().all(|sub| sub.mnemonic.is_none()));
 
         let serialized = serde_json::to_string_pretty(&view).unwrap();
         for needle in [&unique_mnemonic, &unique_scan_sk, &unique_spend_key] {

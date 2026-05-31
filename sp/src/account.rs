@@ -214,7 +214,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     },
                     network: config.network,
                     look_ahead: 20,
-                    mnemonic: config.mnemonic.clone(),
+                    mnemonic: sub_cfg.mnemonic.clone().or_else(|| config.mnemonic.clone()),
                     descriptor: sub_cfg.descriptor.clone(),
                     persist: config.persist,
                     skip_labels: true,
