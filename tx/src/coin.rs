@@ -75,6 +75,15 @@ pub enum CoinSpendInfo {
     },
 }
 
+/// High-level source/classification for a wallet coin.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CoinSourceKind {
+    SilentPayment,
+    Segwit,
+    Taproot,
+    Other,
+}
+
 /// A spendable coin (UTXO) with all information needed for transaction building and signing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Coin {
@@ -122,6 +131,19 @@ impl Coin {
 
     pub fn is_sp(&self) -> bool {
         matches!(self.spend_info, CoinSpendInfo::Sp { .. })
+    }
+
+    pub fn source(&self) -> CoinSourceKind {
+        match &self.spend_info {
+            CoinSpendInfo::Sp { .. } => CoinSourceKind::SilentPayment,
+            CoinSpendInfo::Bip32 { .. } if self.txout.script_pubkey.is_p2wpkh() => {
+                CoinSourceKind::Segwit
+            }
+            CoinSpendInfo::Bip32 { .. } if self.txout.script_pubkey.is_p2tr() => {
+                CoinSourceKind::Taproot
+            }
+            CoinSpendInfo::Bip32 { .. } => CoinSourceKind::Other,
+        }
     }
 
     pub fn to_psbt_input(&self) -> Result<psbt::Input, Error> {
@@ -204,4 +226,81 @@ pub fn shuffle_coins(mut vec: Vec<Coin>) -> Vec<Coin> {
     use rand::seq::SliceRandom;
     vec.shuffle(&mut rand::thread_rng());
     vec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::bip32::Xpriv;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
+    use std::str::FromStr;
+
+    fn bip32_descriptor() -> Descriptor<DescriptorPublicKey> {
+        let secp = Secp256k1::new();
+        let xpriv = Xpriv::new_master(bitcoin::Network::Regtest, &[3u8; 32]).unwrap();
+        let xpub = bitcoin::bip32::Xpub::from_priv(&secp, &xpriv);
+        Descriptor::<DescriptorPublicKey>::from_str(&format!("wpkh({xpub}/<0;1>/*)")).unwrap()
+    }
+
+    fn bip32_coin(script_pubkey: ScriptBuf) -> Coin {
+        Coin {
+            txout: bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey,
+            },
+            outpoint: bitcoin::OutPoint::null(),
+            height: Some(1),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            status: CoinStatus::Confirmed,
+            label: None,
+            satisfaction_size: 0,
+            spend_info: CoinSpendInfo::Bip32 {
+                coin_path: (KeyChain::Receive, 0),
+                descriptor: bip32_descriptor(),
+                secret_key: None,
+            },
+        }
+    }
+
+    #[test]
+    fn source_classifies_silent_payment() {
+        let coin = Coin {
+            txout: bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            },
+            outpoint: bitcoin::OutPoint::null(),
+            height: Some(1),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            status: CoinStatus::Confirmed,
+            label: None,
+            satisfaction_size: 0,
+            spend_info: CoinSpendInfo::Sp {
+                derivation: DerivationPath::default(),
+                tweak: [0u8; 32],
+            },
+        };
+
+        assert_eq!(coin.source(), CoinSourceKind::SilentPayment);
+    }
+
+    #[test]
+    fn source_classifies_segwit_taproot_and_other_bip32() {
+        let secp = Secp256k1::new();
+        let secret_key = SecretKey::from_slice(&[4u8; 32]).unwrap();
+        let public_key: bitcoin::CompressedPublicKey =
+            bitcoin::PublicKey::new(secret_key.public_key(&secp))
+                .try_into()
+                .unwrap();
+        let p2wpkh =
+            bitcoin::Address::p2wpkh(&public_key, bitcoin::Network::Regtest).script_pubkey();
+        let (xonly, _parity) = secret_key.public_key(&secp).x_only_public_key();
+        let tweaked = bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(xonly);
+        let p2tr =
+            bitcoin::Address::p2tr_tweaked(tweaked, bitcoin::Network::Regtest).script_pubkey();
+
+        assert_eq!(bip32_coin(p2wpkh).source(), CoinSourceKind::Segwit);
+        assert_eq!(bip32_coin(p2tr).source(), CoinSourceKind::Taproot);
+        assert_eq!(bip32_coin(ScriptBuf::new()).source(), CoinSourceKind::Other);
+    }
 }

@@ -7,7 +7,9 @@ pub mod template;
 pub mod transaction;
 pub mod tx_builder;
 
-pub use coin::{Coin, CoinSpendInfo, CoinStatus, KeyChain, TAPROOT_KEYSPEND_SATISFACTION_WU};
+pub use coin::{
+    Coin, CoinSourceKind, CoinSpendInfo, CoinStatus, KeyChain, TAPROOT_KEYSPEND_SATISFACTION_WU,
+};
 pub use coin_selection::{CoinCandidate, CoinSelector, DefaultCoinSelector};
 pub use descr_fingerprint::DescrFingerprint;
 pub use error::Error;
