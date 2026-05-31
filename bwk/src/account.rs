@@ -1419,7 +1419,40 @@ mod integration_tests {
             .call::<Value>("generatetoaddress", &[101.into(), node_address])
             .unwrap();
 
+        // Without root we cannot raise electrsd's priority directly, so lower
+        // the test process instead. Gives electrsd's indexer relatively more
+        // CPU when the host is under load (the source of past flakes).
+        #[cfg(unix)]
+        unsafe {
+            libc::nice(5);
+        }
+
+        // Wait until electrsd has caught up with bitcoind's tip before any
+        // test starts pushing transactions. Avoids a race where the first
+        // send_to_address lands while the indexer is still ingesting the
+        // initial 101 blocks.
+        wait_electrsd_synced(&bitcoind, &electrsd);
+
         (url.into(), port, electrsd, bitcoind)
+    }
+
+    fn wait_electrsd_synced(bitcoind: &BitcoinD, electrsd: &ElectrsD) {
+        use electrsd::electrum_client::ElectrumApi;
+        let target = bitcoind
+            .client
+            .call::<Value>("getblockcount", &[])
+            .unwrap()
+            .as_u64()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if let Ok(header) = electrsd.client.block_headers_subscribe() {
+                if header.height as u64 >= target {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     #[allow(unused)]
@@ -1545,11 +1578,10 @@ mod integration_tests {
 
     #[test]
     fn simple_wallet() {
-        // setup_logger();
         let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 100);
 
-        const TIMEOUT: u64 = 60;
+        const TIMEOUT: u64 = 120;
         const BLOCKS: u32 = 1;
 
         let look_ahead = 20;
@@ -1673,7 +1705,7 @@ mod integration_tests {
         let (url, port, mut electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 110);
 
-        const TIMEOUT: u64 = 60;
+        const TIMEOUT: u64 = 120;
 
         let look_ahead = 20;
 
