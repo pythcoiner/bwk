@@ -180,21 +180,16 @@ impl SpCoinStore<SpRamProfile<DefaultBackend>> {
     pub fn load_from_backend(
         backend: Arc<dyn PersistenceBackend>,
         store_key: &'static str,
-    ) -> Self {
+    ) -> Result<Self, PersistError> {
         let store = RamStore::open(
-            backend.clone(),
+            backend,
             store_key,
             encode_outpoint,
             decode_outpoint,
             encode_coin,
             decode_coin,
-        )
-        .unwrap_or_else(|e| {
-            log::error!("SpCoinStore::load_from_backend: {e}");
-            let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
-            RamStore::empty(noop, store_key, encode_outpoint, encode_coin)
-        });
-        Self { store }
+        )?;
+        Ok(Self { store })
     }
 }
 
@@ -747,7 +742,7 @@ mod tests {
 
         // Load from dir
         let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
-        let loaded = SpCoinStore::load_from_backend(backend, STORE_KEY);
+        let loaded = SpCoinStore::load_from_backend(backend, STORE_KEY).expect("load coin store");
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get(&test_outpoint()).unwrap().amount_sat(), 10000);

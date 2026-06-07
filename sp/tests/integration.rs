@@ -46,7 +46,8 @@ fn test_stores_independent_persistence() {
         coin_store.insert(test_outpoint(), test_owned_output(100, 50000));
         coin_store.persist();
 
-        let mut label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY);
+        let mut label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY)
+            .expect("load label store");
         label_store.edit(
             LabelKey::OutPoint(test_outpoint()),
             Some("test label".to_string()),
@@ -72,17 +73,19 @@ fn test_stores_independent_persistence() {
         let backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(dir.path().to_path_buf()).unwrap());
 
-        let coin_store = SpCoinStore::load_from_backend(backend.clone(), COINS_STORE_KEY);
+        let coin_store = SpCoinStore::load_from_backend(backend.clone(), COINS_STORE_KEY)
+            .expect("load coin store");
         assert_eq!(coin_store.len(), 1);
         assert!(coin_store.get(&test_outpoint()).is_some());
 
-        let label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY);
+        let label_store = LabelStore::load_from_backend(backend.clone(), LABELS_STORE_KEY)
+            .expect("load label store");
         assert_eq!(
             label_store.outpoint(test_outpoint()),
             Some("test label".to_string())
         );
 
-        let tx_store = SpTxStore::load_from_backend(backend, TXS_STORE_KEY);
+        let tx_store = SpTxStore::load_from_backend(backend, TXS_STORE_KEY).expect("load tx store");
         assert_eq!(tx_store.transactions().len(), 1);
     }
 }
@@ -1126,9 +1129,9 @@ fn test_double_spend_attempt_rejected() {
 /// Tests scan state consistency after simulated crash.
 ///
 /// This test verifies:
-/// - Account can recover gracefully when scan_state file is corrupted/deleted
-/// - Reload starts scanning from birthday height when state is missing
-/// - No panic or error occurs during recovery
+/// - A missing state file reloads cleanly, scanning from birthday height
+/// - A corrupt state file makes the loader error rather than silently
+///   reset; the caller discards it and a fresh account opens
 #[test]
 fn test_scan_state_consistent_after_crash() {
     // 1. Create BlindbitD
@@ -1220,9 +1223,12 @@ fn test_scan_state_consistent_after_crash() {
                     "Error should have a meaningful message"
                 );
 
-                // Fall back to new account
-                let new_account =
-                    bwk_sp::Account::new(config).expect("New account should work after corruption");
+                // The loader no longer silently resets a corrupt state
+                // file; recovery means the caller discards it, after
+                // which a fresh account opens cleanly.
+                std::fs::remove_file(&state_path).expect("remove corrupted state");
+                let new_account = bwk_sp::Account::new(config)
+                    .expect("New account should work after discarding corrupt state");
                 assert!(new_account.backend_online(), "New account should be online");
             }
         }
@@ -3553,7 +3559,8 @@ fn test_no_persist_on_empty_scan() {
     if coins_path.exists() {
         let backend: Arc<dyn PersistenceBackend> =
             Arc::new(JsonBackend::open(account_dir.clone()).unwrap());
-        let store = SpCoinStore::load_from_backend(backend, COINS_STORE_KEY);
+        let store =
+            SpCoinStore::load_from_backend(backend, COINS_STORE_KEY).expect("load coin store");
         assert_eq!(
             store.len(),
             0,

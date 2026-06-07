@@ -55,27 +55,23 @@ impl LabelStore<RamProfile<DefaultBackend>> {
 
     /// Creates a `LabelStore` that reads and writes through the given
     /// backend, eagerly loading any existing labels.
+    ///
+    /// Returns the backend error if an existing labels blob fails to
+    /// decode, so a corrupt store surfaces to the caller instead of
+    /// silently resetting to empty.
     pub fn load_from_backend(
         backend: Arc<dyn PersistenceBackend>,
         store_key: &'static str,
-    ) -> Self {
-        match RamStore::open(
-            backend.clone(),
+    ) -> Result<Self, PersistError> {
+        let store = RamStore::open(
+            backend,
             store_key,
             encode_key,
             decode_key,
             encode_label,
             decode_label,
-        ) {
-            Ok(store) => LabelStore { store },
-            Err(e) => {
-                log::error!("LabelStore::load_from_backend() open: {e}");
-                let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
-                LabelStore {
-                    store: RamStore::empty(noop, store_key, encode_key, encode_label),
-                }
-            }
-        }
+        )?;
+        Ok(LabelStore { store })
     }
 }
 

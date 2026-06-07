@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use bwk::persist::{self as persist, NoopBackend, PersistenceBackend};
+use bwk::persist::{self as persist, NoopBackend, PersistError, PersistenceBackend};
 
 /// Row key under the `account` store for [`ScanState::last_scanned_height`].
 const LAST_SCANNED_HEIGHT_ROW: &str = "last_scanned_height";
@@ -83,54 +83,36 @@ impl ScanState {
     ///
     /// `birthday_height` is used as the fallback when no birthday row
     /// has been persisted yet (fresh wallet).
-    pub fn load_from_backend(birthday_height: u32, backend: Arc<dyn PersistenceBackend>) -> Self {
-        let read_bytes = |row: &str| -> Option<Vec<u8>> {
-            match backend.get_row(persist::ACCOUNT_STORE_KEY, row) {
-                Ok(Some(b)) => Some(b),
-                Ok(None) => None,
-                Err(e) => {
-                    log::error!("ScanState::load_from_backend get_row {row}: {e}");
-                    None
-                }
-            }
+    pub fn load_from_backend(
+        birthday_height: u32,
+        backend: Arc<dyn PersistenceBackend>,
+    ) -> Result<Self, PersistError> {
+        let read_bytes = |row: &str| backend.get_row(persist::ACCOUNT_STORE_KEY, row);
+
+        let last_scanned_height = match read_bytes(LAST_SCANNED_HEIGHT_ROW)? {
+            Some(b) => serde_json::from_slice::<Option<u32>>(&b)
+                .map_err(|e| PersistError::Serde(format!("scan_state last_scanned_height: {e}")))?,
+            None => None,
         };
 
-        let last_scanned_height = read_bytes(LAST_SCANNED_HEIGHT_ROW)
-            .and_then(|b| match serde_json::from_slice::<Option<u32>>(&b) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::error!("ScanState::load_from_backend decode last_scanned_height: {e}");
-                    None
-                }
-            })
-            .unwrap_or(None);
+        let last_block_hash = match read_bytes(LAST_BLOCK_HASH_ROW)? {
+            Some(b) => serde_json::from_slice::<Option<[u8; 32]>>(&b)
+                .map_err(|e| PersistError::Serde(format!("scan_state last_block_hash: {e}")))?,
+            None => None,
+        };
 
-        let last_block_hash = read_bytes(LAST_BLOCK_HASH_ROW)
-            .and_then(|b| match serde_json::from_slice::<Option<[u8; 32]>>(&b) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::error!("ScanState::load_from_backend decode last_block_hash: {e}");
-                    None
-                }
-            })
-            .unwrap_or(None);
+        let birthday = match read_bytes(BIRTHDAY_HEIGHT_ROW)? {
+            Some(b) => serde_json::from_slice::<u32>(&b)
+                .map_err(|e| PersistError::Serde(format!("scan_state birthday_height: {e}")))?,
+            None => birthday_height,
+        };
 
-        let birthday = read_bytes(BIRTHDAY_HEIGHT_ROW)
-            .and_then(|b| match serde_json::from_slice::<u32>(&b) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    log::error!("ScanState::load_from_backend decode birthday_height: {e}");
-                    None
-                }
-            })
-            .unwrap_or(birthday_height);
-
-        Self {
+        Ok(Self {
             last_scanned_height,
             last_block_hash,
             birthday_height: birthday,
             backend,
-        }
+        })
     }
 
     /// Returns the last scanned block height, if any.
@@ -288,7 +270,7 @@ mod tests {
 
         // Load from dir
         let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
-        let loaded = ScanState::load_from_backend(0, backend);
+        let loaded = ScanState::load_from_backend(0, backend).expect("load scan state");
 
         assert_eq!(loaded.birthday_height(), 300);
         assert_eq!(loaded.last_scanned_height(), Some(350));
@@ -331,7 +313,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
 
         let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
-        let state = ScanState::load_from_backend(0, backend);
+        let state = ScanState::load_from_backend(0, backend).expect("load scan state");
         assert_eq!(state.birthday_height(), 0);
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);

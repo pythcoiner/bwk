@@ -360,11 +360,11 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         )?;
 
         let coin_store =
-            SpCoinStore::load_from_backend(backend.clone(), crate::coin_store::STORE_KEY);
+            SpCoinStore::load_from_backend(backend.clone(), crate::coin_store::STORE_KEY)?;
         let label_store =
-            LabelStore::load_from_backend(backend.clone(), bwk::persist::LABELS_STORE_KEY);
-        let tx_store = SpTxStore::load_from_backend(backend.clone(), crate::tx_store::STORE_KEY);
-        let scan_state = ScanState::load_from_backend(birthday, backend);
+            LabelStore::load_from_backend(backend.clone(), bwk::persist::LABELS_STORE_KEY)?;
+        let tx_store = SpTxStore::load_from_backend(backend.clone(), crate::tx_store::STORE_KEY)?;
+        let scan_state = ScanState::load_from_backend(birthday, backend)?;
 
         Ok((
             Arc::new(Mutex::new(coin_store)),

@@ -1216,7 +1216,8 @@ fn test_label_transaction() {
     );
 
     let backend: Arc<dyn PersistenceBackend> = Arc::new(typed_backend);
-    let label_store = LabelStore::load_from_backend(backend, LABELS_STORE_KEY);
+    let label_store =
+        LabelStore::load_from_backend(backend, LABELS_STORE_KEY).expect("load label store");
     assert_eq!(
         label_store.transaction(txid),
         Some("groceries".to_string()),

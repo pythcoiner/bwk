@@ -131,21 +131,16 @@ impl SpTxStore<SpRamProfile<DefaultBackend>> {
     pub fn load_from_backend(
         backend: Arc<dyn PersistenceBackend>,
         store_key: &'static str,
-    ) -> Self {
+    ) -> Result<Self, PersistError> {
         let store = RamStore::open(
-            backend.clone(),
+            backend,
             store_key,
             encode_txid,
             decode_txid,
             encode_entry,
             decode_entry,
-        )
-        .unwrap_or_else(|e| {
-            log::error!("SpTxStore::load_from_backend: {e}");
-            let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
-            RamStore::empty(noop, store_key, encode_txid, encode_entry)
-        });
-        Self { store }
+        )?;
+        Ok(Self { store })
     }
 }
 
