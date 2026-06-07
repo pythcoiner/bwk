@@ -11,7 +11,7 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinRequest, CoinResponse};
-use bwk_persist::{ConfigStore, NoopConfigStore, PersistenceBackend, Store};
+use bwk_persist::{ConfigStore, NoopConfigStore, PersistError, PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
 
@@ -122,6 +122,34 @@ pub enum Error {
     Satisfaction,
 }
 
+/// Error returned when opening an [`Account`]'s stores from disk.
+#[derive(Debug)]
+pub enum OpenError {
+    /// The config carried an empty account name.
+    EmptyAccount,
+    /// The persistence backend could not be built or the store bundle
+    /// could not be read (e.g. the account directory is already locked,
+    /// or a stored blob failed to decode).
+    Persist(PersistError),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::EmptyAccount => write!(f, "account name must not be empty"),
+            OpenError::Persist(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+impl From<PersistError> for OpenError {
+    fn from(e: PersistError) -> Self {
+        OpenError::Persist(e)
+    }
+}
+
 /// Represents notifications related to transaction listeners.
 #[derive(Debug, Clone)]
 pub enum TxListenerNotif {
@@ -213,39 +241,64 @@ impl<P: OpenFromBackend> Account<P> {
     /// `Account` struct's default type parameter.
     ///
     /// Config persistence defaults to [`NoopConfigStore`]; use
-    /// [`Account::with_config_store`] to wire a concrete impl
+    /// [`Account::try_with_config_store`] to wire a concrete impl
     /// ([`bwk_persist::FileConfigStore`] for file-backed,
     /// [`bwk_persist::CallbackConfigStore`] to bridge through
     /// caller-supplied closures, or any other [`ConfigStore`]).
+    ///
+    /// Returns [`OpenError`] if the account name is empty, the backend
+    /// cannot be built (e.g. the account directory is already locked by
+    /// another instance), or a stored blob fails to decode.
+    pub fn try_new(config: Config) -> Result<Self, OpenError> {
+        let (sender, receiver) = mpsc::channel();
+        let mut account = Self::try_new_inner(config, sender, default_config_store())?;
+        account.receiver = Some(receiver);
+        Ok(account)
+    }
+
+    /// Like [`Account::try_new`] but with an explicit config store.
+    pub fn try_with_config_store(
+        config: Config,
+        config_store: Arc<dyn ConfigStore<Config>>,
+    ) -> Result<Self, OpenError> {
+        let (sender, receiver) = mpsc::channel();
+        let mut account = Self::try_new_inner(config, sender, config_store)?;
+        account.receiver = Some(receiver);
+        Ok(account)
+    }
+
+    /// Like [`Account::try_new`] but with an external notification sender.
+    pub fn try_new_with_sender(
+        config: Config,
+        sender: mpsc::Sender<Notification>,
+    ) -> Result<Self, OpenError> {
+        Self::try_new_inner(config, sender, default_config_store())
+    }
+
+    /// Infallible test helper. Not exposed to consumers: production
+    /// callers use [`Account::try_new`] so a bad/locked store surfaces
+    /// as an error instead of aborting.
+    #[cfg(any(test, feature = "test"))]
     pub fn new(config: Config) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let mut account = Self::new_inner(config, sender, default_config_store());
-        account.receiver = Some(receiver);
-        account
+        Self::try_new(config).expect("Account::new: failed to open stores")
     }
 
-    /// Like [`Account::new`] but with an explicit config store.
+    /// Infallible test helper; see [`Account::new`].
+    #[cfg(any(test, feature = "test"))]
     pub fn with_config_store(config: Config, config_store: Arc<dyn ConfigStore<Config>>) -> Self {
-        let (sender, receiver) = mpsc::channel();
-        let mut account = Self::new_inner(config, sender, config_store);
-        account.receiver = Some(receiver);
-        account
+        Self::try_with_config_store(config, config_store)
+            .expect("Account::with_config_store: failed to open stores")
     }
 
-    /// Creates a new `Account` using an external notification sender.
-    pub fn new_with_sender(config: Config, sender: mpsc::Sender<Notification>) -> Self {
-        Self::new_inner(config, sender, default_config_store())
-    }
-
-    fn new_inner(
+    fn try_new_inner(
         config: Config,
         sender: mpsc::Sender<Notification>,
         config_store: Arc<dyn ConfigStore<Config>>,
-    ) -> Self {
-        assert!(!config.account.is_empty());
-        let backend: Arc<dyn PersistenceBackend> = config
-            .build_backend()
-            .expect("Account::new: failed to build persistence backend");
+    ) -> Result<Self, OpenError> {
+        if config.account.is_empty() {
+            return Err(OpenError::EmptyAccount);
+        }
+        let backend: Arc<dyn PersistenceBackend> = config.build_backend()?;
         // Hot-signer material must not land on the SQLite DB; route the
         // SignerStore slot through a NoopBackend in that case.
         let secrets_backend: Arc<dyn PersistenceBackend> =
@@ -254,18 +307,18 @@ impl<P: OpenFromBackend> Account<P> {
             } else {
                 backend.clone()
             };
-        let stores =
-            P::open(backend, secrets_backend).expect("Account::new: failed to open stores");
-        Self::from_stores(config, sender, config_store, stores)
+        let stores = P::open(backend, secrets_backend)?;
+        Ok(Self::from_stores(config, sender, config_store, stores))
     }
 
     /// Recreate the Account with the same config, online.
-    pub fn restart_electrum(&mut self) {
+    pub fn restart_electrum(&mut self) -> Result<(), OpenError> {
         let store = self.config_store.clone();
-        let mut new_account = Account::<P>::with_config_store(self.config.clone(), store);
+        let mut new_account = Account::<P>::try_with_config_store(self.config.clone(), store)?;
         new_account.config.set_offline(false);
         new_account.persist_config();
         *self = new_account;
+        Ok(())
     }
 }
 

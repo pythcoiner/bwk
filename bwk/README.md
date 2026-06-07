@@ -22,7 +22,7 @@ use miniscript::bitcoin::Network;
 let config = Config::new(descriptor, Network::Regtest)
     .electrum("ssl://127.0.0.1", 50001)
     .data_dir(data_path);
-let mut account = Account::new(config);
+let mut account = Account::try_new(config).expect("failed to open account");
 
 // Take notification receiver (can only be called once)
 let receiver = account.receiver().unwrap();

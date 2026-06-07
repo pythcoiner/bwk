@@ -68,6 +68,21 @@ pub enum AccountError {
     /// Transaction building failed
     #[error("transaction error: {0}")]
     Transaction(String),
+    /// Persistence backend or store-open failure (e.g. directory already locked).
+    #[error("persistence error: {0}")]
+    Persist(String),
+}
+
+impl From<bwk::persist::PersistError> for AccountError {
+    fn from(e: bwk::persist::PersistError) -> Self {
+        AccountError::Persist(e.to_string())
+    }
+}
+
+impl From<bwk::OpenError> for AccountError {
+    fn from(e: bwk::OpenError) -> Self {
+        AccountError::Persist(e.to_string())
+    }
 }
 
 // Re-use unified Notification from bwk
@@ -193,7 +208,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         let (sender, receiver) = mpsc::channel();
 
         // Create/load stores
-        let (coin_store, label_store, tx_store, scan_state) = Self::create_or_load_stores(&config);
+        let (coin_store, label_store, tx_store, scan_state) = Self::create_or_load_stores(&config)?;
 
         // Create sub-accounts from config descriptors
         let sub_accounts = config
@@ -220,9 +235,9 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     skip_labels: true,
                     persist_kind: config.persist_kind,
                 };
-                bwk::Account::new_with_sender(bwk_config, sender.clone())
+                bwk::Account::try_new_with_sender(bwk_config, sender.clone())
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Account {
             client,
@@ -334,24 +349,15 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     /// [`bwk::persist::SqliteBackend`]) from the config and threads it into
     /// every store. JSON layout is byte-for-byte equivalent to the
     /// pre-backend layout (one `{store}.json` file per store name).
-    fn create_or_load_stores(config: &Config) -> Stores {
+    fn create_or_load_stores(config: &Config) -> Result<Stores, AccountError> {
         let birthday = config
             .birthday_height
             .unwrap_or_else(|| config.min_birthday_height());
 
-        let backend: Arc<dyn bwk::persist::PersistenceBackend> = match bwk::persist::build_backend(
+        let backend: Arc<dyn bwk::persist::PersistenceBackend> = bwk::persist::build_backend(
             config.persist.then_some(config.persist_kind),
             config.account_dir(),
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!(
-                    "create_or_load_stores: failed to build persistence backend ({e}); \
-                         falling back to no-op"
-                );
-                Arc::new(bwk::persist::NoopBackend)
-            }
-        };
+        )?;
 
         let coin_store =
             SpCoinStore::load_from_backend(backend.clone(), crate::coin_store::STORE_KEY);
@@ -360,12 +366,12 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         let tx_store = SpTxStore::load_from_backend(backend.clone(), crate::tx_store::STORE_KEY);
         let scan_state = ScanState::load_from_backend(birthday, backend);
 
-        (
+        Ok((
             Arc::new(Mutex::new(coin_store)),
             Arc::new(Mutex::new(label_store)),
             Arc::new(Mutex::new(tx_store)),
             Arc::new(Mutex::new(scan_state)),
-        )
+        ))
     }
 }
 
