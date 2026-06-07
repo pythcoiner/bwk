@@ -21,17 +21,17 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Error {
     ParsePsbt,
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     Hw(String),
 }
 
 pub enum SignerKind {
     Hot,
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     External(bwk_hwi::DeviceKind),
 }
 
-#[cfg(feature = "hwi")]
+#[cfg(all(feature = "hwi", not(target_os = "android")))]
 impl Clone for SignerKind {
     fn clone(&self) -> Self {
         match self {
@@ -44,7 +44,7 @@ impl Clone for SignerKind {
 #[allow(clippy::mutable_key_type)]
 struct ExternalSigner {
     signer: Box<dyn Signer>,
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     kind: SignerKind,
     id: String,
     descriptors: BTreeSet<Descriptor<DescriptorPublicKey>>,
@@ -83,9 +83,9 @@ where
     bip32_signers: BTreeMap<bip32::Fingerprint, HotSigner>,
     signers: BTreeMap<bip32::Fingerprint, ExternalSigner>,
     store: S,
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     hw_service: Option<bwk_hwi::service::HwiService<crate::hwi::HwMessage>>,
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     hw_receiver: Option<channel::Receiver<crate::hwi::HwMessage>>,
 }
 
@@ -165,9 +165,9 @@ where
             bip32_signers,
             signers: BTreeMap::new(),
             store,
-            #[cfg(feature = "hwi")]
+            #[cfg(all(feature = "hwi", not(target_os = "android")))]
             hw_service: None,
-            #[cfg(feature = "hwi")]
+            #[cfg(all(feature = "hwi", not(target_os = "android")))]
             hw_receiver: None,
         }
     }
@@ -188,7 +188,7 @@ where
         if let Ok(notif) = self.receiver.try_recv() {
             return Some(notif);
         }
-        #[cfg(feature = "hwi")]
+        #[cfg(all(feature = "hwi", not(target_os = "android")))]
         if let Some(ref hw_rx) = self.hw_receiver {
             if let Ok(hw_msg) = hw_rx.try_recv() {
                 return self.convert_hw_message(hw_msg);
@@ -197,7 +197,7 @@ where
         None
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     fn convert_hw_message(&self, msg: crate::hwi::HwMessage) -> Option<SignerNotif> {
         use bwk_hwi::service::SigningDeviceMsg;
         use bwk_keys::OXpub;
@@ -306,13 +306,16 @@ where
     }
 
     pub fn list_signers(&self) -> Vec<(bip32::Fingerprint, SignerKind)> {
-        #[cfg_attr(not(feature = "hwi"), allow(unused_mut))]
+        #[cfg_attr(
+            not(all(feature = "hwi", not(target_os = "android"))),
+            allow(unused_mut)
+        )]
         let mut result: Vec<_> = self
             .bip32_signers
             .keys()
             .map(|fg| (*fg, SignerKind::Hot))
             .collect();
-        #[cfg(feature = "hwi")]
+        #[cfg(all(feature = "hwi", not(target_os = "android")))]
         for (fg, ext) in &self.signers {
             result.push((*fg, ext.kind.clone()));
         }
@@ -347,7 +350,7 @@ where
         }
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn start_hw_service(&mut self, network: bitcoin::Network) {
         let (hw_sender, hw_receiver) = channel::unbounded();
         let service = bwk_hwi::service::HwiService::new(network);
@@ -356,7 +359,7 @@ where
         self.hw_receiver = Some(hw_receiver);
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn stop_hw_service(&mut self) {
         if let Some(service) = self.hw_service.as_ref() {
             service.stop();
@@ -365,7 +368,7 @@ where
         self.hw_receiver = None;
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn hw_devices(
         &self,
     ) -> BTreeMap<String, bwk_hwi::service::SigningDevice<crate::hwi::HwMessage>> {
@@ -376,7 +379,7 @@ where
         }
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn add_hw_signer(&mut self, device_id: &str) -> Option<bip32::Fingerprint> {
         let service = self.hw_service.as_ref()?;
         let devices = service.list();
@@ -399,7 +402,7 @@ where
         }
     }
 
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn remove_hw_signer(&mut self, fingerprint: &bip32::Fingerprint) {
         self.signers.remove(fingerprint);
     }
@@ -408,7 +411,7 @@ where
     ///
     /// This stores the descriptor in the ExternalSigner for use during signing,
     /// and delegates to the underlying signer (which calls device.register_wallet()).
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     pub fn register_hw_descriptor(
         &mut self,
         fingerprint: &bip32::Fingerprint,

@@ -2,7 +2,7 @@
 
 pub mod error;
 pub mod hot_signer;
-#[cfg(feature = "hwi")]
+#[cfg(all(feature = "hwi", not(target_os = "android")))]
 pub mod hwi;
 pub mod signer;
 pub mod signing_manager;
@@ -15,7 +15,7 @@ pub use signing_manager::{SignerKind, SigningManager};
 // re-export
 pub use bip39;
 pub use bwk_descriptor;
-#[cfg(feature = "hwi")]
+#[cfg(all(feature = "hwi", not(target_os = "android")))]
 pub use bwk_hwi;
 pub use bwk_keys;
 pub use bwk_utils;

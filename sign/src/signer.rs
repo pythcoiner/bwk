@@ -21,7 +21,7 @@ pub enum SignerNotif {
     Signed(bip32::Fingerprint, Psbt),
     Error(bip32::Fingerprint, Error),
     Manager(signing_manager::Error),
-    #[cfg(feature = "hwi")]
+    #[cfg(all(feature = "hwi", not(target_os = "android")))]
     DeviceUpdate,
 }
 
