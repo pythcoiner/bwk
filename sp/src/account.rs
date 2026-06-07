@@ -1579,23 +1579,25 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         current: Height,
         end: Height,
     ) -> Result<(), spdk_core::Error> {
-        log::debug!(
-            "record_scan_progress: current={}, end={}",
-            current.to_consensus_u32(),
-            end.to_consensus_u32()
-        );
-
-        // Update scan state with current progress
-        {
-            let mut state = self.scan_state.lock().expect("poisoned");
-            state.set_last_scanned_height(current.to_consensus_u32());
-            state.persist();
-        }
-
-        // Send progress notification every 100 blocks, and always for the last block
         let current_u32 = current.to_consensus_u32();
         let end_u32 = end.to_consensus_u32();
-        if current_u32 % 100 == 0 || current_u32 == end_u32 {
+        log::debug!("record_scan_progress: current={current_u32}, end={end_u32}");
+
+        // Checkpoint (persist + notify) every 100 blocks and on the last block.
+        // The in-memory height is updated every block (cheap, keeps next_scan_start
+        // accurate within the session), but persisting it to disk every block is
+        // wasteful — when persist=true that's several disk writes per block. On a
+        // crash we lose at most ~99 blocks of progress, which just rescans cheaply.
+        let checkpoint = current_u32 % 100 == 0 || current_u32 == end_u32;
+        {
+            let mut state = self.scan_state.lock().expect("poisoned");
+            state.set_last_scanned_height(current_u32);
+            if checkpoint {
+                state.persist();
+            }
+        }
+
+        if checkpoint {
             let _ = self
                 .sender
                 .send(Notification::Sp(SpNotification::ScanProgress {
