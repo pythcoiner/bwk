@@ -10,11 +10,11 @@ use std::{
     sync::Arc,
 };
 
+use crate::silentpayments::receiving::Label;
+use crate::spdk_core::{OutputSpendStatus, OwnedOutput};
 use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptBuf};
 use bwk::persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
 use serde::{Deserialize, Serialize};
-use silentpayments::receiving::Label;
-use spdk_core::{OutputSpendStatus, OwnedOutput};
 
 use crate::profile::{DefaultBackend, SpRamProfile, SpStorageProfile};
 

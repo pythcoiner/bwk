@@ -23,7 +23,6 @@ serde.workspace = true
 serde_json.workspace = true
 miniscript.workspace = true
 log.workspace = true
-spdk-core = { workspace = true, features = ["sync", "bitcoin_32"], optional = true }
 
 # `bwk-hwi` pulls in the USB/HID hardware-wallet stack (coldcard -> hidapi ->
 # libudev), which cannot cross-compile to Android. Gate it off Android targets;
@@ -34,7 +33,7 @@ bwk-hwi = { workspace = true, features = ["service"], optional = true }
 [features]
 default = ["hwi", "sp"]
 test = ["bwk-utils/test"]
-sp = ["dep:spdk-core"]
+sp = []
 # Marker feature only. The actual `bwk-hwi` optional dependency is auto-enabled
 # by the `hwi` feature on non-Android targets (see the target table above). It is
 # not referenced via `dep:` here so that enabling `hwi` on Android (where the

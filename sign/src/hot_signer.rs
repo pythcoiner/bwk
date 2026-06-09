@@ -753,9 +753,79 @@ impl HotSigner {
         aux_rand: &[u8; 32],
     ) -> Result<(), Error> {
         let b_spend = self.derivator.secret_key_at(derivation);
-        spdk_core::sign_sp_input(&b_spend, tweak, psbt, input_index, aux_rand)
-            .map_err(|_| Error::SpSigning)
+        sign_sp_input(&b_spend, tweak, psbt, input_index, aux_rand)
     }
+}
+
+/// Compute taproot sighash for key-spend or script-spend.
+// Self-contained signer op (relocated from spdk_core). Uses only bitcoin/secp256k1.
+#[cfg(feature = "sp")]
+fn taproot_sighash<
+    T: std::ops::Deref<Target = bitcoin::Transaction> + std::borrow::Borrow<bitcoin::Transaction>,
+>(
+    hash_ty: bitcoin::TapSighashType,
+    prevouts: &[bitcoin::TxOut],
+    input_index: usize,
+    cache: &mut sighash::SighashCache<T>,
+    tapleaf_hash: Option<bitcoin::TapLeafHash>,
+) -> Result<Message, Error> {
+    let prevouts = sighash::Prevouts::All(prevouts);
+
+    let sighash = match tapleaf_hash {
+        Some(leaf_hash) => cache
+            .taproot_script_spend_signature_hash(input_index, &prevouts, leaf_hash, hash_ty)
+            .map_err(|_| Error::SpSigning)?,
+        None => cache
+            .taproot_key_spend_signature_hash(input_index, &prevouts, hash_ty)
+            .map_err(|_| Error::SpSigning)?,
+    };
+    let msg = Message::from_digest(*sighash.as_raw_hash().as_byte_array());
+    Ok(msg)
+}
+
+/// Sign a single taproot input using SP tweak-based key derivation.
+/// signing_key = b_spend + tweak
+// Self-contained signer op (relocated from spdk_core). Uses only bitcoin/secp256k1.
+#[cfg(feature = "sp")]
+fn sign_sp_input(
+    b_spend: &secp256k1::SecretKey,
+    tweak: &[u8; 32],
+    psbt: &mut Psbt,
+    input_index: usize,
+    aux_rand: &[u8; 32],
+) -> Result<(), Error> {
+    let unsigned_tx = &psbt.unsigned_tx;
+
+    // Collect all prevouts from PSBT inputs
+    let prevouts: Vec<bitcoin::TxOut> = psbt
+        .inputs
+        .iter()
+        .map(|input| input.witness_utxo.clone().ok_or(Error::SpSigning))
+        .collect::<Result<Vec<_>, Error>>()?;
+
+    let secp = secp256k1::Secp256k1::signing_only();
+    let hash_ty = bitcoin::TapSighashType::Default;
+
+    let mut cache = sighash::SighashCache::new(unsigned_tx);
+    let msg = taproot_sighash(hash_ty, &prevouts, input_index, &mut cache, None)?;
+
+    // Derive signing key: b_spend + tweak
+    let tweak_sk = secp256k1::SecretKey::from_slice(tweak).map_err(|_| Error::SpSigning)?;
+    let sk = b_spend
+        .add_tweak(&tweak_sk.into())
+        .map_err(|_| Error::SpSigning)?;
+    let keypair = secp256k1::Keypair::from_secret_key(&secp, &sk);
+
+    let sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, aux_rand);
+
+    let signature = bitcoin::taproot::Signature {
+        signature: sig,
+        sighash_type: hash_ty,
+    };
+
+    psbt.inputs[input_index].tap_key_sig = Some(signature);
+
+    Ok(())
 }
 
 /// Converts a tuple containing an account type and an index into a derivation path.

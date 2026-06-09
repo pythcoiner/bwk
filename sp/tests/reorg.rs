@@ -4,9 +4,9 @@ mod common;
 
 use std::sync::Arc;
 
-use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
+use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
 use bwk_utils::test as bwk_test;
 
 use common::{test_mnemonic, wait_for_sync_and_index};
@@ -74,11 +74,11 @@ fn test_reorg_removes_orphaned_coins() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::updater::DummyUpdater;
+    use bwk_sp::spdk_core::{SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
-    use spdk_core::account::SpAccount;
-    use spdk_core::updater::DummyUpdater;
-    use spdk_core::{SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -236,11 +236,11 @@ fn test_reorg_coin_reappears_in_new_chain() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::updater::DummyUpdater;
+    use bwk_sp::spdk_core::{SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
-    use spdk_core::account::SpAccount;
-    use spdk_core::updater::DummyUpdater;
-    use spdk_core::{SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -455,12 +455,12 @@ fn test_reorg_spent_status_reset() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use serde_json::Value;
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use serde_json::Value;
     use std::sync::Mutex;
 
     // Updater that tracks outputs and spent status
@@ -474,7 +474,7 @@ fn test_reorg_spent_status_reset() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -482,7 +482,7 @@ fn test_reorg_spent_status_reset() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.outputs.lock().expect("poisoned").extend(outputs);
             Ok(())
         }
@@ -491,14 +491,14 @@ fn test_reorg_spent_status_reset() {
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }

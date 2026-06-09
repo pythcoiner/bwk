@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crate::silentpayments::SilentPaymentAddress;
 use bitcoin::absolute::Height;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
@@ -21,11 +22,10 @@ use bitcoin::taproot::Signature;
 use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
 use bwk::label_store::LabelStore;
 use miniscript::psbt::PsbtExt;
-use silentpayments::SilentPaymentAddress;
 
-use backend_blindbit_native_non_async::{BlindbitBackend, InfoResponse, UreqClient};
-use spdk_core::account::SpAccount;
-use spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
+use crate::blindbit::{BlindbitBackend, InfoResponse, UreqClient};
+use crate::spdk_core::account::SpAccount;
+use crate::spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
 
 use bwk::persist::{ConfigStore, NoopConfigStore};
 
@@ -314,12 +314,12 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     // Secret key
                     let sk = bitcoin::secp256k1::SecretKey::from_slice(&spend_key_bytes)
                         .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
-                    spdk_core::SpendKey::Secret(sk)
+                    crate::spdk_core::SpendKey::Secret(sk)
                 } else if spend_key_bytes.len() == 33 {
                     // Public key
                     let pk = bitcoin::secp256k1::PublicKey::from_slice(&spend_key_bytes)
                         .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
-                    spdk_core::SpendKey::Public(pk)
+                    crate::spdk_core::SpendKey::Public(pk)
                 } else {
                     return Err(AccountError::Config(
                         "spend_key must be 32 or 33 bytes".to_string(),
@@ -1103,8 +1103,8 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         request: &bwk_tx::TxRequest,
     ) -> Result<bwk_tx::TxBuilder, bwk_tx::TxRequestError> {
         use crate::recipient::SpRecipientAddress;
+        use crate::spdk_core::RecipientAddress;
         use bwk_tx::{Amount as BwkAmount, TxRequestError};
-        use spdk_core::RecipientAddress;
 
         let network = self.network();
 
@@ -1578,7 +1578,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         _start: Height,
         current: Height,
         end: Height,
-    ) -> Result<(), spdk_core::Error> {
+    ) -> Result<(), crate::spdk_core::Error> {
         let current_u32 = current.to_consensus_u32();
         let end_u32 = end.to_consensus_u32();
         log::debug!("record_scan_progress: current={current_u32}, end={end_u32}");
@@ -1613,7 +1613,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         _height: Height,
         _block_hash: BlockHash,
         found_outputs: HashMap<OutPoint, OwnedOutput>,
-    ) -> Result<(), spdk_core::Error> {
+    ) -> Result<(), crate::spdk_core::Error> {
         // Two-phase receives arrive order-free, so they never move the frontier;
         // the contiguous receive frontier advances via `record_scan_frontier`.
 
@@ -1637,7 +1637,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         _height: Height,
         block_hash: BlockHash,
         found_inputs: HashSet<OutPoint>,
-    ) -> Result<(), spdk_core::Error> {
+    ) -> Result<(), crate::spdk_core::Error> {
         // Two-phase spends arrive order-free; the receive frontier advances via
         // `record_scan_frontier` and the spend frontier via `record_spend_frontier`.
 
@@ -1660,7 +1660,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         &mut self,
         height: Height,
         block_hash: BlockHash,
-    ) -> Result<(), spdk_core::Error> {
+    ) -> Result<(), crate::spdk_core::Error> {
         // Advance and persist the contiguous receive frontier (height plus its
         // hash). The matching `record_scan_progress` call emits the progress
         // notification, so this only persists state.
@@ -1670,7 +1670,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         Ok(())
     }
 
-    fn record_spend_frontier(&mut self, height: Height) -> Result<(), spdk_core::Error> {
+    fn record_spend_frontier(&mut self, height: Height) -> Result<(), crate::spdk_core::Error> {
         // Advance and persist the spend frontier (the trailing input sweep).
         let mut state = self.scan_state.lock().expect("poisoned");
         state.advance_spend_frontier(height.to_consensus_u32());
@@ -1678,7 +1678,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         Ok(())
     }
 
-    fn spend_frontier(&self) -> Result<Option<u32>, spdk_core::Error> {
+    fn spend_frontier(&self) -> Result<Option<u32>, crate::spdk_core::Error> {
         Ok(self
             .scan_state
             .lock()
@@ -1686,14 +1686,14 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
             .last_spend_height())
     }
 
-    fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+    fn save_to_persistent_storage(&mut self) -> Result<(), crate::spdk_core::Error> {
         self.coin_store.lock().expect("poisoned").persist();
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();
         Ok(())
     }
 
-    fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+    fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, crate::spdk_core::Error> {
         let store = self.coin_store.lock().expect("poisoned");
         Ok(store.all_outpoints())
     }
@@ -2127,7 +2127,7 @@ mod tests {
             amount: bitcoin::Amount::from_sat(10_000),
             script: spk,
             label: None,
-            spend_status: spdk_core::OutputSpendStatus::Unspent,
+            spend_status: crate::spdk_core::OutputSpendStatus::Unspent,
         }
     }
 

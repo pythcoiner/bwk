@@ -13,13 +13,13 @@ use bitcoin::absolute::Height;
 use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey};
 
-use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
 use blindbitd::BlindbitD;
+use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
+use bwk_sp::spdk_core::ChainBackend;
 use bwk_utils::test::corepc_node;
-use spdk_core::ChainBackend;
 
+use bwk_sp::spdk_core::{OutputSpendStatus, OwnedOutput};
 use bwk_sp::Config;
-use spdk_core::{OutputSpendStatus, OwnedOutput};
 
 // MockBackendError
 
@@ -444,7 +444,7 @@ pub fn generate_recipient_pubkey(
     sk: bitcoin::secp256k1::SecretKey,
     outpoint: OutPoint,
     txout: &TxOut,
-    sp_addr: spdk_core::silentpayments::SilentPaymentAddress,
+    sp_addr: bwk_sp::spdk_core::silentpayments::SilentPaymentAddress,
     secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
 ) -> Option<XOnlyPublicKey> {
     use bitcoin::key::TapTweak;
@@ -465,18 +465,22 @@ pub fn generate_recipient_pubkey(
 
     let input_keys = vec![(sp_sk, true /* is taproot */)];
     let outpoints = vec![(outpoint.txid.to_string(), outpoint.vout)];
-    let partial_secret = spdk_core::silentpayments::utils::sending::calculate_partial_secret(
-        &input_keys,
-        &outpoints,
-    )
-    .ok()?;
+    let partial_secret =
+        bwk_sp::spdk_core::silentpayments::utils::sending::calculate_partial_secret(
+            &input_keys,
+            &outpoints,
+        )
+        .ok()?;
 
     // generate recipient pubkey
-    spdk_core::silentpayments::sending::generate_recipient_pubkeys(vec![sp_addr], partial_secret)
-        .ok()?
-        .into_iter()
-        .next()
-        .and_then(|(_addr, k)| k.into_iter().next())
+    bwk_sp::spdk_core::silentpayments::sending::generate_recipient_pubkeys(
+        vec![sp_addr],
+        partial_secret,
+    )
+    .ok()?
+    .into_iter()
+    .next()
+    .and_then(|(_addr, k)| k.into_iter().next())
 }
 
 /// Build and sign a transaction that sends to a Silent Payment output.

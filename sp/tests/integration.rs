@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
+use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
 use bwk_utils::test as bwk_test;
 
 use common::{
@@ -302,11 +302,11 @@ fn test_reorg_handling() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::updater::DummyUpdater;
+    use bwk_sp::spdk_core::{SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
-    use spdk_core::account::SpAccount;
-    use spdk_core::updater::DummyUpdater;
-    use spdk_core::{SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -643,12 +643,12 @@ fn test_double_spend_via_reorg() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use serde_json::Value;
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use serde_json::Value;
     use std::sync::Mutex;
 
     struct TrackingUpdater {
@@ -660,7 +660,7 @@ fn test_double_spend_via_reorg() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -668,7 +668,7 @@ fn test_double_spend_via_reorg() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.outputs.lock().expect("poisoned").extend(outputs);
             Ok(())
         }
@@ -677,13 +677,13 @@ fn test_double_spend_via_reorg() {
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -918,11 +918,11 @@ fn test_double_spend_attempt_rejected() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use std::sync::Mutex;
 
     struct TrackingUpdater {
@@ -935,7 +935,7 @@ fn test_double_spend_attempt_rejected() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -943,7 +943,7 @@ fn test_double_spend_attempt_rejected() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.outputs.lock().expect("poisoned").extend(outputs);
             Ok(())
         }
@@ -952,14 +952,14 @@ fn test_double_spend_attempt_rejected() {
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -1260,9 +1260,9 @@ fn test_concurrent_funding_during_scan() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1278,7 +1278,7 @@ fn test_concurrent_funding_during_scan() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -1286,7 +1286,7 @@ fn test_concurrent_funding_during_scan() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.outputs.lock().expect("poisoned").extend(outputs);
             Ok(())
         }
@@ -1295,14 +1295,14 @@ fn test_concurrent_funding_during_scan() {
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             self.scan_complete.store(true, Ordering::SeqCst);
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -1603,9 +1603,9 @@ fn test_notification_order_full_sequence() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1628,7 +1628,7 @@ fn test_notification_order_full_sequence() {
             start: Height,
             current: Height,
             end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.notifications.lock().expect("poisoned");
             guard.push(TestNotification::ScanProgress {
                 start: start.to_consensus_u32(),
@@ -1643,7 +1643,7 @@ fn test_notification_order_full_sequence() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.notifications.lock().expect("poisoned");
             for (outpoint, output) in found_outputs {
                 guard.push(TestNotification::OutputFound {
@@ -1659,16 +1659,16 @@ fn test_notification_order_full_sequence() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.notifications.lock().expect("poisoned");
             guard.push(TestNotification::SaveCalled);
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -1840,9 +1840,9 @@ fn test_notification_multiple_outputs_same_block() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1858,7 +1858,7 @@ fn test_notification_multiple_outputs_same_block() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -1867,7 +1867,7 @@ fn test_notification_multiple_outputs_same_block() {
             height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let output_count = found_outputs.len();
             if output_count > 0 {
                 let mut counts = self.block_output_counts.lock().expect("poisoned");
@@ -1885,14 +1885,14 @@ fn test_notification_multiple_outputs_same_block() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -2272,9 +2272,9 @@ fn test_dust_limit_filters_small_outputs() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2366,7 +2366,7 @@ fn test_dust_limit_filters_small_outputs() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -2375,7 +2375,7 @@ fn test_dust_limit_filters_small_outputs() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.found_outpoints.lock().expect("poisoned");
             for (outpoint, output) in found_outputs {
                 guard.push((outpoint, output.amount.to_sat()));
@@ -2388,14 +2388,14 @@ fn test_dust_limit_filters_small_outputs() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -2517,9 +2517,9 @@ fn test_dust_limit_zero_accepts_all() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -2611,7 +2611,7 @@ fn test_dust_limit_zero_accepts_all() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -2620,7 +2620,7 @@ fn test_dust_limit_zero_accepts_all() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.found_outpoints.lock().expect("poisoned");
             for (outpoint, output) in found_outputs {
                 guard.push((outpoint, output.amount.to_sat()));
@@ -2633,14 +2633,14 @@ fn test_dust_limit_zero_accepts_all() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -2927,9 +2927,10 @@ fn test_receive_with_sp_label() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::silentpayments::receiving::Label;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{silentpayments::receiving::Label, SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -3013,7 +3014,7 @@ fn test_receive_with_sp_label() {
 
     // 12. Create scanner with custom updater to capture label info
     use bitcoin::BlockHash;
-    use spdk_core::{OwnedOutput, Updater};
+    use bwk_sp::spdk_core::{OwnedOutput, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -3027,7 +3028,7 @@ fn test_receive_with_sp_label() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -3036,7 +3037,7 @@ fn test_receive_with_sp_label() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.outputs.lock().expect("poisoned");
             for (outpoint, output) in found_outputs {
                 guard.push((outpoint, output));
@@ -3049,14 +3050,14 @@ fn test_receive_with_sp_label() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -3353,9 +3354,9 @@ fn test_persists_immediately_on_new_output() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -3372,7 +3373,7 @@ fn test_persists_immediately_on_new_output() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -3381,7 +3382,7 @@ fn test_persists_immediately_on_new_output() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.found_outputs.lock().expect("poisoned");
             for (outpoint, _) in found_outputs {
                 guard.push(outpoint);
@@ -3394,11 +3395,11 @@ fn test_persists_immediately_on_new_output() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut save_guard = self.save_called.lock().expect("poisoned");
             *save_guard = true;
             // Record how many outputs were found before save was called
@@ -3407,7 +3408,7 @@ fn test_persists_immediately_on_new_output() {
             *count_guard = outputs.len();
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -3619,11 +3620,11 @@ fn test_persists_on_spent_detection() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use std::sync::Mutex;
 
     // Custom updater that tracks both outputs and spent inputs
@@ -3638,7 +3639,7 @@ fn test_persists_on_spent_detection() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -3646,7 +3647,7 @@ fn test_persists_on_spent_detection() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.found_outputs.lock().expect("poisoned");
             guard.extend(outputs);
             Ok(())
@@ -3656,15 +3657,15 @@ fn test_persists_on_spent_detection() {
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.spent_inputs.lock().expect("poisoned");
             guard.extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }

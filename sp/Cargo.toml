@@ -3,20 +3,45 @@ name = "bwk-sp"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-# spdk dependencies
-spdk-core = { workspace = true, features = ["sync", "mnemonic", "bitcoin_32"] }
-backend-blindbit-native-non-async = { workspace = true }
+[[bin]]
+name = "kernel_bench"
+path = "src/bin/kernel_bench.rs"
+required-features = ["bench"]
 
+[features]
+default = ["parallel", "mnemonic", "blindbit"]
+# Enable CPU parallelization with rayon (native only, recommended).
+parallel = ["dep:rayon"]
+# Enable usage of bip39 mnemonics.
+mnemonic = ["dep:bip39"]
+rand = ["bip39/rand"]
+# Blindbit HTTP transport (BlindbitBackend, UreqClient, InfoResponse).
+# Pulls `mnemonic`: the concrete Account is seeded from a mnemonic.
+blindbit = ["dep:ureq", "mnemonic"]
+# Per-phase scan timing hooks (bench instrumentation only).
+scan-profile = []
+# Builds the sp_sync_bench binary driving the real Account scan (headline timing only).
+bench = []
+# Adds the instrumented bench harness: per-phase breakdown, data-volume stats, JSON, and plot.
+instrumentation = ["bench", "scan-profile"]
+
+[dependencies]
 # bwk crates
 bwk = { workspace = true, features = ["sp"] }
-bwk-sign = { workspace = true, features = ["sp"] }
+bwk-sign = { workspace = true }
 bwk-tx = { workspace = true }
+bwk-spscan-sys = { workspace = true }
 
 # Bitcoin
 bitcoin = { workspace = true }
 miniscript = { workspace = true }
-silentpayments = { workspace = true }
+secp256k1 = { workspace = true }
+bitcoin_hashes = { workspace = true }
+
+# Silent Payments support
+bech32 = { workspace = true }
+bimap = { workspace = true }
+bdk_coin_select = { workspace = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -25,10 +50,29 @@ serde_json = { workspace = true }
 # Utilities
 thiserror = { workspace = true }
 log = { workspace = true }
-hex = { workspace = true }
+hex = { workspace = true, features = ["serde"] }
 
 # Random number generation
 getrandom = { workspace = true }
+
+# Bip39 mnemonics (optional, mnemonic feature)
+bip39 = { workspace = true, optional = true }
+
+# Parallelization (optional, parallel feature; not available on WASM)
+rayon = { workspace = true, optional = true }
+
+# Blindbit HTTP transport (optional, blindbit feature).
+# HTTPS via native-tls, which maps to the platform TLS (system openssl on Linux,
+# SChannel on Windows, Secure Transport on Apple). Provider is selected explicitly
+# in blindbit/client/ureq_impl.rs (ureq defaults to rustls, which we don't compile).
+ureq = { workspace = true, optional = true, features = ["gzip", "native-tls"] }
+
+# Plotting (sp_sync_bench plot subcommand, behind the `instrumentation` feature)
+
+# Vendor a static openssl only on Android, where native-tls's openssl backend
+# looks for certs at the build-host paths.
+[target.'cfg(target_os = "android")'.dependencies]
+ureq = { workspace = true, optional = true, features = ["gzip", "native-tls", "vendored"] }
 
 [dev-dependencies]
 blindbitd = { workspace = true }

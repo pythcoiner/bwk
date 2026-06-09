@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use backend_blindbit_native_non_async::{BlindbitBackend, UreqClient};
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
+use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
 use bwk_utils::test as bwk_test;
 
 use common::{
@@ -174,9 +174,9 @@ fn test_scan_single_sp_output() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -297,9 +297,9 @@ fn test_scan_multiple_sp_outputs() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -432,9 +432,9 @@ fn test_incremental_scanning() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -725,9 +725,9 @@ fn test_new_output_notification() {
     use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -742,7 +742,7 @@ fn test_new_output_notification() {
             _start: Height,
             _current: Height,
             _end: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
@@ -751,7 +751,7 @@ fn test_new_output_notification() {
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.found_outpoints.lock().expect("poisoned");
             for (outpoint, _) in found_outputs {
                 guard.push(outpoint);
@@ -764,14 +764,14 @@ fn test_new_output_notification() {
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -1240,9 +1240,9 @@ fn test_full_wallet_flow() {
     use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -1610,11 +1610,11 @@ fn test_two_phase_detects_receive_then_spend() {
     use bitcoin::absolute::Height;
     use bitcoin::{Amount, BlockHash};
     use bwk_sign::{bip39, HotSigner};
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
     };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
 
     // Captures every recorded output and spent input over a scan.
     struct TrackingUpdater {
@@ -1627,7 +1627,7 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -1635,7 +1635,7 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.outputs.lock().expect("poisoned").extend(outputs);
             Ok(())
         }
@@ -1644,14 +1644,14 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(HashSet::new())
         }
     }
@@ -1667,7 +1667,7 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -1675,7 +1675,7 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: BlockHash,
             _: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_inputs(
@@ -1683,14 +1683,14 @@ fn test_two_phase_detects_receive_then_spend() {
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(self.seed.clone())
         }
     }
@@ -1953,8 +1953,8 @@ fn test_spend_frontier_resume_skips_swept_heights() {
 
     use bitcoin::absolute::Height;
     use bitcoin::BlockHash;
-    use spdk_core::account::SpAccount;
-    use spdk_core::{
+    use bwk_sp::spdk_core::account::SpAccount;
+    use bwk_sp::spdk_core::{
         BlockDataIterator, ChainBackend, FilterData, OwnedOutput, SpClient, SpScanner,
         SpentIndexData, Updater, UtxoData,
     };
@@ -1973,20 +1973,26 @@ fn test_spend_frontier_resume_skips_swept_heights() {
         ) -> BlockDataIterator {
             ChainBackend::get_block_data_for_range(&self.inner, range, dust_limit, with_cutthrough)
         }
-        fn spent_filter(&self, block_height: Height) -> Result<FilterData, spdk_core::Error> {
+        fn spent_filter(
+            &self,
+            block_height: Height,
+        ) -> Result<FilterData, bwk_sp::spdk_core::Error> {
             self.spent_heights
                 .lock()
                 .expect("poisoned")
                 .push(block_height.to_consensus_u32());
             ChainBackend::spent_filter(&self.inner, block_height)
         }
-        fn spent_index(&self, block_height: Height) -> Result<SpentIndexData, spdk_core::Error> {
+        fn spent_index(
+            &self,
+            block_height: Height,
+        ) -> Result<SpentIndexData, bwk_sp::spdk_core::Error> {
             ChainBackend::spent_index(&self.inner, block_height)
         }
-        fn utxos(&self, block_height: Height) -> Result<Vec<UtxoData>, spdk_core::Error> {
+        fn utxos(&self, block_height: Height) -> Result<Vec<UtxoData>, bwk_sp::spdk_core::Error> {
             ChainBackend::utxos(&self.inner, block_height)
         }
-        fn block_height(&self) -> Result<Height, spdk_core::Error> {
+        fn block_height(&self) -> Result<Height, bwk_sp::spdk_core::Error> {
             ChainBackend::block_height(&self.inner)
         }
     }
@@ -2003,7 +2009,7 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             _: Height,
             _: Height,
             _: Height,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_outputs(
@@ -2011,7 +2017,7 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             _: Height,
             _: BlockHash,
             _: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn record_block_inputs(
@@ -2019,10 +2025,13 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
-        ) -> Result<(), spdk_core::Error> {
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn record_spend_frontier(&mut self, height: Height) -> Result<(), spdk_core::Error> {
+        fn record_spend_frontier(
+            &mut self,
+            height: Height,
+        ) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut cur = self.spend_frontier.lock().expect("poisoned");
             let h = height.to_consensus_u32();
             if cur.map(|c| h > c).unwrap_or(true) {
@@ -2030,13 +2039,13 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             }
             Ok(())
         }
-        fn spend_frontier(&self) -> Result<Option<u32>, spdk_core::Error> {
+        fn spend_frontier(&self) -> Result<Option<u32>, bwk_sp::spdk_core::Error> {
             Ok(*self.spend_frontier.lock().expect("poisoned"))
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
             Ok(self.seed.clone())
         }
     }
