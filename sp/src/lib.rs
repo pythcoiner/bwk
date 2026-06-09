@@ -3,8 +3,7 @@
 // A modular Rust library for building Bitcoin wallets with Silent Payments.
 // Experimental, not production-ready.
 
-// Account is concrete on BlindbitBackend (and seeded from a mnemonic), so it
-// only exists with the blindbit transport.
+// Account uses the blindbit transport directly.
 #[cfg(feature = "blindbit")]
 mod account;
 #[cfg(feature = "blindbit")]
@@ -13,6 +12,7 @@ mod coin_store;
 mod config;
 pub mod profile;
 pub mod recipient;
+pub mod scan;
 mod scan_state;
 pub mod silentpayments;
 pub mod spdk_core;

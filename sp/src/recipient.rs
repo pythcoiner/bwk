@@ -586,7 +586,7 @@ impl<P: crate::profile::SpStorageProfile + Send + Sync + 'static> SpPartialSecre
     }
 }
 
-// SpPartialSecretProvider for Account (concrete on BlindbitBackend).
+// SpPartialSecretProvider for Account.
 
 #[cfg(feature = "blindbit")]
 use crate::Account;

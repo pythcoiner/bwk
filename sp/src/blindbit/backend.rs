@@ -5,25 +5,18 @@ use std::{
 
 use bitcoin::{absolute::Height, Amount};
 
-use crate::blindbit::client::{BlindbitClient, HttpClient};
-use crate::spdk_core::{BlockData, ChainBackend, SpentIndexData, UtxoData};
+use crate::blindbit::client;
+use crate::spdk_core::{BlockData, SpentIndexData, UtxoData};
 
-/// Number of blocks fetched concurrently. Each fetch worker also parses the
-/// block's tweaks into curve points (CPU work), so this is kept modest: too many
-/// workers oversubscribe the cores and thrash against the matcher. Override with
-/// `BWK_SP_FETCH_CONCURRENCY`.
+pub type BlockDataObserver = Arc<dyn Fn(&BlockData) + Send + Sync>;
+pub type HeightObserver = Arc<dyn Fn(Height) + Send + Sync>;
+
+type BlockDataIterator =
+    Box<dyn Iterator<Item = crate::spdk_core::error::Result<BlockData>> + Send>;
+
 const CONCURRENT_FILTER_REQUESTS: usize = 64;
-
-/// Bound on the channel of fetched-but-unprocessed blocks. Fetching outruns the
-/// matcher, so without a bound the whole range is buffered in RAM (~6 GB for
-/// mainnet); a bounded channel applies backpressure (fetch workers block on send
-/// when full), capping memory to ~this many blocks regardless of range. Override
-/// with `BWK_SP_FETCH_CHANNEL_CAP`.
 const BLOCK_CHANNEL_CAPACITY: usize = 64;
 
-/// Fetch concurrency, overridable via `BWK_SP_FETCH_CONCURRENCY` for tuning a
-/// given link/oracle (more helps only when fetch is latency-bound, not when the
-/// network bandwidth or the oracle is the ceiling). Defaults to the const above.
 fn fetch_concurrency() -> usize {
     std::env::var("BWK_SP_FETCH_CONCURRENCY")
         .ok()
@@ -32,8 +25,6 @@ fn fetch_concurrency() -> usize {
         .unwrap_or(CONCURRENT_FILTER_REQUESTS)
 }
 
-/// Fetch lookahead buffer (blocks), overridable via `BWK_SP_FETCH_CHANNEL_CAP`.
-/// Larger smooths bursty fetch but raises peak RAM; keep modest on mobile.
 fn fetch_channel_cap() -> usize {
     std::env::var("BWK_SP_FETCH_CHANNEL_CAP")
         .ok()
@@ -42,115 +33,127 @@ fn fetch_channel_cap() -> usize {
         .unwrap_or(BLOCK_CHANNEL_CAPACITY)
 }
 
-pub struct BlindbitBackend<H: HttpClient> {
-    client: BlindbitClient<H>,
+pub fn agent() -> ureq::Agent {
+    client::agent()
 }
 
-impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
-    /// Create a new async Blindbit backend with a custom HTTP client.
-    ///
-    /// # Arguments
-    /// * `blindbit_url` - Base URL of the Blindbit server
-    /// * `http_client` - HTTP client implementation
-    pub fn new(blindbit_url: String, http_client: H) -> crate::blindbit::error::Result<Self> {
-        Ok(Self {
-            client: BlindbitClient::new(blindbit_url, http_client)?,
-        })
+pub fn block_height(agent: &ureq::Agent, url: &str) -> crate::blindbit::error::Result<Height> {
+    client::block_height(agent, url)
+}
+
+pub fn info(
+    agent: &ureq::Agent,
+    url: &str,
+) -> crate::blindbit::error::Result<crate::blindbit::InfoResponse> {
+    client::info(agent, url)
+}
+
+pub fn spent_filter(
+    agent: &ureq::Agent,
+    url: &str,
+    block_height: Height,
+    observer: Option<&HeightObserver>,
+) -> crate::blindbit::error::Result<crate::spdk_core::FilterData> {
+    if let Some(observer) = observer {
+        observer(block_height);
+    }
+    Ok(client::filter_spent(agent, url, block_height)?.into())
+}
+
+pub fn spent_index(
+    agent: &ureq::Agent,
+    url: &str,
+    block_height: Height,
+) -> crate::blindbit::error::Result<SpentIndexData> {
+    Ok(client::spent_index(agent, url, block_height)?.into())
+}
+
+pub fn utxos(
+    agent: &ureq::Agent,
+    url: &str,
+    block_height: Height,
+) -> crate::blindbit::error::Result<Vec<UtxoData>> {
+    Ok(client::utxos(agent, url, block_height)?
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
+
+pub fn forward_tx(
+    agent: &ureq::Agent,
+    url: &str,
+    tx_hex: String,
+) -> crate::blindbit::error::Result<bitcoin::Txid> {
+    client::forward_tx(agent, url, tx_hex)
+}
+
+pub fn get_block_data_for_range(
+    agent: Arc<ureq::Agent>,
+    url: String,
+    mut range: RangeInclusive<u32>,
+    dust_limit: Option<Amount>,
+    with_cutthrough: bool,
+    block_data_observer: Option<BlockDataObserver>,
+) -> BlockDataIterator {
+    use crate::blindbit::thread_pool::ThreadPool;
+
+    if *range.start() == 0 {
+        range = RangeInclusive::new(1, *range.end());
     }
 
-    /// Get block data for a range of blocks as an Iterator
-    ///
-    /// This fetches blocks concurrently for better performance.
-    ///
-    /// # Arguments
-    /// * `range` - Range of block heights to fetch
-    /// * `dust_limit` - Minimum amount to consider (dust outputs are ignored)
-    /// * `with_cutthrough` - Whether to use cutthrough optimization
-    ///
-    /// # Returns
-    /// A Iterator of BlockData results
-    pub fn get_block_data_for_range(
-        &self,
-        mut range: RangeInclusive<u32>,
-        dust_limit: Option<Amount>,
-        with_cutthrough: bool,
-    ) -> crate::spdk_core::BlockDataIterator {
-        use crate::blindbit::thread_pool::ThreadPool;
+    let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
+    spawn_block_fetchers(
+        agent,
+        url,
+        range,
+        dust_limit,
+        with_cutthrough,
+        sender,
+        block_data_observer,
+        ThreadPool::new(fetch_concurrency()),
+    );
+    Box::new(receiver.into_iter())
+}
 
-        // blindbit returns an error 500 for the genesis block.
-        if *range.start() == 0 {
-            range = RangeInclusive::new(1, *range.end());
-        }
-
-        let client = Arc::new(self.client.clone());
-
-        // Bounded channel: applies backpressure so fetch workers block on send when
-        // the matcher is behind, capping buffered blocks (and thus RAM) regardless
-        // of range. See BLOCK_CHANNEL_CAPACITY.
-        let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
-
-        // A blocking worker pool (not rayon): the workers do network I/O and block
-        // on recv when idle, so they never busy-spin or contend with the compute
-        // threads. `execute` queues each height without blocking, so the receiver
-        // is returned immediately and drained concurrently; on drop the pool keeps
-        // its detached workers running until the queue empties.
-        let pool = ThreadPool::new(fetch_concurrency());
-        for height in range {
-            let client = client.clone();
-            let sender = sender.clone();
-            pool.execute(move || {
-                get_block_data_for_height(height, dust_limit, with_cutthrough, sender, client);
-            });
-        }
-        Box::new(receiver.into_iter())
-    }
-
-    /// Fetch the spent filter for a single height (two-phase spend pass).
-    pub fn spent_filter(
-        &self,
-        block_height: Height,
-    ) -> crate::blindbit::error::Result<crate::spdk_core::FilterData> {
-        Ok(self.client.filter_spent(block_height)?.into())
-    }
-
-    /// Get spent index data for a block height
-    pub fn spent_index(
-        &self,
-        block_height: Height,
-    ) -> crate::blindbit::error::Result<SpentIndexData> {
-        Ok(self.client.spent_index(block_height)?.into())
-    }
-
-    /// Get UTXO data for a block height
-    pub fn utxos(&self, block_height: Height) -> crate::blindbit::error::Result<Vec<UtxoData>> {
-        Ok(self
-            .client
-            .utxos(block_height)?
-            .into_iter()
-            .map(Into::into)
-            .collect())
-    }
-
-    /// Get the current block height from the server
-    pub fn block_height(&self) -> crate::blindbit::error::Result<Height> {
-        self.client.block_height()
-    }
-
-    /// Get server info (network, supported modes, etc.)
-    pub fn info(&self) -> crate::blindbit::error::Result<crate::blindbit::InfoResponse> {
-        Ok(self.client.info()?)
+#[allow(clippy::too_many_arguments)]
+fn spawn_block_fetchers(
+    agent: Arc<ureq::Agent>,
+    url: String,
+    range: RangeInclusive<u32>,
+    dust_limit: Option<Amount>,
+    with_cutthrough: bool,
+    sender: mpsc::SyncSender<crate::spdk_core::error::Result<BlockData>>,
+    block_data_observer: Option<BlockDataObserver>,
+    pool: crate::blindbit::thread_pool::ThreadPool,
+) {
+    for height in range {
+        let agent = agent.clone();
+        let url = url.clone();
+        let sender = sender.clone();
+        let block_data_observer = block_data_observer.clone();
+        pool.execute(move || {
+            fetch_block_data_for_height(
+                agent,
+                url,
+                height,
+                dust_limit,
+                with_cutthrough,
+                sender,
+                block_data_observer,
+            );
+        });
     }
 }
 
-fn get_block_data_for_height<H>(
+fn fetch_block_data_for_height(
+    agent: Arc<ureq::Agent>,
+    url: String,
     height: u32,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
     sender: mpsc::SyncSender<crate::spdk_core::error::Result<BlockData>>,
-    client: Arc<BlindbitClient<H>>,
-) where
-    H: HttpClient,
-{
+    block_data_observer: Option<BlockDataObserver>,
+) {
     let blkheight = match Height::from_consensus(height) {
         Ok(bh) => bh,
         Err(e) => {
@@ -159,8 +162,8 @@ fn get_block_data_for_height<H>(
         }
     };
     let tweaks = match with_cutthrough {
-        true => client.tweaks(blkheight, dust_limit),
-        false => client.tweak_index(blkheight, dust_limit),
+        true => client::tweaks(&agent, &url, blkheight, dust_limit),
+        false => client::tweak_index(&agent, &url, blkheight, dust_limit),
     };
     let tweaks = match tweaks {
         Ok(t) => t,
@@ -169,9 +172,7 @@ fn get_block_data_for_height<H>(
             return;
         }
     };
-    // Receive-only fetch (two-phase receive pass): the spent filter is fetched
-    // separately by the spend sweep, never here.
-    let new_utxo_filter = match client.filter_new_utxos(blkheight) {
+    let new_utxo_filter = match client::filter_new_utxos(&agent, &url, blkheight) {
         Ok(f) => f,
         Err(e) => {
             let _ = sender.send(Err(crate::spdk_core::Error::from(e)));
@@ -179,40 +180,14 @@ fn get_block_data_for_height<H>(
         }
     };
     let blkhash = new_utxo_filter.block_hash;
-    let _ = sender.send(Ok(BlockData {
+    let block_data = BlockData {
         blkheight,
         blkhash,
         tweaks,
         new_utxo_filter: new_utxo_filter.into(),
-    }));
-}
-
-impl<H: HttpClient + Clone + 'static> ChainBackend for BlindbitBackend<H> {
-    fn get_block_data_for_range(
-        &self,
-        range: RangeInclusive<u32>,
-        dust_limit: Option<Amount>,
-        with_cutthrough: bool,
-    ) -> crate::spdk_core::BlockDataIterator {
-        self.get_block_data_for_range(range, dust_limit, with_cutthrough)
+    };
+    if let Some(observer) = &block_data_observer {
+        observer(&block_data);
     }
-
-    fn spent_filter(
-        &self,
-        block_height: Height,
-    ) -> crate::spdk_core::error::Result<crate::spdk_core::FilterData> {
-        Ok(self.spent_filter(block_height)?)
-    }
-
-    fn spent_index(&self, block_height: Height) -> crate::spdk_core::error::Result<SpentIndexData> {
-        Ok(self.spent_index(block_height)?)
-    }
-
-    fn utxos(&self, block_height: Height) -> crate::spdk_core::error::Result<Vec<UtxoData>> {
-        Ok(self.utxos(block_height)?)
-    }
-
-    fn block_height(&self) -> crate::spdk_core::error::Result<Height> {
-        Ok(self.block_height()?)
-    }
+    let _ = sender.send(Ok(block_data));
 }

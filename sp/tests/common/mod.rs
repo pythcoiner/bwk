@@ -1,7 +1,6 @@
 //! Test utilities for bwk-sp integration tests.
 //!
 //! This module provides:
-//! - `MockBackend` for testing without real network
 //! - Test fixtures (mnemonic, config, outpoints, owned outputs)
 //! - Temporary directory helpers for persistence tests
 //! - Blindbitd helpers for integration tests (Phase 10.4)
@@ -14,8 +13,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey};
 
 use blindbitd::BlindbitD;
-use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
-use bwk_sp::spdk_core::ChainBackend;
 use bwk_utils::test::corepc_node;
 
 use bwk_sp::spdk_core::{OutputSpendStatus, OwnedOutput};
@@ -376,7 +373,8 @@ pub const DUST: u64 = 330;
 /// 60 s flaked under CI load when the runner was indexing many regtest blocks
 /// in parallel; 120 s with finer polling is more robust.
 #[allow(dead_code)]
-pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
+pub fn wait_until_sync_at_height(blindbit_url: &str, height: u32) {
+    let agent = bwk_sp::blindbit::agent();
     let start = std::time::Instant::now();
     // Generous: blindbitd indexes 100 blocks in seconds locally, but deep into a
     // long single-threaded CI run (dozens of daemon spin-ups) it gets starved and
@@ -387,7 +385,7 @@ pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
         if start.elapsed() > timeout {
             panic!("wait_until_sync_at_height: timed out waiting for height {height}");
         }
-        if let Ok(h) = backend.block_height() {
+        if let Ok(h) = bwk_sp::blindbit::block_height(&agent, blindbit_url) {
             if h.to_consensus_u32() >= height {
                 return;
             }
@@ -401,8 +399,8 @@ pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
 /// Waits until sync reaches `height`, then sleeps an additional 2 seconds
 /// to allow BlindbitD time to index the new blocks.
 #[allow(dead_code)]
-pub fn wait_for_sync_and_index<B: ChainBackend>(backend: &B, height: u32) {
-    wait_until_sync_at_height(backend, height);
+pub fn wait_for_sync_and_index(blindbit_url: &str, height: u32) {
+    wait_until_sync_at_height(blindbit_url, height);
     // Give blindbitd extra time to index new blocks
     thread::sleep(Duration::from_secs(2));
 }
@@ -597,8 +595,7 @@ impl TestEnv {
         let mut bbd = BlindbitD::new().unwrap();
         let mut bitcoind = bbd.bitcoin().unwrap();
         bwk_utils::test::generate_blocks(&mut bitcoind.client, 101);
-        let backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-        wait_for_sync_and_index(&backend, 101);
+        wait_for_sync_and_index(&bbd.url(), 101);
         TestEnv {
             bbd,
             bitcoind,
@@ -609,10 +606,6 @@ impl TestEnv {
 
     pub fn url(&self) -> String {
         self.bbd.url()
-    }
-
-    fn backend(&self) -> BlindbitBackend<UreqClient> {
-        BlindbitBackend::new(self.bbd.url(), UreqClient::new()).unwrap()
     }
 
     /// Create SP account with default mnemonic (no persistence).
@@ -629,7 +622,7 @@ impl TestEnv {
     pub fn mine(&mut self, blocks: usize) {
         bwk_utils::test::generate_blocks(&mut self.bitcoind.client, blocks);
         self.height = bwk_utils::test::get_height(&mut self.bitcoind.client) as u32;
-        wait_for_sync_and_index(&self.backend(), self.height);
+        wait_for_sync_and_index(&self.bbd.url(), self.height);
     }
 
     /// Broadcast a transaction and mine 1 block.

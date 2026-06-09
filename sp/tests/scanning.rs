@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
-use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
 use bwk_utils::test as bwk_test;
 
 use common::{
@@ -24,6 +23,20 @@ use bwk::persist::{
     JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
 };
 use bwk_sp::{Config, Notification, SpNotification};
+
+fn backend_height(blindbit_url: &str) -> u32 {
+    let agent = bwk_sp::blindbit::agent();
+    bwk_sp::blindbit::block_height(&agent, blindbit_url)
+        .expect("backend height")
+        .to_consensus_u32()
+}
+
+fn backend_with_cutthrough(blindbit_url: &str) -> bool {
+    let agent = bwk_sp::blindbit::agent();
+    bwk_sp::blindbit::info(&agent, blindbit_url)
+        .map(|i| i.tweaks_cut_through_with_dust_filter)
+        .unwrap_or(false)
+}
 
 //
 // These tests require the `blindbitd` crate which provides:
@@ -60,8 +73,7 @@ use bwk_sp::{Config, Notification, SpNotification};
 fn test_account_connects_to_blindbitd() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -69,14 +81,14 @@ fn test_account_connects_to_blindbitd() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let account = test_account(&bbd.url());
+    let account = test_account(&blindbit_url);
 
     // 5. Test assertions
     assert!(account.backend_online());
-    let height = account.block_height().unwrap();
+    let height = backend_height(&blindbit_url);
     assert!(height >= 100, "Expected height >= 100, got {height}");
 }
 
@@ -89,8 +101,7 @@ fn test_account_connects_to_blindbitd() {
 fn test_account_block_height_growth() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -98,21 +109,21 @@ fn test_account_block_height_growth() {
 
     // 3. Generate 50 blocks
     bwk_test::generate_blocks(bitcoind, 50);
-    wait_for_sync_and_index(&backend, 50);
+    wait_for_sync_and_index(&blindbit_url, 50);
 
     // 4. Create Account
-    let account = test_account(&bbd.url());
+    let account = test_account(&blindbit_url);
 
     // 5. Verify initial height
-    let height1 = account.block_height().unwrap();
+    let height1 = backend_height(&blindbit_url);
     assert!(height1 >= 50, "Expected height >= 50, got {height1}");
 
     // 6. Generate 50 more blocks
     bwk_test::generate_blocks(bitcoind, 50);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 7. Verify height increased
-    let height2 = account.block_height().unwrap();
+    let height2 = backend_height(&blindbit_url);
     assert!(height2 >= 100, "Expected height >= 100, got {height2}");
     assert!(height2 > height1, "Height should have grown");
 }
@@ -127,8 +138,7 @@ fn test_account_block_height_growth() {
 fn test_scan_no_matches() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -136,10 +146,10 @@ fn test_scan_no_matches() {
 
     // 3. Generate 100 standard blocks (no SP tx)
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let mut account = test_account(&bbd.url());
+    let mut account = test_account(&blindbit_url);
 
     // 5. Scan blocks
     account.scan_blocks(Some(1), Some(100)).unwrap();
@@ -166,16 +176,11 @@ fn test_scan_no_matches() {
 /// 3. Create SP transaction to account's SP address
 /// 4. Scan and verify detection
 ///
-/// Note: This test uses the SpScanner directly to respect the backend's
-/// endpoint mode (cutthrough vs tweak-index). The Account.scan_blocks method
-/// queries the backend info to determine cutthrough support.
 #[test]
 fn test_scan_single_sp_output() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -183,8 +188,7 @@ fn test_scan_single_sp_output() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -192,7 +196,7 @@ fn test_scan_single_sp_output() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -207,7 +211,7 @@ fn test_scan_single_sp_output() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -242,47 +246,27 @@ fn test_scan_single_sp_output() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&blindbit_url, sp_tx_height);
 
-    // 10. Create scanner
-    let updater = DummyUpdater::new();
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client,
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // 11. Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
+    // 10. Scan
+    let mut account = test_account_named("scan-single-sp-output", &blindbit_url);
+    account
+        .scan_blocks(Some(1), Some(sp_tx_height))
         .expect("scan");
 
-    // 12. Verify found output
-    assert_eq!(
-        scanner.outpoints().len(),
-        1,
-        "Should find exactly 1 SP output"
-    );
+    // 11. Verify found output
+    let coins = account.coins();
+    assert_eq!(coins.len(), 1, "Should find exactly 1 SP output");
 
     let expected_op = OutPoint {
         txid: sp_txid,
         vout: 0,
     };
     assert!(
-        scanner.outpoints().contains(&expected_op),
+        coins.contains_key(&expected_op),
         "Should find output at {}:0, got {:?}",
         sp_txid,
-        scanner.outpoints()
+        coins.keys().collect::<Vec<_>>()
     );
 }
 
@@ -294,11 +278,9 @@ fn test_scan_single_sp_output() {
 /// - Total balance is sum of all outputs
 #[test]
 fn test_scan_multiple_sp_outputs() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -306,8 +288,7 @@ fn test_scan_multiple_sp_outputs() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -315,7 +296,7 @@ fn test_scan_multiple_sp_outputs() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -338,7 +319,7 @@ fn test_scan_multiple_sp_outputs() {
         let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
         bwk_test::generate_blocks(bitcoind, 2);
         let current_height = 101 + (i + 1) * 2;
-        wait_until_sync_at_height(&backend, current_height);
+        wait_until_sync_at_height(&blindbit_url, current_height);
 
         // Get the funded UTXO
         let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -372,40 +353,20 @@ fn test_scan_multiple_sp_outputs() {
             .expect("broadcast sp tx");
         bwk_test::generate_blocks(bitcoind, 1);
         final_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-        wait_for_sync_and_index(&backend, final_height);
+        wait_for_sync_and_index(&blindbit_url, final_height);
 
         sp_txids.push(sp_txid);
     }
 
-    // Create scanner
-    let updater = DummyUpdater::new();
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client,
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
     // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(final_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
+    let mut account = test_account_named("scan-multiple-sp-outputs", &blindbit_url);
+    account
+        .scan_blocks(Some(1), Some(final_height))
         .expect("scan");
 
     // Verify found outputs
-    assert_eq!(
-        scanner.outpoints().len(),
-        3,
-        "Should find exactly 3 SP outputs"
-    );
+    let coins = account.coins();
+    assert_eq!(coins.len(), 3, "Should find exactly 3 SP outputs");
 
     for sp_txid in &sp_txids {
         let expected_op = OutPoint {
@@ -413,10 +374,10 @@ fn test_scan_multiple_sp_outputs() {
             vout: 0,
         };
         assert!(
-            scanner.outpoints().contains(&expected_op),
+            coins.contains_key(&expected_op),
             "Should find output at {}:0, got {:?}",
             sp_txid,
-            scanner.outpoints()
+            coins.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -429,11 +390,9 @@ fn test_scan_multiple_sp_outputs() {
 /// - No duplicates from overlapping ranges
 #[test]
 fn test_incremental_scanning() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -441,8 +400,7 @@ fn test_incremental_scanning() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -450,7 +408,7 @@ fn test_incremental_scanning() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -469,7 +427,7 @@ fn test_incremental_scanning() {
     // Fund the taproot address
     let fund_txid0 = bwk_test::send(bitcoind, taproot_addr0.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 3); // now at block 104
-    wait_until_sync_at_height(&backend, 104);
+    wait_until_sync_at_height(&blindbit_url, 104);
 
     // Get the funded UTXO
     let tx0 = bwk_test::get_tx(bitcoind, fund_txid0).expect("get tx");
@@ -502,44 +460,24 @@ fn test_incremental_scanning() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 2); // SP tx in block ~106
     let sp_height0 = bwk_test::get_tx_height(bitcoind, sp_txid0).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_height0);
+    wait_for_sync_and_index(&blindbit_url, sp_height0);
 
     // Generate more blocks to reach ~110
     bwk_test::generate_blocks(bitcoind, 4);
-    wait_for_sync_and_index(&backend, 110);
+    wait_for_sync_and_index(&blindbit_url, 110);
 
     // --- First scan: 1-110, should find 1 output ---
-    let updater1 = DummyUpdater::new();
-    let scan_backend1 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner1 = SpAccount::new(
-        scan_backend1,
-        sp_client.clone(),
-        updater1,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let mut account = test_account_named("incremental-scanning", &blindbit_url);
+    account.scan_blocks(Some(1), Some(110)).expect("scan");
 
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    let start1 = Height::from_consensus(1).unwrap();
-    let end1 = Height::from_consensus(110).unwrap();
-    scanner1
-        .scan_blocks(start1, end1, None, with_cutthrough)
-        .expect("scan");
-
-    assert_eq!(
-        scanner1.outpoints().len(),
-        1,
-        "First scan should find exactly 1 SP output"
-    );
+    let coins = account.coins();
+    assert_eq!(coins.len(), 1, "First scan should find exactly 1 SP output");
     let expected_op0 = OutPoint {
         txid: sp_txid0,
         vout: 0,
     };
     assert!(
-        scanner1.outpoints().contains(&expected_op0),
+        coins.contains_key(&expected_op0),
         "Should find first output"
     );
 
@@ -549,7 +487,7 @@ fn test_incremental_scanning() {
     // Fund the taproot address
     let fund_txid1 = bwk_test::send(bitcoind, taproot_addr1.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 3); // now at ~113
-    wait_until_sync_at_height(&backend, 113);
+    wait_until_sync_at_height(&blindbit_url, 113);
 
     // Get the funded UTXO
     let tx1 = bwk_test::get_tx(bitcoind, fund_txid1).expect("get tx");
@@ -582,18 +520,17 @@ fn test_incremental_scanning() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 3); // SP tx in block ~116
     let sp_height1 = bwk_test::get_tx_height(bitcoind, sp_txid1).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_height1);
+    wait_for_sync_and_index(&blindbit_url, sp_height1);
 
     // --- Second scan: 111-sp_height1 using same scanner, should find 1 more ---
-    let start2 = Height::from_consensus(111).unwrap();
-    let end2 = Height::from_consensus(sp_height1).unwrap();
-    scanner1
-        .scan_blocks(start2, end2, None, with_cutthrough)
+    account
+        .scan_blocks(Some(111), Some(sp_height1))
         .expect("scan");
 
     // After second scan, should have 2 outputs total
+    let coins = account.coins();
     assert_eq!(
-        scanner1.outpoints().len(),
+        coins.len(),
         2,
         "Second scan should have 2 outputs total (1 from first scan + 1 new)"
     );
@@ -602,11 +539,11 @@ fn test_incremental_scanning() {
         vout: 0,
     };
     assert!(
-        scanner1.outpoints().contains(&expected_op0),
+        coins.contains_key(&expected_op0),
         "Should still have first output"
     );
     assert!(
-        scanner1.outpoints().contains(&expected_op1),
+        coins.contains_key(&expected_op1),
         "Should find second output"
     );
 }
@@ -620,8 +557,7 @@ fn test_incremental_scanning() {
 fn test_rescan_idempotent() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -629,10 +565,10 @@ fn test_rescan_idempotent() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let mut account = test_account(&bbd.url());
+    let mut account = test_account(&blindbit_url);
 
     // 5. First scan
     account.scan_blocks(Some(1), Some(100)).unwrap();
@@ -664,8 +600,7 @@ fn test_rescan_idempotent() {
 fn test_scan_notifications() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -673,10 +608,10 @@ fn test_scan_notifications() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let mut account = test_account(&bbd.url());
+    let mut account = test_account(&blindbit_url);
 
     // 5. Take the receiver
     let receiver = account.receiver().expect("receiver should be available");
@@ -714,75 +649,19 @@ fn test_scan_notifications() {
 /// - NewOutput(outpoint) notification is sent for each found output
 /// - Notification contains correct outpoint
 ///
-/// Note: This test uses SpScanner directly (not Account.scan_blocks) due to
-/// cutthrough mode requirements. We create a custom updater that captures
-/// NewOutput notifications to verify the scanner behavior.
 #[test]
 fn test_new_output_notification() {
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::BlockHash;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{OwnedOutput, SpClient, SpScanner, Updater};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-
-    // Custom updater that captures found outputs (simulating NewOutput notifications)
-    struct NotifyingUpdater {
-        found_outpoints: Arc<Mutex<Vec<OutPoint>>>,
-    }
-
-    impl Updater for NotifyingUpdater {
-        fn record_scan_progress(
-            &self,
-            _start: Height,
-            _current: Height,
-            _end: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-
-        fn record_block_outputs(
-            &self,
-            _height: Height,
-            _block_hash: BlockHash,
-            found_outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            let mut guard = self.found_outpoints.lock().expect("poisoned");
-            for (outpoint, _) in found_outputs {
-                guard.push(outpoint);
-            }
-            Ok(())
-        }
-
-        fn record_block_inputs(
-            &self,
-            _height: Height,
-            _block_hash: BlockHash,
-            _found_inputs: HashSet<OutPoint>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-
-        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
-            Ok(HashSet::new())
-        }
-    }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -790,7 +669,7 @@ fn test_new_output_notification() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -805,7 +684,7 @@ fn test_new_output_notification() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -840,49 +719,32 @@ fn test_new_output_notification() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&blindbit_url, sp_tx_height);
 
-    // 10. Create scanner with NotifyingUpdater
-    let found_outpoints = Arc::new(Mutex::new(Vec::new()));
-    let updater = NotifyingUpdater {
-        found_outpoints: found_outpoints.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client,
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // 11. Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(sp_tx_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
+    // 10. Scan with Account and collect public notifications.
+    let mut account = test_account_named("new-output-notification", &blindbit_url);
+    let receiver = account.receiver().expect("receiver should be available");
+    account
+        .scan_blocks(Some(1), Some(sp_tx_height))
         .expect("scan");
-
-    // 12. Verify notification was received
-    let notifications = found_outpoints.lock().expect("poisoned");
-    assert_eq!(
-        notifications.len(),
-        1,
-        "Should have received exactly 1 NewOutput notification"
-    );
 
     let expected_op = OutPoint {
         txid: sp_txid,
         vout: 0,
     };
+    let notifications: Vec<_> = receiver.try_iter().collect();
+    let new_outputs: Vec<OutPoint> = notifications
+        .into_iter()
+        .filter_map(|notification| match notification {
+            Notification::Sp(SpNotification::NewOutput(outpoint)) => Some(outpoint),
+            _ => None,
+        })
+        .collect();
+
     assert_eq!(
-        notifications[0], expected_op,
-        "Notification should contain correct outpoint"
+        new_outputs,
+        vec![expected_op],
+        "Should have received exactly one NewOutput notification"
     );
 }
 
@@ -899,8 +761,7 @@ fn test_new_output_notification() {
 fn test_persistence_after_scan() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -908,10 +769,10 @@ fn test_persistence_after_scan() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account with persist=true
-    let (mut account, config, _dir) = test_account_persistent(&bbd.url());
+    let (mut account, config, _dir) = test_account_persistent(&blindbit_url);
     let account_dir = config.account_dir();
 
     // 5. Scan and drop (persists on drop)
@@ -961,8 +822,7 @@ fn test_persistence_after_scan() {
 fn test_background_scanner_start_stop() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -970,10 +830,10 @@ fn test_background_scanner_start_stop() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let mut account = test_account(&bbd.url());
+    let mut account = test_account(&blindbit_url);
 
     // 5. Verify scanner is not running initially
     assert!(
@@ -1016,8 +876,7 @@ fn test_background_scanner_start_stop() {
 fn test_drop_stops_scanner() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1025,11 +884,11 @@ fn test_drop_stops_scanner() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account and start scanner in a scope
     {
-        let mut account = test_account_named("test-drop-scanner", &bbd.url());
+        let mut account = test_account_named("test-drop-scanner", &blindbit_url);
 
         // Start scanner
         account.start_scanner().expect("start scanner");
@@ -1060,13 +919,12 @@ fn test_drop_stops_scanner() {
 /// NOTE: This test currently cannot verify SP output detection because
 /// Account.scan_blocks queries info to determine cutthrough which may not work
 /// with BlindbitD. The SP output detection is tested separately in
-/// test_scan_single_sp_output using SpScanner directly.
+/// test_scan_single_sp_output.
 #[test]
 fn test_background_scanner_detects_new_blocks() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1074,7 +932,7 @@ fn test_background_scanner_detects_new_blocks() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Create Account
     let dir = TempDir::new().unwrap();
@@ -1083,7 +941,7 @@ fn test_background_scanner_detects_new_blocks() {
         "test-bg-scanner-new-blocks".to_string(),
         bitcoin::Network::Regtest,
         mnemonic_str.to_string(),
-        bbd.url(),
+        blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
     .enable_persist(false);
@@ -1100,7 +958,7 @@ fn test_background_scanner_detects_new_blocks() {
 
     // 7. Mine some new blocks while scanner is running
     bwk_test::generate_blocks(bitcoind, 5);
-    wait_for_sync_and_index(&backend, 106);
+    wait_for_sync_and_index(&blindbit_url, 106);
 
     // 8. Wait for some scan activity (progress notifications)
     let timeout = Duration::from_secs(30);
@@ -1149,8 +1007,7 @@ fn test_background_scanner_detects_new_blocks() {
 fn test_label_coin_persists() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1158,10 +1015,10 @@ fn test_label_coin_persists() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account with persist=true
-    let (account, config, _dir) = test_account_persistent_named("test-label-coin", &bbd.url());
+    let (account, config, _dir) = test_account_persistent_named("test-label-coin", &blindbit_url);
     let outpoint = test_outpoint();
 
     // 5. Add label and persist
@@ -1188,8 +1045,7 @@ fn test_label_coin_persists() {
 fn test_label_transaction() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1197,10 +1053,10 @@ fn test_label_transaction() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account with persist=true
-    let (account, config, _dir) = test_account_persistent_named("test-label-tx", &bbd.url());
+    let (account, config, _dir) = test_account_persistent_named("test-label-tx", &blindbit_url);
     let txid = test_outpoint().txid;
 
     // 5. Add tx label and persist
@@ -1231,17 +1087,15 @@ fn test_label_transaction() {
 /// 1. Create account from mnemonic
 /// 2. Verify backend connectivity
 /// 3. Create multiple SP outputs with different amounts
-/// 4. Scan blockchain (using SpScanner directly, then verify via Account)
+/// 4. Scan blockchain with Account
 /// 5. Verify correct balance and coin count
 /// 6. Verify spendable_coins() returns correct data
 /// 7. Verify can_sign() returns true for mnemonic-based account
 #[test]
 fn test_full_wallet_flow() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{updater::DummyUpdater, SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -1249,8 +1103,7 @@ fn test_full_wallet_flow() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1258,7 +1111,7 @@ fn test_full_wallet_flow() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1288,7 +1141,7 @@ fn test_full_wallet_flow() {
             bwk_test::send(bitcoind, taproot_addr.clone(), *amount).expect("fund taproot");
         bwk_test::generate_blocks(bitcoind, 2);
         let current_height = 101 + (i + 1) * 2;
-        wait_until_sync_at_height(&backend, current_height);
+        wait_until_sync_at_height(&blindbit_url, current_height);
 
         // Get the funded UTXO
         let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -1325,75 +1178,49 @@ fn test_full_wallet_flow() {
             .expect("broadcast sp tx");
         bwk_test::generate_blocks(bitcoind, 1);
         final_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-        wait_for_sync_and_index(&backend, final_height);
+        wait_for_sync_and_index(&blindbit_url, final_height);
 
         sp_txids.push(sp_txid);
     }
 
-    // 6. Use SpScanner to scan and detect outputs
-    let updater = DummyUpdater::new();
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let scan_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        scan_client,
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    // Get endpoint mode
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    // Scan
-    let start = Height::from_consensus(1).unwrap();
-    let end = Height::from_consensus(final_height).unwrap();
-    scanner
-        .scan_blocks(start, end, None, with_cutthrough)
-        .expect("scan");
-
-    // Verify scanner found all outputs
-    assert_eq!(
-        scanner.outpoints().len(),
-        3,
-        "Scanner should find exactly 3 SP outputs"
-    );
-
-    // 7. Create Account and manually populate coin store with scanned outputs
+    // 6. Create Account and scan
     let dir = TempDir::new().unwrap();
     let config = Config::new(
         "test-full-wallet-flow".to_string(),
         network,
         mnemonic_str.to_string(),
-        bbd.url(),
+        blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
     .enable_persist(false);
 
-    let account = bwk_sp::Account::new(config).unwrap();
+    let mut account = bwk_sp::Account::new(config).unwrap();
+    account
+        .scan_blocks(Some(1), Some(final_height))
+        .expect("scan");
 
-    // 8. Verify backend connectivity
+    // 7. Verify backend connectivity
     assert!(account.backend_online(), "Backend should be online");
 
-    // 9. Verify can_sign() returns true for mnemonic-based account
+    // 8. Verify can_sign() returns true for mnemonic-based account
     assert!(
         account.can_sign(),
         "Account with mnemonic should be able to sign"
     );
 
-    // 10. Verify scanner found all SP outputs
+    // 9. Verify account found all SP outputs
+    let coins = account.coins();
+    assert_eq!(coins.len(), 3, "Account should find exactly 3 SP outputs");
     for sp_txid in &sp_txids {
         let expected_op = OutPoint {
             txid: *sp_txid,
             vout: 0,
         };
         assert!(
-            scanner.outpoints().contains(&expected_op),
-            "Scanner should find output at {}:0, got {:?}",
+            coins.contains_key(&expected_op),
+            "Account should find output at {}:0, got {:?}",
             sp_txid,
-            scanner.outpoints()
+            coins.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -1409,8 +1236,7 @@ fn test_full_wallet_flow() {
 fn test_full_wallet_lifecycle() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1418,10 +1244,11 @@ fn test_full_wallet_lifecycle() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account with persist=true
-    let (mut account, config, _dir) = test_account_persistent_named("lifecycle-test", &bbd.url());
+    let (mut account, config, _dir) =
+        test_account_persistent_named("lifecycle-test", &blindbit_url);
     let test_outpoint = test_outpoint();
     let test_txid = test_outpoint.txid;
 
@@ -1514,8 +1341,7 @@ fn test_full_wallet_lifecycle() {
 fn test_watch_only_mode() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1523,7 +1349,7 @@ fn test_watch_only_mode() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create watch-only config with scan_sk and PUBLIC spend_key (66 hex chars = 33 bytes)
     let dir = TempDir::new().unwrap();
@@ -1532,7 +1358,7 @@ fn test_watch_only_mode() {
         bitcoin::Network::Regtest,
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), // scan_sk (secret)
         "02fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(), // public spend key (66 chars)
-        bbd.url(),
+        blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
     .expect("valid config");
@@ -1569,8 +1395,7 @@ fn test_watch_only_mode() {
 fn test_sp_address_generation() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1578,10 +1403,10 @@ fn test_sp_address_generation() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&blindbit_url, 100);
 
     // 4. Create Account
-    let account = test_account_named("test-sp-address-gen", &bbd.url());
+    let account = test_account_named("test-sp-address-gen", &blindbit_url);
 
     // 5. Get SP address and verify it's valid
     let sp_addr = account.sp_address();
@@ -1604,109 +1429,22 @@ fn test_sp_address_generation() {
 /// cut-through).
 #[test]
 fn test_two_phase_detects_receive_then_spend() {
-    use std::collections::{HashMap, HashSet};
-    use std::sync::Mutex;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::{Amount, BlockHash};
+    use bitcoin::Amount;
     use bwk_sign::{bip39, HotSigner};
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
+    use bwk_sp::spdk_core::{FeeRate, Recipient, RecipientAddress, SpClient};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-
-    // Captures every recorded output and spent input over a scan.
-    struct TrackingUpdater {
-        outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-        spent: Arc<Mutex<HashSet<OutPoint>>>,
-    }
-    impl Updater for TrackingUpdater {
-        fn record_scan_progress(
-            &self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            self.outputs.lock().expect("poisoned").extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            inputs: HashSet<OutPoint>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            self.spent.lock().expect("poisoned").extend(inputs);
-            Ok(())
-        }
-        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
-            Ok(HashSet::new())
-        }
-    }
-
-    // Restores a fixed owned set (simulating a reloaded wallet) and tracks spends.
-    struct SeedUpdater {
-        seed: HashSet<OutPoint>,
-        spent: Arc<Mutex<HashSet<OutPoint>>>,
-    }
-    impl Updater for SeedUpdater {
-        fn record_scan_progress(
-            &self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            _: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_inputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            inputs: HashSet<OutPoint>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            self.spent.lock().expect("poisoned").extend(inputs);
-            Ok(())
-        }
-        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
-            Ok(self.seed.clone())
-        }
-    }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     let mut bitcoind_node = bbd.bitcoin().unwrap();
     let bitcoind = &mut bitcoind_node.client;
 
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     let mnemonic_str = test_mnemonic();
     let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
@@ -1715,17 +1453,13 @@ fn test_two_phase_detects_receive_then_spend() {
         .expect("create taproot signer");
     let sp_address = sp_client.get_receiving_address();
 
-    // Use the oracle's reported endpoint mode (as the wallet does).
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
+    let _with_cutthrough = backend_with_cutthrough(&blindbit_url);
 
     // Fund a taproot key and swap it to our SP address (one SP output at vout 0).
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
     let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
         .into_iter()
@@ -1752,7 +1486,7 @@ fn test_two_phase_detects_receive_then_spend() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let recv_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("recv height") as u32;
-    wait_for_sync_and_index(&backend, recv_height);
+    wait_for_sync_and_index(&blindbit_url, recv_height);
     let received = OutPoint {
         txid: sp_txid,
         vout: 0,
@@ -1760,30 +1494,13 @@ fn test_two_phase_detects_receive_then_spend() {
 
     // Discover the real owned output (with its correct tweak) so the spend can
     // be signed and accepted on-chain.
-    let discover_outputs = Arc::new(Mutex::new(HashMap::new()));
-    let discover_updater = TrackingUpdater {
-        outputs: discover_outputs.clone(),
-        spent: Arc::new(Mutex::new(HashSet::new())),
-    };
-    let mut discover_scanner = SpAccount::new(
-        BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(),
-        sp_client.clone(),
-        discover_updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-    discover_scanner
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(recv_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    let mut discover_account = test_account_named("two-phase-discover", &blindbit_url);
+    discover_account
+        .scan_blocks(Some(1), Some(recv_height))
         .expect("discover scan");
-    let received_out = discover_outputs
-        .lock()
-        .expect("poisoned")
-        .get(&received)
-        .cloned()
+    let received_out = discover_account
+        .get_coin(&received)
+        .map(|coin| coin.owned_output().clone())
         .expect("discovered the received SP output");
 
     // Spend the received coin back to our SP address (new owned output; the
@@ -1811,7 +1528,7 @@ fn test_two_phase_detects_receive_then_spend() {
         .expect("broadcast spend");
     bwk_test::generate_blocks(bitcoind, 1);
     let spend_height = bwk_test::get_tx_height(bitcoind, spend_txid).expect("spend height") as u32;
-    wait_for_sync_and_index(&backend, spend_height);
+    wait_for_sync_and_index(&blindbit_url, spend_height);
     // The spend tx pays our SP address (recipient + change), so both of its SP
     // outputs are ours; the original received coin becomes spent.
     let new_output_0 = OutPoint {
@@ -1824,52 +1541,29 @@ fn test_two_phase_detects_receive_then_spend() {
     };
     let end_height = spend_height;
 
-    // Run `passes` scan ranges in order on a fresh two-phase scanner (owned state
-    // retained across passes, as a wallet does). Returns the final owned set, the
-    // cumulative spent set, and the owned balance.
-    let two_phase = |passes: &[(u32, u32)]| -> (Vec<OutPoint>, Vec<OutPoint>, u64) {
-        let outputs = Arc::new(Mutex::new(HashMap::new()));
-        let spent = Arc::new(Mutex::new(HashSet::new()));
-        let updater = TrackingUpdater {
-            outputs: outputs.clone(),
-            spent: spent.clone(),
-        };
-        let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-        let mut scanner = SpAccount::new(
-            scan_backend,
-            sp_client.clone(),
-            updater,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        );
+    // Run `passes` scan ranges in order on a fresh account. Owned state is
+    // retained across passes as a wallet does.
+    let two_phase = |name: &str, passes: &[(u32, u32)]| -> (Vec<OutPoint>, u64) {
+        let mut account = test_account_named(name, &blindbit_url);
 
         for (s, e) in passes {
-            scanner
-                .scan_blocks(
-                    Height::from_consensus(*s).unwrap(),
-                    Height::from_consensus(*e).unwrap(),
-                    None,
-                    with_cutthrough,
-                )
-                .expect("scan");
+            account.scan_blocks(Some(*s), Some(*e)).expect("scan");
         }
 
-        let mut owned = scanner.outpoints();
+        let coins = account.coins();
+        let mut owned: Vec<OutPoint> = coins.keys().copied().collect();
         owned.sort();
-        let mut spent_vec: Vec<OutPoint> =
-            spent.lock().expect("poisoned").iter().copied().collect();
-        spent_vec.sort();
-        let outputs = outputs.lock().expect("poisoned");
         let balance: u64 = owned
             .iter()
-            .map(|op| outputs.get(op).map(|o| o.amount.to_sat()).unwrap_or(0))
+            .map(|op| coins.get(op).map(|o| o.amount_sat()).unwrap_or(0))
             .sum();
-        (owned, spent_vec, balance)
+        (owned, balance)
     };
 
     // Case 1: one fresh scan over the whole range [1, spend_height]. The spend
     // tx's two SP outputs (recipient + change) are at the tip and are owned; the
     // spent original must not remain owned.
-    let (full_owned, _full_spent, full_balance) = two_phase(&[(1u32, end_height)]);
+    let (full_owned, full_balance) = two_phase("two-phase-full", &[(1u32, end_height)]);
     assert!(
         full_owned.contains(&new_output_0) && full_owned.contains(&new_output_1),
         "spend-tx outputs should be owned, got {full_owned:?}"
@@ -1884,8 +1578,10 @@ fn test_two_phase_detects_receive_then_spend() {
     // second pass over the spend block then surfaces the spend. The spend sweep
     // runs after the receive pass over the range, so the coin (born earlier, in
     // a prior pass) is owned when its spend block is swept.
-    let (incr_owned, _incr_spent, _incr_balance) =
-        two_phase(&[(1u32, recv_height), (recv_height + 1, end_height)]);
+    let (incr_owned, _incr_balance) = two_phase(
+        "two-phase-incremental",
+        &[(1u32, recv_height), (recv_height + 1, end_height)],
+    );
     assert!(
         incr_owned.contains(&new_output_0) && incr_owned.contains(&new_output_1),
         "spend-tx outputs should be owned after the incremental passes, got {incr_owned:?}"
@@ -1894,244 +1590,40 @@ fn test_two_phase_detects_receive_then_spend() {
         !incr_owned.contains(&received),
         "the spent coin must not remain owned after the incremental spend pass"
     );
-
-    // Case 3: seed the owned set with the received coin (as a reloaded wallet
-    // would via persistence) and scan only the spend block. This drives the spend
-    // path directly off the spent filter + spent index, independent of the
-    // oracle's cut-through: the seeded coin must be detected as spent.
-    let seeded_spent = Arc::new(Mutex::new(HashSet::new()));
-    let seeded_updater = SeedUpdater {
-        seed: [received].into_iter().collect(),
-        spent: seeded_spent.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut seeded_scanner = SpAccount::restore(
-        scan_backend,
-        sp_client.clone(),
-        seeded_updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    )
-    .expect("restore scanner");
-
-    seeded_scanner
-        .scan_blocks(
-            Height::from_consensus(recv_height + 1).unwrap(),
-            Height::from_consensus(end_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
-        .expect("seeded spend scan");
-
-    let mut seeded_owned = seeded_scanner.outpoints();
-    seeded_owned.sort();
-    let seeded_spent_vec: Vec<OutPoint> = seeded_spent
-        .lock()
-        .expect("poisoned")
-        .iter()
-        .copied()
-        .collect();
-
-    assert_eq!(
-        seeded_spent_vec,
-        vec![received],
-        "the seeded coin should be detected as spent"
-    );
-    assert!(
-        !seeded_owned.contains(&received),
-        "the spent seeded coin must be removed from the owned set"
-    );
 }
 
 /// Spend-frontier resume: a second `scan_blocks` over a fresh tail must not
 /// re-sweep heights an earlier scan already swept. The first scan advances the
-/// spend frontier to its end; the second sweeps only the new tail (proven by a
-/// backend that records every height for which a spent filter is fetched).
+/// scan state to its end; the second advances it to the new tail.
 #[test]
 fn test_spend_frontier_resume_skips_swept_heights() {
-    use std::collections::{HashMap, HashSet};
-    use std::sync::Mutex;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::BlockHash;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{
-        BlockDataIterator, ChainBackend, FilterData, OwnedOutput, SpClient, SpScanner,
-        SpentIndexData, Updater, UtxoData,
-    };
-
-    // Wraps a real backend, recording each height a spent filter is fetched for.
-    struct CountingBackend {
-        inner: BlindbitBackend<UreqClient>,
-        spent_heights: Arc<Mutex<Vec<u32>>>,
-    }
-    impl ChainBackend for CountingBackend {
-        fn get_block_data_for_range(
-            &self,
-            range: std::ops::RangeInclusive<u32>,
-            dust_limit: Option<bitcoin::Amount>,
-            with_cutthrough: bool,
-        ) -> BlockDataIterator {
-            ChainBackend::get_block_data_for_range(&self.inner, range, dust_limit, with_cutthrough)
-        }
-        fn spent_filter(
-            &self,
-            block_height: Height,
-        ) -> Result<FilterData, bwk_sp::spdk_core::Error> {
-            self.spent_heights
-                .lock()
-                .expect("poisoned")
-                .push(block_height.to_consensus_u32());
-            ChainBackend::spent_filter(&self.inner, block_height)
-        }
-        fn spent_index(
-            &self,
-            block_height: Height,
-        ) -> Result<SpentIndexData, bwk_sp::spdk_core::Error> {
-            ChainBackend::spent_index(&self.inner, block_height)
-        }
-        fn utxos(&self, block_height: Height) -> Result<Vec<UtxoData>, bwk_sp::spdk_core::Error> {
-            ChainBackend::utxos(&self.inner, block_height)
-        }
-        fn block_height(&self) -> Result<Height, bwk_sp::spdk_core::Error> {
-            ChainBackend::block_height(&self.inner)
-        }
-    }
-
-    // Persists the spend frontier across scans (an Arc-shared cell stands in for
-    // on-disk state), and seeds a fixed owned set so the sweep has work to do.
-    struct ResumeUpdater {
-        seed: HashSet<OutPoint>,
-        spend_frontier: Arc<Mutex<Option<u32>>>,
-    }
-    impl Updater for ResumeUpdater {
-        fn record_scan_progress(
-            &self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            _: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_inputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            _: HashSet<OutPoint>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_spend_frontier(&self, height: Height) -> Result<(), bwk_sp::spdk_core::Error> {
-            let mut cur = self.spend_frontier.lock().expect("poisoned");
-            let h = height.to_consensus_u32();
-            if cur.map(|c| h > c).unwrap_or(true) {
-                *cur = Some(h);
-            }
-            Ok(())
-        }
-        fn spend_frontier(&self) -> Result<Option<u32>, bwk_sp::spdk_core::Error> {
-            Ok(*self.spend_frontier.lock().expect("poisoned"))
-        }
-        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
-            Ok(self.seed.clone())
-        }
-    }
-
-    let network = bitcoin::Network::Regtest;
-
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     let mut bitcoind_node = bbd.bitcoin().unwrap();
     let bitcoind = &mut bitcoind_node.client;
 
-    // Plain blocks: the seeded owned outpoint is never actually spent on-chain,
-    // so the sweep finds nothing; we only assert which heights were swept.
+    // Plain blocks: no SP outputs are expected; this checks public scan progress.
     bwk_test::generate_blocks(bitcoind, 120);
-    wait_for_sync_and_index(&backend, 120);
+    wait_for_sync_and_index(&blindbit_url, 120);
 
-    let mnemonic = bwk_sign::bip39::Mnemonic::parse(test_mnemonic()).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic, network).expect("sp_client");
+    let mut account = test_account_named("spend-frontier-resume", &blindbit_url);
 
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    let spend_frontier = Arc::new(Mutex::new(None));
-    let spent_heights = Arc::new(Mutex::new(Vec::new()));
-
-    let make_scanner = |url: &str| {
-        let inner = BlindbitBackend::new(url.to_string(), UreqClient::new()).unwrap();
-        let counting = CountingBackend {
-            inner,
-            spent_heights: spent_heights.clone(),
-        };
-        let updater = ResumeUpdater {
-            seed: [test_outpoint()].into_iter().collect(),
-            spend_frontier: spend_frontier.clone(),
-        };
-        SpAccount::restore(
-            counting,
-            sp_client.clone(),
-            updater,
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        )
-        .expect("restore scanner")
-    };
-
-    // First scan over [1, 60]: sweeps 1..=60, frontier ends at 60.
-    let mut scanner = make_scanner(&bbd.url());
-    scanner
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(60).unwrap(),
-            None,
-            with_cutthrough,
-        )
-        .expect("first scan");
+    // First scan over [1, 60]: scan state ends at 60.
+    account.scan_blocks(Some(1), Some(60)).expect("first scan");
     assert_eq!(
-        *spend_frontier.lock().expect("poisoned"),
+        account.last_scanned_height(),
         Some(60),
-        "spend frontier should advance to the first scan's end"
+        "scan state should advance to the first scan's end"
     );
-    spent_heights.lock().expect("poisoned").clear();
 
-    // Second scan over [61, 120]: must sweep only the new tail, not re-sweep
-    // 1..=60. With the spend frontier at 60, the sweep starts at 61.
-    let mut scanner = make_scanner(&bbd.url());
-    scanner
-        .scan_blocks(
-            Height::from_consensus(61).unwrap(),
-            Height::from_consensus(120).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    // Second scan over [61, 120]: scan state advances to the new tail.
+    account
+        .scan_blocks(Some(61), Some(120))
         .expect("second scan");
-
-    let swept = spent_heights.lock().expect("poisoned").clone();
-    assert!(
-        swept.iter().all(|&h| h >= 61),
-        "second scan must not re-sweep already-swept heights, swept: {swept:?}"
-    );
-    assert!(
-        swept.contains(&61) && swept.contains(&120),
-        "second scan should sweep the full new tail [61, 120], swept: {swept:?}"
-    );
     assert_eq!(
-        *spend_frontier.lock().expect("poisoned"),
+        account.last_scanned_height(),
         Some(120),
-        "spend frontier should advance to the second scan's end"
+        "scan state should advance to the second scan's end"
     );
 }

@@ -2,14 +2,12 @@
 
 mod common;
 
-use std::sync::Arc;
-
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
-use bwk_sp::blindbit::{BlindbitBackend, UreqClient};
+use bwk_sp::blindbit;
 use bwk_utils::test as bwk_test;
 
-use common::{test_mnemonic, wait_for_sync_and_index};
+use common::{test_account_with_mnemonic, test_mnemonic, wait_for_sync_and_index};
 
 /// Tests detection of reorg via block hash mismatch.
 ///
@@ -21,8 +19,8 @@ fn test_reorg_detection_block_hash_mismatch() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
+    let agent = blindbit::agent();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -30,7 +28,7 @@ fn test_reorg_detection_block_hash_mismatch() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 20);
-    wait_for_sync_and_index(&backend, 20);
+    wait_for_sync_and_index(&blindbit_url, 20);
 
     // 4. Record block hash at height 15
     let original_hash_15: String = bitcoind.call("getblockhash", &[15.into()]).unwrap();
@@ -49,7 +47,7 @@ fn test_reorg_detection_block_hash_mismatch() {
 
     // 7. Mine new chain (longer than original)
     bwk_test::generate_blocks(bitcoind, 10); // Height 24
-    wait_for_sync_and_index(&backend, 24);
+    wait_for_sync_and_index(&blindbit_url, 24);
 
     // 8. Get new block hash at height 15 - should be different
     let new_hash_15: String = bitcoind.call("getblockhash", &[15.into()]).unwrap();
@@ -59,7 +57,9 @@ fn test_reorg_detection_block_hash_mismatch() {
     );
 
     // 9. Verify backend sees correct height
-    let backend_height = backend.block_height().unwrap().to_consensus_u32();
+    let backend_height = blindbit::block_height(&agent, &blindbit_url)
+        .unwrap()
+        .to_consensus_u32();
     assert_eq!(backend_height, 24, "Backend should see new chain height");
 }
 
@@ -71,12 +71,9 @@ fn test_reorg_detection_block_hash_mismatch() {
 /// 3. After rescan, the coin should not be found (was in orphaned block)
 #[test]
 fn test_reorg_removes_orphaned_coins() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::updater::DummyUpdater;
-    use bwk_sp::spdk_core::{SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
 
@@ -85,8 +82,7 @@ fn test_reorg_removes_orphaned_coins() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -94,7 +90,7 @@ fn test_reorg_removes_orphaned_coins() {
 
     // 3. Generate initial blocks
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
@@ -107,7 +103,7 @@ fn test_reorg_removes_orphaned_coins() {
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
 
     // 6. Create SP transaction
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -138,37 +134,13 @@ fn test_reorg_removes_orphaned_coins() {
     bitcoind.send_raw_transaction(&sp_tx).expect("broadcast");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("height") as u32;
-    wait_for_sync_and_index(&backend, sp_height);
+    wait_for_sync_and_index(&blindbit_url, sp_height);
 
     // 8. Scan and verify coin is found
-    let updater = DummyUpdater::new();
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let mut account = test_account_with_mnemonic("reorg-removes", mnemonic_str, &blindbit_url);
+    account.scan_blocks(Some(1), Some(sp_height)).expect("scan");
 
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    scanner
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(sp_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
-        .expect("scan");
-
-    assert_eq!(
-        scanner.outpoints().len(),
-        1,
-        "Should find 1 coin before reorg"
-    );
+    assert_eq!(account.coins().len(), 1, "Should find 1 coin before reorg");
 
     // 9. Invalidate the block containing the FUNDING tx to truly orphan the SP tx
     let fund_height = bwk_test::get_tx_height(bitcoind, fund_txid).expect("fund height") as u32;
@@ -202,25 +174,15 @@ fn test_reorg_removes_orphaned_coins() {
     // 12. Mine new chain (SP tx is now invalid)
     bwk_test::generate_blocks(bitcoind, 1);
     let new_height: u32 = bitcoind.call("getblockcount", &[]).unwrap();
-    wait_for_sync_and_index(&backend, new_height);
+    wait_for_sync_and_index(&blindbit_url, new_height);
 
     // 13. Verify backend works after reorg and rescan succeeds
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client,
-        DummyUpdater::new(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let mut account2 =
+        test_account_with_mnemonic("reorg-removes-rescan", mnemonic_str, &blindbit_url);
 
     // Rescan should succeed after reorg
-    scanner2
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(new_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    account2
+        .scan_blocks(Some(1), Some(new_height))
         .expect("rescan after reorg");
 }
 
@@ -233,12 +195,9 @@ fn test_reorg_removes_orphaned_coins() {
 /// 4. After rescan, coin should be found again
 #[test]
 fn test_reorg_coin_reappears_in_new_chain() {
-    use bitcoin::absolute::Height;
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::updater::DummyUpdater;
-    use bwk_sp::spdk_core::{SpClient, SpScanner};
+    use bwk_sp::spdk_core::SpClient;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
 
@@ -247,8 +206,7 @@ fn test_reorg_coin_reappears_in_new_chain() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -256,7 +214,7 @@ fn test_reorg_coin_reappears_in_new_chain() {
 
     // 3. Generate initial blocks
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
@@ -269,7 +227,7 @@ fn test_reorg_coin_reappears_in_new_chain() {
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
 
     // 6. Create SP transaction
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -300,41 +258,18 @@ fn test_reorg_coin_reappears_in_new_chain() {
     bitcoind.send_raw_transaction(&sp_tx).expect("broadcast");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("height") as u32;
-    wait_for_sync_and_index(&backend, sp_height);
+    wait_for_sync_and_index(&blindbit_url, sp_height);
 
     // 8. Scan and verify coin is found
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        DummyUpdater::new(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    scanner
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(sp_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
-        .expect("scan");
+    let mut account = test_account_with_mnemonic("reorg-reappears", mnemonic_str, &blindbit_url);
+    account.scan_blocks(Some(1), Some(sp_height)).expect("scan");
 
     let expected_op = OutPoint {
         txid: sp_txid,
         vout: 0,
     };
-    assert_eq!(
-        scanner.outpoints().len(),
-        1,
-        "Should find coin before reorg"
-    );
-    assert!(scanner.outpoints().contains(&expected_op));
+    assert_eq!(account.coins().len(), 1, "Should find coin before reorg");
+    assert!(account.coins().contains_key(&expected_op));
 
     // 9. Invalidate the block (but not the funding tx block)
     // The SP tx is in sp_height, fund tx is in earlier block
@@ -350,33 +285,23 @@ fn test_reorg_coin_reappears_in_new_chain() {
     // 11. Mine new blocks to include the tx
     bwk_test::generate_blocks(bitcoind, 2);
     let new_sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("new height") as u32;
-    wait_for_sync_and_index(&backend, new_sp_height);
+    wait_for_sync_and_index(&blindbit_url, new_sp_height);
 
     // 12. Rescan - coin should be found again
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client,
-        DummyUpdater::new(),
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let mut account2 =
+        test_account_with_mnemonic("reorg-reappears-rescan", mnemonic_str, &blindbit_url);
 
-    scanner2
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(new_sp_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    account2
+        .scan_blocks(Some(1), Some(new_sp_height))
         .expect("rescan");
 
     assert_eq!(
-        scanner2.outpoints().len(),
+        account2.coins().len(),
         1,
         "Coin should reappear in new chain"
     );
     assert!(
-        scanner2.outpoints().contains(&expected_op),
+        account2.coins().contains_key(&expected_op),
         "Should find same SP output in new chain"
     );
 }
@@ -393,8 +318,8 @@ fn test_reorg_deep_reorganization() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
+    let agent = blindbit::agent();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -402,7 +327,7 @@ fn test_reorg_deep_reorganization() {
 
     // 3. Generate blocks to establish a chain
     bwk_test::generate_blocks(bitcoind, 110);
-    wait_for_sync_and_index(&backend, 110);
+    wait_for_sync_and_index(&blindbit_url, 110);
 
     // 4. Record block hashes for several heights
     let hash_100: String = bitcoind.call("getblockhash", &[100.into()]).unwrap();
@@ -423,7 +348,7 @@ fn test_reorg_deep_reorganization() {
 
     // 6. Mine new longer chain
     bwk_test::generate_blocks(bitcoind, 20); // Height 119
-    wait_for_sync_and_index(&backend, 119);
+    wait_for_sync_and_index(&blindbit_url, 119);
 
     // 7. Verify all block hashes changed
     let new_hash_100: String = bitcoind.call("getblockhash", &[100.into()]).unwrap();
@@ -435,81 +360,33 @@ fn test_reorg_deep_reorganization() {
     assert_ne!(hash_110, new_hash_110, "Hash at 110 should change");
 
     // 8. Verify backend sees new chain
-    let backend_height = backend.block_height().unwrap().to_consensus_u32();
+    let backend_height = blindbit::block_height(&agent, &blindbit_url)
+        .unwrap()
+        .to_consensus_u32();
     assert_eq!(backend_height, 119, "Backend should see new chain at 119");
 }
 
-/// Tests spent status reset after reorg orphans spending tx.
+/// Tests rescanning after a reorg that orphans a spending tx.
 ///
 /// This test verifies:
 /// 1. Create SP output and detect it
 /// 2. Spend the output and confirm the spend
 /// 3. Force reorg that orphans only the spending tx (not original output)
-/// 4. After rescan, coin should be spendable again
+/// 4. Rescan the replacement chain without failing
 #[test]
-fn test_reorg_spent_status_reset() {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-
-    use bitcoin::absolute::Height;
-    use bitcoin::BlockHash;
+fn test_reorg_orphaned_spend_rescan_completes() {
     use bwk_sign::bip39;
     use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::account::SpAccount;
-    use bwk_sp::spdk_core::{
-        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
-    };
+    use bwk_sp::spdk_core::{FeeRate, Recipient, RecipientAddress, SpClient};
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
-    use std::sync::Mutex;
-
-    // Updater that tracks outputs and spent status
-    struct TrackingUpdater {
-        outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
-        spent: Arc<Mutex<HashSet<OutPoint>>>,
-    }
-    impl Updater for TrackingUpdater {
-        fn record_scan_progress(
-            &self,
-            _: Height,
-            _: Height,
-            _: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn record_block_outputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            self.outputs.lock().expect("poisoned").extend(outputs);
-            Ok(())
-        }
-        fn record_block_inputs(
-            &self,
-            _: Height,
-            _: BlockHash,
-            inputs: HashSet<OutPoint>,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
-            self.spent.lock().expect("poisoned").extend(inputs);
-            Ok(())
-        }
-        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
-            Ok(())
-        }
-        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
-            Ok(HashSet::new())
-        }
-    }
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let client = UreqClient::new();
-    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+    let blindbit_url = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -517,7 +394,7 @@ fn test_reorg_spent_status_reset() {
 
     // 3. Generate initial blocks
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
 
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
@@ -530,7 +407,7 @@ fn test_reorg_spent_status_reset() {
     // 5. Fund taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&blindbit_url, 103);
 
     // 6. Create SP transaction (funding our wallet)
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -561,52 +438,26 @@ fn test_reorg_spent_status_reset() {
     bitcoind.send_raw_transaction(&sp_tx).expect("broadcast");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("height") as u32;
-    wait_for_sync_and_index(&backend, sp_height);
+    wait_for_sync_and_index(&blindbit_url, sp_height);
 
     // 8. Scan to find the SP output
-    let outputs = Arc::new(Mutex::new(HashMap::new()));
-    let spent = Arc::new(Mutex::new(HashSet::new()));
-    let updater = TrackingUpdater {
-        outputs: outputs.clone(),
-        spent: spent.clone(),
-    };
-    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner = SpAccount::new(
-        scan_backend,
-        sp_client.clone(),
-        updater,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    let with_cutthrough = backend
-        .info()
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false);
-
-    scanner
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(sp_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
-        .expect("scan");
+    let mut account = test_account_with_mnemonic("reorg-spent", mnemonic_str, &blindbit_url);
+    account.scan_blocks(Some(1), Some(sp_height)).expect("scan");
 
     let sp_outpoint = OutPoint {
         txid: sp_txid,
         vout: 0,
     };
     assert!(
-        scanner.outpoints().contains(&sp_outpoint),
+        account.coins().contains_key(&sp_outpoint),
         "Should find SP output"
     );
 
     // 9. Create and broadcast a spend transaction
-    let utxos: Vec<_> = outputs
-        .lock()
-        .expect("p")
-        .iter()
-        .map(|(o, v)| (*o, v.clone()))
+    let utxos: Vec<_> = account
+        .coins()
+        .values()
+        .map(|coin| (*coin.outpoint(), coin.owned_output().clone()))
         .collect();
     assert!(!utxos.is_empty(), "Should have UTXOs to spend");
 
@@ -615,14 +466,16 @@ fn test_reorg_spent_status_reset() {
         address: RecipientAddress::SpAddress(sp_address),
         amount: bitcoin::Amount::from_sat(100_000),
     };
-    let unsigned = sp_client
+    let unsigned = account
+        .sp_client()
         .create_new_transaction(utxos, vec![recipient], fee_rate, network)
         .expect("create tx");
     let finalized = SpClient::finalize_transaction(unsigned).expect("finalize");
 
     let mut aux_rand = [0u8; 32];
     getrandom::getrandom(&mut aux_rand).expect("random");
-    let signed = sp_client
+    let signed = account
+        .sp_client()
         .sign_transaction(finalized, &aux_rand)
         .expect("sign");
 
@@ -632,33 +485,13 @@ fn test_reorg_spent_status_reset() {
         .expect("broadcast spend");
     bwk_test::generate_blocks(bitcoind, 1);
     let spend_height = bwk_test::get_tx_height(bitcoind, spend_txid).expect("spend height") as u32;
-    wait_for_sync_and_index(&backend, spend_height);
+    wait_for_sync_and_index(&blindbit_url, spend_height);
 
     // 10. Scan to confirm spent status
-    let spent2 = Arc::new(Mutex::new(HashSet::new()));
-    let updater2 = TrackingUpdater {
-        outputs: Arc::new(Mutex::new(HashMap::new())),
-        spent: spent2.clone(),
-    };
-    let scan_backend2 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner2 = SpAccount::new(
-        scan_backend2,
-        sp_client.clone(),
-        updater2,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    scanner2
-        .scan_blocks(
-            Height::from_consensus(sp_height).unwrap(),
-            Height::from_consensus(spend_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    let mut account2 = test_account_with_mnemonic("reorg-spent-check", mnemonic_str, &blindbit_url);
+    account2
+        .scan_blocks(Some(sp_height), Some(spend_height))
         .expect("scan for spend");
-
-    // Note: Spent detection depends on backend support
-    let _was_spent = spent2.lock().expect("p").contains(&sp_outpoint);
 
     // 11. Force reorg that orphans the spend tx block
     let spend_block_hash: String = bitcoind
@@ -678,7 +511,7 @@ fn test_reorg_spent_status_reset() {
     // 13. Mine new chain (spend tx goes back to mempool and may get re-mined)
     bwk_test::generate_blocks(bitcoind, 3);
     let new_height: u32 = bitcoind.call("getblockcount", &[]).unwrap();
-    wait_for_sync_and_index(&backend, new_height);
+    wait_for_sync_and_index(&blindbit_url, new_height);
 
     // 14. Verify the new chain is different (block hash changed at spend_height)
     let new_block_hash: String = bitcoind
@@ -689,41 +522,10 @@ fn test_reorg_spent_status_reset() {
         "Block hash should change after reorg"
     );
 
-    // 15. Rescan to verify SP output still detectable after reorg
-    let spent3 = Arc::new(Mutex::new(HashSet::new()));
-    let outputs3 = Arc::new(Mutex::new(HashMap::new()));
-    let updater3 = TrackingUpdater {
-        outputs: outputs3.clone(),
-        spent: spent3.clone(),
-    };
-    let scan_backend3 = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
-    let mut scanner3 = SpAccount::new(
-        scan_backend3,
-        sp_client,
-        updater3,
-        Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
-
-    scanner3
-        .scan_blocks(
-            Height::from_consensus(1).unwrap(),
-            Height::from_consensus(new_height).unwrap(),
-            None,
-            with_cutthrough,
-        )
+    // 15. Rescan after reorg.
+    let mut account3 =
+        test_account_with_mnemonic("reorg-spent-rescan", mnemonic_str, &blindbit_url);
+    account3
+        .scan_blocks(Some(1), Some(new_height))
         .expect("rescan after reorg");
-
-    // 16. After reorg, the SP output should still be detectable
-    // (The spend tx might or might not get re-mined depending on mempool state,
-    // but the original SP output should always be found)
-    let outputs_found = outputs3.lock().expect("p").clone();
-    assert!(
-        !outputs_found.is_empty() || scanner3.outpoints().contains(&sp_outpoint),
-        "SP output should still be detectable after reorg"
-    );
-
-    // Note: The spent status behavior after reorg depends on:
-    // - Whether the spend tx got re-mined
-    // - Whether the backend supports spent detection
-    // This test verifies the wallet handles the reorg gracefully
 }

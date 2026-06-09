@@ -5,19 +5,16 @@ pub mod error;
 
 mod thread_pool;
 
-// Re-export backend functionality
-pub use backend::BlindbitBackend;
-
-pub use client::{BlindbitClient, HttpClient};
+pub use backend::{
+    agent, block_height, forward_tx, get_block_data_for_range, info, spent_filter, spent_index,
+    utxos, BlockDataObserver, HeightObserver,
+};
 
 pub use client::structs::InfoResponse;
-pub use client::UreqClient;
 
 // Re-export core types and traits (avoiding module name conflicts)
 pub use crate::spdk_core::{
     BlockData,
-    BlockDataIterator,
-    ChainBackend,
     // Re-exported external types
     FeeRate,
     FilterData,
@@ -27,10 +24,8 @@ pub use crate::spdk_core::{
     RecipientAddress,
     SilentPaymentUnsignedTransaction,
     SpClient,
-    SpScanner,
     SpendKey,
     SpentIndexData,
-    Updater,
     UtxoData,
     // Constants
     DATA_CARRIER_SIZE,

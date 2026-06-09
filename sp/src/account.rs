@@ -2,7 +2,7 @@
 //!
 //! The `Account` struct ties together all components of a Silent Payment wallet:
 //! - SpClient for key management and address derivation
-//! - BlindbitBackend for blockchain data access
+//! - Blindbit oracle access for blockchain data
 //! - Stores for coins, transactions, labels, and scan state
 //! - Background scanning thread for continuous blockchain monitoring
 
@@ -23,9 +23,9 @@ use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
 use bwk::label_store::LabelStore;
 use miniscript::psbt::PsbtExt;
 
-use crate::blindbit::{BlindbitBackend, InfoResponse, UreqClient};
-use crate::spdk_core::account::SpAccount;
-use crate::spdk_core::{bip39, OwnedOutput, SpClient, SpScanner, Updater};
+use crate::blindbit::{self, InfoResponse};
+use crate::scan::{scan_blocks as scan_sp_blocks, ScanStores};
+use crate::spdk_core::{bip39, OwnedOutput, SpClient};
 
 use bwk::persist::{ConfigStore, NoopConfigStore};
 
@@ -141,7 +141,7 @@ pub struct Account<
     >,
 > {
     client: SpClient,
-    backend: BlindbitBackend<UreqClient>,
+    agent: Arc<ureq::Agent>,
     coin_store: Arc<Mutex<SpCoinStore<P>>>,
     label_store: Arc<Mutex<LabelStore>>,
     tx_store: Arc<Mutex<SpTxStore<P>>>,
@@ -201,8 +201,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         // Create SpClient
         let client = Self::create_sp_client(&config)?;
 
-        // Create backend
-        let backend = create_backend(&config)?;
+        let agent = Arc::new(blindbit::agent());
 
         // Create notification channel
         let (sender, receiver) = mpsc::channel();
@@ -241,7 +240,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
 
         Ok(Account {
             client,
-            backend,
+            agent,
             coin_store,
             label_store,
             tx_store,
@@ -606,8 +605,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
     /// Get the current block height from the backend.
     pub fn block_height(&self) -> Result<u32, AccountError> {
-        self.backend
-            .block_height()
+        blindbit::block_height(&self.agent, &self.config.blindbit_url)
             .map(|h| h.to_consensus_u32())
             .map_err(|e| AccountError::Network(e.to_string()))
     }
@@ -625,10 +623,6 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Update the Blindbit server URL.
     pub fn set_blindbit_url(&mut self, url: String) {
         self.config.blindbit_url = url;
-        // Recreate backend with new URL
-        if let Ok(backend) = create_backend(&self.config) {
-            self.backend = backend;
-        }
         if self.config.persist {
             self.persist_config();
         }
@@ -687,24 +681,17 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-        let scan_backend = create_backend(&self.config)?;
 
-        let with_cutthrough = scan_backend
-            .info()
+        let with_cutthrough = blindbit::info(&self.agent, &self.config.blindbit_url)
             .map(|info| info.tweaks_cut_through_with_dust_filter)
             .unwrap_or(false);
 
-        let mut scanner = SpAccount::new(
-            scan_backend,
-            self.client.clone(),
-            AccountUpdater::<P> {
-                coin_store: self.coin_store.clone(),
-                tx_store: self.tx_store.clone(),
-                scan_state: self.scan_state.clone(),
-                sender: self.sender.clone(),
-            },
-            self.scanner_stop.clone(),
-        );
+        let stores = ScanStores {
+            coin_store: self.coin_store.clone(),
+            tx_store: self.tx_store.clone(),
+            scan_state: self.scan_state.clone(),
+            sender: self.sender.clone(),
+        };
 
         let _ = self
             .sender
@@ -713,9 +700,18 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                 end: end_height,
             }));
 
-        scanner
-            .scan_blocks(start, end, dust_limit, with_cutthrough)
-            .map_err(|e| AccountError::Scan(e.to_string()))?;
+        scan_sp_blocks(
+            self.agent.clone(),
+            &self.config.blindbit_url,
+            &self.client,
+            &stores,
+            &self.scanner_stop,
+            start,
+            end,
+            dust_limit,
+            with_cutthrough,
+        )
+        .map_err(|e| AccountError::Scan(e.to_string()))?;
 
         let _ = self
             .sender
@@ -736,6 +732,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .send(Notification::Sp(SpNotification::StartingScan));
 
         let client = self.client.clone();
+        let agent = self.agent.clone();
         let blindbit_url = self.config.blindbit_url.clone();
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
         let coin_store = self.coin_store.clone();
@@ -745,61 +742,22 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         let stop = self.scanner_stop.clone();
 
         let handle = thread::spawn(move || {
-            let http_client = UreqClient::new();
-            let backend = match BlindbitBackend::new(blindbit_url.clone(), http_client) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
-                        message: e.to_string(),
-                    }));
-                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
-                    return;
-                }
-            };
-
-            let http_client_scan = UreqClient::new();
             let mut last_notified_tip: Option<u32> = None;
             let mut waiting = false;
 
-            let scan_backend = match BlindbitBackend::new(blindbit_url.clone(), http_client_scan) {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
-                        message: e.to_string(),
-                    }));
-                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
-                    return;
-                }
-            };
-
-            let with_cutthrough = scan_backend
-                .info()
+            let with_cutthrough = blindbit::info(&agent, &blindbit_url)
                 .map(|info| info.tweaks_cut_through_with_dust_filter)
                 .unwrap_or(false);
 
-            let mut scanner = match SpAccount::restore(
-                scan_backend,
-                client.clone(),
-                AccountUpdater::<P> {
-                    coin_store: coin_store.clone(),
-                    tx_store: tx_store.clone(),
-                    scan_state: scan_state.clone(),
-                    sender: sender.clone(),
-                },
-                stop.clone(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
-                        message: e.to_string(),
-                    }));
-                    let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
-                    return;
-                }
+            let stores = ScanStores {
+                coin_store: coin_store.clone(),
+                tx_store: tx_store.clone(),
+                scan_state: scan_state.clone(),
+                sender: sender.clone(),
             };
 
             while !stop.load(Ordering::Relaxed) {
-                let chain_height = match backend.block_height() {
+                let chain_height = match blindbit::block_height(&agent, &blindbit_url) {
                     Ok(h) => h.to_consensus_u32(),
                     Err(e) => {
                         log::warn!("scanner: failed to get block height: {e}");
@@ -849,7 +807,17 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                     end: end.to_consensus_u32(),
                 }));
 
-                match scanner.scan_blocks(start, end, dust_limit, with_cutthrough) {
+                match scan_sp_blocks(
+                    agent.clone(),
+                    &blindbit_url,
+                    &client,
+                    &stores,
+                    &stop,
+                    start,
+                    end,
+                    dust_limit,
+                    with_cutthrough,
+                ) {
                     Ok(()) => {
                         let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
                         last_notified_tip = Some(chain_height);
@@ -939,28 +907,30 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-        let scan_backend = create_backend(&self.config)?;
 
-        let with_cutthrough = scan_backend
-            .info()
+        let with_cutthrough = blindbit::info(&self.agent, &self.config.blindbit_url)
             .map(|info| info.tweaks_cut_through_with_dust_filter)
             .unwrap_or(false);
 
-        let mut scanner = SpAccount::new(
-            scan_backend,
-            self.client.clone(),
-            AccountUpdater::<P> {
-                coin_store: self.coin_store.clone(),
-                tx_store: self.tx_store.clone(),
-                scan_state: self.scan_state.clone(),
-                sender: self.sender.clone(),
-            },
-            self.scanner_stop.clone(),
-        );
+        let stores = ScanStores {
+            coin_store: self.coin_store.clone(),
+            tx_store: self.tx_store.clone(),
+            scan_state: self.scan_state.clone(),
+            sender: self.sender.clone(),
+        };
 
-        scanner
-            .scan_blocks(start, end, dust_limit, with_cutthrough)
-            .map_err(|e| AccountError::Scan(e.to_string()))?;
+        scan_sp_blocks(
+            self.agent.clone(),
+            &self.config.blindbit_url,
+            &self.client,
+            &stores,
+            &self.scanner_stop,
+            start,
+            end,
+            dust_limit,
+            with_cutthrough,
+        )
+        .map_err(|e| AccountError::Scan(e.to_string()))?;
 
         let _ = self
             .sender
@@ -1554,146 +1524,14 @@ impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
     }
 }
 
-// AccountUpdater - Implements Updater trait for Account
-
-/// Create a [`BlindbitBackend`] from the config's URL. Pure w.r.t.
-/// storage strategy — shared across all generic impls.
-fn create_backend(config: &Config) -> Result<BlindbitBackend<UreqClient>, AccountError> {
-    let http_client = UreqClient::new();
-    BlindbitBackend::new(config.blindbit_url.clone(), http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))
-}
-
-/// Internal struct that implements the Updater trait for scanning.
-struct AccountUpdater<P: crate::profile::SpStorageProfile> {
-    coin_store: Arc<Mutex<SpCoinStore<P>>>,
-    tx_store: Arc<Mutex<SpTxStore<P>>>,
-    scan_state: Arc<Mutex<ScanState>>,
-    sender: mpsc::Sender<Notification>,
-}
-
-impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
-    fn record_scan_progress(
-        &self,
-        _start: Height,
-        current: Height,
-        end: Height,
-    ) -> Result<(), crate::spdk_core::Error> {
-        // Notification only; the scan loop drives the cadence (every 100 blocks in
-        // the receive phase, every 1000 in the spend sweep). The receive frontier is
-        // persisted separately via record_scan_frontier at the time checkpoint.
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanProgress {
-                current: current.to_consensus_u32(),
-                end: end.to_consensus_u32(),
-            }));
-        Ok(())
-    }
-
-    fn record_block_outputs(
-        &self,
-        _height: Height,
-        _block_hash: BlockHash,
-        found_outputs: HashMap<OutPoint, OwnedOutput>,
-    ) -> Result<(), crate::spdk_core::Error> {
-        // Two-phase receives arrive order-free, so they never move the frontier;
-        // the contiguous receive frontier advances via `record_scan_frontier`.
-
-        // Insert outputs into coin store AND persist in same lock scope
-        {
-            let mut store = self.coin_store.lock().expect("poisoned");
-            for (outpoint, output) in found_outputs {
-                store.insert(outpoint, output);
-                let _ = self
-                    .sender
-                    .send(Notification::Sp(SpNotification::NewOutput(outpoint)));
-            }
-            store.persist();
-        }
-
-        Ok(())
-    }
-
-    fn record_block_inputs(
-        &self,
-        _height: Height,
-        block_hash: BlockHash,
-        found_inputs: HashSet<OutPoint>,
-    ) -> Result<(), crate::spdk_core::Error> {
-        // Two-phase spends arrive order-free; the receive frontier advances via
-        // `record_scan_frontier` and the spend frontier via `record_spend_frontier`.
-
-        // Mark inputs as spent AND persist in same lock scope
-        {
-            let mut store = self.coin_store.lock().expect("poisoned");
-            for outpoint in found_inputs {
-                store.mark_mined(&outpoint, *block_hash.as_byte_array());
-                let _ = self
-                    .sender
-                    .send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
-            }
-            store.persist();
-        }
-
-        Ok(())
-    }
-
-    fn record_scan_frontier(
-        &self,
-        height: Height,
-        block_hash: BlockHash,
-    ) -> Result<(), crate::spdk_core::Error> {
-        // Advance and persist the contiguous receive frontier (height plus its
-        // hash). The matching `record_scan_progress` call emits the progress
-        // notification, so this only persists state.
-        let mut state = self.scan_state.lock().expect("poisoned");
-        state.advance_frontier(height.to_consensus_u32(), *block_hash.as_byte_array());
-        state.persist();
-        Ok(())
-    }
-
-    fn record_spend_frontier(&self, height: Height) -> Result<(), crate::spdk_core::Error> {
-        // Advance and persist the spend frontier (the trailing input sweep).
-        let mut state = self.scan_state.lock().expect("poisoned");
-        state.advance_spend_frontier(height.to_consensus_u32());
-        state.persist();
-        Ok(())
-    }
-
-    fn spend_frontier(&self) -> Result<Option<u32>, crate::spdk_core::Error> {
-        Ok(self
-            .scan_state
-            .lock()
-            .expect("poisoned")
-            .last_spend_height())
-    }
-
-    fn save_to_persistent_storage(&self) -> Result<(), crate::spdk_core::Error> {
-        self.coin_store.lock().expect("poisoned").persist();
-        self.tx_store.lock().expect("poisoned").persist();
-        self.scan_state.lock().expect("poisoned").persist();
-        Ok(())
-    }
-
-    fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, crate::spdk_core::Error> {
-        let store = self.coin_store.lock().expect("poisoned");
-        Ok(store.all_outpoints())
-    }
-}
-
 /// Get backend info without an Account.
 ///
 /// If the URL already has a scheme, uses it directly. Otherwise tries `http://` then `https://`.
 /// Returns the `InfoResponse` and the URL that worked.
 pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), AccountError> {
     let try_url = |url: &str| -> Result<InfoResponse, AccountError> {
-        let http_client = UreqClient::new();
-        let backend = BlindbitBackend::new(url.to_string(), http_client)
-            .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))?;
-        backend
-            .info()
-            .map_err(|e| AccountError::Network(e.to_string()))
+        let agent = blindbit::agent();
+        blindbit::info(&agent, url).map_err(|e| AccountError::Network(e.to_string()))
     };
 
     // If a scheme is already present, use as-is.
@@ -1715,11 +1553,8 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
 
 /// Get block height without an Account.
 pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
-    let http_client = UreqClient::new();
-    let backend = BlindbitBackend::new(blindbit_url, http_client)
-        .map_err(|e| AccountError::Network(format!("failed to create backend: {e}")))?;
-    backend
-        .block_height()
+    let agent = blindbit::agent();
+    blindbit::block_height(&agent, &blindbit_url)
         .map(|h| h.to_consensus_u32())
         .map_err(|e| AccountError::Network(e.to_string()))
 }
@@ -1979,45 +1814,6 @@ mod tests {
     // Note: Full Account creation tests require a working blindbit backend
     // which is not available in unit tests. Integration tests would test
     // the full flow.
-
-    #[test]
-    fn test_record_scan_progress_notifies_each_call() {
-        let scan_state = Arc::new(Mutex::new(ScanState::new(0)));
-        let coin_store = Arc::new(Mutex::new(SpCoinStore::new()));
-        let tx_store = Arc::new(Mutex::new(SpTxStore::new()));
-        let (sender, receiver) = mpsc::channel();
-
-        let mut updater =
-            AccountUpdater::<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
-                coin_store,
-                tx_store,
-                scan_state,
-                sender,
-            };
-
-        // The cadence now lives in the scan loop (every 100 blocks in the receive
-        // phase, every 1000 in the spend sweep); the updater just forwards a
-        // ScanProgress notification on every call.
-        let end = Height::from_consensus(500).unwrap();
-        for h in [100u32, 137, 200, 500] {
-            updater
-                .record_scan_progress(
-                    Height::from_consensus(0).unwrap(),
-                    Height::from_consensus(h).unwrap(),
-                    end,
-                )
-                .unwrap();
-        }
-
-        let mut notified = Vec::new();
-        while let Ok(notif) = receiver.try_recv() {
-            if let Notification::Sp(SpNotification::ScanProgress { current, end }) = notif {
-                assert_eq!(end, 500);
-                notified.push(current);
-            }
-        }
-        assert_eq!(notified, vec![100, 137, 200, 500]);
-    }
 
     // -----------------------------------------------------------------
     // owned_addresses — aggregate view across BIP32 subs + SP
