@@ -18,11 +18,6 @@ use std::{
     time::Instant,
 };
 
-/// Blocks prefetched ahead of the single-threaded matcher (bounded for
-/// backpressure / capped memory). See the prefetch thread in `scan_blocks`.
-#[cfg(not(target_arch = "wasm32"))]
-const PREFETCH_DEPTH: usize = 64;
-
 pub struct SpAccount<B, U>
 where
     B: ChainBackend,
@@ -111,83 +106,26 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         log::info!("start: {} end: {}", start, end);
         let start_time: Instant = Instant::now();
 
-        // get block data iterator
-        let range = start.to_consensus_u32()..=end.to_consensus_u32();
-        let block_data_stream =
-            self.backend
-                .get_block_data_for_range(range, dust_limit, with_cutthrough);
+        // Seed the in-memory owned set from the restored outpoints; the spend
+        // sweep is bounded by the spend frontier, not by per-coin birth height.
+        let owned = self.owned_outpoints.clone();
+        let owned = crate::scanner::process_two_phase(
+            self,
+            start,
+            end,
+            dust_limit,
+            with_cutthrough,
+            owned,
+        )?;
+        // Refresh the owned-outpoint view from the order-free result.
+        self.owned_outpoints = owned;
 
-        // Prefetch on a dedicated thread so block fetch overlaps the single-threaded
-        // match: while we match a block, this thread keeps draining the backend into a
-        // bounded buffer instead of the match thread stalling fetch every block. The
-        // channel is bounded for backpressure (capped memory regardless of range).
-        // (wasm has no threads, and BlockDataIterator there isn't Send.)
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (tx, rx) = std::sync::mpsc::sync_channel(PREFETCH_DEPTH);
-            let prefetch = std::thread::spawn(move || {
-                for item in block_data_stream {
-                    if tx.send(item).is_err() {
-                        break; // matcher stopped (error / interrupt)
-                    }
-                }
-            });
-            let result = self.process_blocks(start, end, rx.into_iter());
-            let _ = prefetch.join();
-            result?;
-        }
-        #[cfg(target_arch = "wasm32")]
-        self.process_blocks(start, end, block_data_stream)?;
-
-        // time elapsed for the scan
         log::info!(
             "Blindbit scan completed in {} seconds",
             start_time.elapsed().as_secs()
         );
 
         Ok(())
-    }
-
-    fn process_block(
-        &mut self,
-        blockdata: crate::BlockData,
-    ) -> crate::error::Result<(
-        std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
-        std::collections::HashSet<bitcoin::OutPoint>,
-    )> {
-        // Output matching is read-only on `self` (only reads `self.client` /
-        // `self.backend`), so it is factored into `match_block_outputs` and run
-        // in parallel across a window of blocks by the scanner. The ordered,
-        // state-mutating part stays in `commit_block`.
-        let outs = self.match_block_outputs(&blockdata)?;
-        self.commit_block(blockdata, outs)
-    }
-
-    fn commit_block(
-        &mut self,
-        blockdata: crate::BlockData,
-        outs: std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
-    ) -> crate::error::Result<(
-        std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
-        std::collections::HashSet<bitcoin::OutPoint>,
-    )> {
-        let crate::BlockData {
-            blkheight,
-            blkhash: _,
-            tweaks: _,
-            new_utxo_filter: _,
-            spent_filter,
-        } = blockdata;
-
-        // after processing outputs, we add the found outputs to our list
-        self.owned_outpoints.extend(outs.keys());
-
-        let ins = self.process_block_inputs(blkheight, spent_filter)?;
-
-        // after processing inputs, we remove the found inputs
-        self.owned_outpoints.retain(|item| !ins.contains(item));
-
-        Ok((outs, ins))
     }
 
     fn match_block_outputs(
@@ -260,44 +198,6 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         Ok(res)
     }
 
-    fn process_block_inputs(
-        &self,
-        blkheight: bitcoin::absolute::Height,
-        spent_filter: crate::FilterData,
-    ) -> crate::error::Result<std::collections::HashSet<bitcoin::OutPoint>> {
-        let mut res = HashSet::new();
-
-        let blkhash = spent_filter.block_hash;
-
-        // first get the 8-byte hashes used to construct the input filter
-        let __t = std::time::Instant::now();
-        let input_hashes_map = self.get_input_hashes(blkhash)?;
-
-        // check against filter
-        let blkfilter = BlockFilter::new(&spent_filter.data);
-        let matched_inputs = self.check_block_inputs(
-            blkfilter,
-            blkhash,
-            input_hashes_map.keys().cloned().collect(),
-        )?;
-        crate::scan_profile::add(&crate::scan_profile::INPUT_NS, __t.elapsed());
-
-        // if match: download spent data, collect the outpoints that are spent
-        if matched_inputs {
-            log::info!("matched inputs on: {}", blkheight);
-            let spent = self.backend.spent_index(blkheight)?.data;
-
-            for spent in spent {
-                let hex: &[u8] = spent.as_ref();
-
-                if let Some(outpoint) = input_hashes_map.get(hex) {
-                    res.insert(*outpoint);
-                }
-            }
-        }
-        Ok(res)
-    }
-
     fn get_block_data_iterator(
         &self,
         range: std::ops::RangeInclusive<u32>,
@@ -356,13 +256,14 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         &mut self.updater
     }
 
-    fn get_input_hashes(
+    fn input_hashes_for(
         &self,
         blkhash: bitcoin::BlockHash,
+        owned: &std::collections::HashSet<bitcoin::OutPoint>,
     ) -> crate::error::Result<std::collections::HashMap<[u8; 8], bitcoin::OutPoint>> {
         let mut map: HashMap<[u8; 8], OutPoint> = HashMap::new();
 
-        for outpoint in &self.owned_outpoints {
+        for outpoint in owned {
             let mut arr = [0u8; 68];
             arr[..32].copy_from_slice(outpoint.txid.to_raw_hash().as_byte_array());
             arr[32..36].copy_from_slice(&outpoint.vout.to_le_bytes());
@@ -397,6 +298,13 @@ mod tests {
             _with_cutthrough: bool,
         ) -> crate::BlockDataIterator {
             Box::new(std::iter::empty())
+        }
+
+        fn spent_filter(&self, _block_height: Height) -> crate::error::Result<crate::FilterData> {
+            Ok(crate::FilterData {
+                block_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                data: vec![],
+            })
         }
 
         fn spent_index(&self, _block_height: Height) -> crate::error::Result<SpentIndexData> {
@@ -583,5 +491,143 @@ mod tests {
         );
 
         assert!(account.outpoints().is_empty());
+    }
+
+    // Regression: when the persisted spend frontier lags the receive frontier (a
+    // crash resumed receive past heights whose spend was never swept), the spend
+    // sweep must still cover heights below this call's `start`. Frontier is 30 and
+    // the scan is [61, 120], so the sweep must cover [31, 120], not just [61, 120].
+    #[test]
+    fn test_spend_sweep_covers_lagging_frontier_below_start() {
+        use std::sync::Mutex;
+
+        struct SweepBackend {
+            spent: Arc<Mutex<Vec<u32>>>,
+        }
+        impl ChainBackend for SweepBackend {
+            fn get_block_data_for_range(
+                &self,
+                range: RangeInclusive<u32>,
+                _dust_limit: Option<Amount>,
+                _with_cutthrough: bool,
+            ) -> crate::BlockDataIterator {
+                let blocks: Vec<crate::error::Result<crate::BlockData>> = range
+                    .map(|h| {
+                        Ok(crate::BlockData {
+                            blkheight: Height::from_consensus(h).expect("valid height"),
+                            blkhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                            tweaks: vec![],
+                            new_utxo_filter: crate::FilterData {
+                                block_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                                data: vec![0u8],
+                            },
+                        })
+                    })
+                    .collect();
+                Box::new(blocks.into_iter())
+            }
+            fn spent_filter(
+                &self,
+                block_height: Height,
+            ) -> crate::error::Result<crate::FilterData> {
+                self.spent
+                    .lock()
+                    .expect("poisoned")
+                    .push(block_height.to_consensus_u32());
+                // Valid GCS filter over zero elements (one CompactSize-0 byte), so
+                // match_any reads cleanly and matches nothing.
+                Ok(crate::FilterData {
+                    block_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                    data: vec![0u8],
+                })
+            }
+            fn spent_index(&self, _h: Height) -> crate::error::Result<SpentIndexData> {
+                Ok(SpentIndexData { data: vec![] })
+            }
+            fn utxos(&self, _h: Height) -> crate::error::Result<Vec<UtxoData>> {
+                Ok(vec![])
+            }
+            fn block_height(&self) -> crate::error::Result<Height> {
+                Ok(Height::from_consensus(120).expect("valid height"))
+            }
+        }
+
+        struct LagUpdater {
+            seed: HashSet<OutPoint>,
+            frontier: Option<u32>,
+        }
+        impl Updater for LagUpdater {
+            fn record_scan_progress(
+                &mut self,
+                _: Height,
+                _: Height,
+                _: Height,
+            ) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn record_block_outputs(
+                &mut self,
+                _: Height,
+                _: bitcoin::BlockHash,
+                _: HashMap<OutPoint, crate::OwnedOutput>,
+            ) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn record_block_inputs(
+                &mut self,
+                _: Height,
+                _: bitcoin::BlockHash,
+                _: HashSet<OutPoint>,
+            ) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn save_to_persistent_storage(&mut self) -> crate::error::Result<()> {
+                Ok(())
+            }
+            fn restore_owned_outpoints(&self) -> crate::error::Result<HashSet<OutPoint>> {
+                Ok(self.seed.clone())
+            }
+            fn spend_frontier(&self) -> crate::error::Result<Option<u32>> {
+                Ok(self.frontier)
+            }
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let spent = Arc::new(Mutex::new(Vec::new()));
+        let seed: HashSet<OutPoint> = [OutPoint {
+            txid: Txid::from_byte_array([7u8; 32]),
+            vout: 0,
+        }]
+        .into_iter()
+        .collect();
+
+        let mut account = SpAccount::restore(
+            SweepBackend {
+                spent: spent.clone(),
+            },
+            create_test_sp_client(),
+            LagUpdater {
+                seed,
+                frontier: Some(30),
+            },
+            stop,
+        )
+        .unwrap();
+
+        account
+            .scan_blocks(
+                Height::from_consensus(61).unwrap(),
+                Height::from_consensus(120).unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+
+        let swept = spent.lock().expect("poisoned").clone();
+        let expected: Vec<u32> = (31..=120).collect();
+        assert_eq!(
+            swept, expected,
+            "spend sweep must cover the lagging-frontier gap below start"
+        );
     }
 }

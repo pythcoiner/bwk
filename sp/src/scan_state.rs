@@ -14,6 +14,8 @@ const LAST_SCANNED_HEIGHT_ROW: &str = "last_scanned_height";
 const LAST_BLOCK_HASH_ROW: &str = "last_block_hash";
 /// Row key under the `account` store for [`ScanState::birthday_height`].
 const BIRTHDAY_HEIGHT_ROW: &str = "birthday_height";
+/// Row key under the `account` store for [`ScanState::last_spend_height`].
+const LAST_SPEND_HEIGHT_ROW: &str = "last_spend_height";
 
 // ScanState
 
@@ -23,11 +25,17 @@ const BIRTHDAY_HEIGHT_ROW: &str = "birthday_height";
 /// and the wallet's birthday height. The block hash is stored for reorg detection.
 #[derive(Clone)]
 pub struct ScanState {
-    /// The last successfully scanned block height (None if never scanned)
+    /// Receive (output) scan done up to here, not both passes (None if never
+    /// scanned). Drives `next_scan_start`; the spend pass trails it.
     last_scanned_height: Option<u32>,
 
-    /// The hash of the last scanned block (for reorg detection)
+    /// The hash of the last scanned block (for reorg detection). Corresponds to
+    /// `last_scanned_height`, the contiguous frontier of the receive pass.
     last_block_hash: Option<[u8; 32]>,
+
+    /// Spend (input) sweep done up to here (None if never swept). Trails the
+    /// receive frontier; persisted separately so a resume skips swept heights.
+    last_spend_height: Option<u32>,
 
     /// The wallet's birthday height (where scanning should start)
     birthday_height: u32,
@@ -40,6 +48,7 @@ impl Default for ScanState {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
+            last_spend_height: None,
             birthday_height: 0,
             backend: Arc::new(NoopBackend),
         }
@@ -51,6 +60,7 @@ impl std::fmt::Debug for ScanState {
         f.debug_struct("ScanState")
             .field("last_scanned_height", &self.last_scanned_height)
             .field("last_block_hash", &self.last_block_hash)
+            .field("last_spend_height", &self.last_spend_height)
             .field("birthday_height", &self.birthday_height)
             .finish()
     }
@@ -64,6 +74,7 @@ impl ScanState {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
+            last_spend_height: None,
             birthday_height,
             backend: Arc::new(NoopBackend),
         }
@@ -74,6 +85,7 @@ impl ScanState {
         Self {
             last_scanned_height: None,
             last_block_hash: None,
+            last_spend_height: None,
             birthday_height,
             backend,
         }
@@ -107,9 +119,16 @@ impl ScanState {
             None => birthday_height,
         };
 
+        let last_spend_height = match read_bytes(LAST_SPEND_HEIGHT_ROW)? {
+            Some(b) => serde_json::from_slice::<Option<u32>>(&b)
+                .map_err(|e| PersistError::Serde(format!("scan_state last_spend_height: {e}")))?,
+            None => None,
+        };
+
         Ok(Self {
             last_scanned_height,
             last_block_hash,
+            last_spend_height,
             birthday_height: birthday,
             backend,
         })
@@ -130,10 +149,39 @@ impl ScanState {
         self.birthday_height
     }
 
-    /// Update the scan state with a new height and block hash.
-    pub fn update(&mut self, height: u32, block_hash: [u8; 32]) {
-        self.last_scanned_height = Some(height);
-        self.last_block_hash = Some(block_hash);
+    /// Returns the highest spend-swept height, if any.
+    pub fn last_spend_height(&self) -> Option<u32> {
+        self.last_spend_height
+    }
+
+    /// Advance the spend frontier monotonically (only moves forward).
+    ///
+    /// Mirrors `advance_frontier` for the spend (input) sweep, which trails the
+    /// receive frontier.
+    pub fn advance_spend_frontier(&mut self, height: u32) {
+        let advance = match self.last_spend_height {
+            Some(h) => height > h,
+            None => true,
+        };
+        if advance {
+            self.last_spend_height = Some(height);
+        }
+    }
+
+    /// Advance the contiguous receive frontier monotonically with its block hash.
+    ///
+    /// Used by the two-phase receive pass as its contiguous tip fills in.
+    /// `last_block_hash` corresponds to `last_scanned_height` (the receive
+    /// frontier), so the height and hash always move together.
+    pub fn advance_frontier(&mut self, height: u32, block_hash: [u8; 32]) {
+        let advance = match self.last_scanned_height {
+            Some(h) => height > h,
+            None => true,
+        };
+        if advance {
+            self.last_scanned_height = Some(height);
+            self.last_block_hash = Some(block_hash);
+        }
     }
 
     /// Sets only the last scanned height without updating the block hash.
@@ -178,6 +226,10 @@ impl ScanState {
         match serde_json::to_vec(&self.birthday_height) {
             Ok(b) => write(BIRTHDAY_HEIGHT_ROW, &b),
             Err(e) => log::error!("ScanState::persist() encode birthday_height: {e}"),
+        }
+        match serde_json::to_vec(&self.last_spend_height) {
+            Ok(b) => write(LAST_SPEND_HEIGHT_ROW, &b),
+            Err(e) => log::error!("ScanState::persist() encode last_spend_height: {e}"),
         }
     }
 }
@@ -225,21 +277,21 @@ mod tests {
         let mut state = ScanState::new(100);
         let block_hash = [0xAB; 32];
 
-        state.update(150, block_hash);
+        state.advance_frontier(150, block_hash);
 
         // After scanning to 150, next scan starts at 151
         assert_eq!(state.next_scan_start(), 151);
     }
 
     #[test]
-    fn test_scan_state_update() {
+    fn test_scan_state_advance_frontier() {
         let mut state = ScanState::new(100);
         let block_hash = [0xCD; 32];
 
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
 
-        state.update(500, block_hash);
+        state.advance_frontier(500, block_hash);
 
         assert_eq!(state.last_scanned_height(), Some(500));
         assert_eq!(state.last_block_hash(), Some(block_hash));
@@ -261,7 +313,7 @@ mod tests {
             let backend = JsonBackend::open(temp_dir.clone()).unwrap();
             let account_path = backend.path_for(persist::ACCOUNT_STORE_KEY);
             let mut state = ScanState::with_backend(300, Arc::new(backend));
-            state.update(350, block_hash);
+            state.advance_frontier(350, block_hash);
             state.persist();
 
             // Singleton fields are persisted under the `account` store.
@@ -293,7 +345,7 @@ mod tests {
         let account_path = backend.path_for(persist::ACCOUNT_STORE_KEY);
         drop(backend);
         let mut state = ScanState::new(100);
-        state.update(150, [0xAA; 32]);
+        state.advance_frontier(150, [0xAA; 32]);
         state.persist();
 
         // Account file should NOT exist (persist is a noop)
@@ -331,8 +383,8 @@ mod tests {
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
 
-        // After update
-        state.update(600, block_hash);
+        // After advancing the frontier
+        state.advance_frontier(600, block_hash);
 
         assert_eq!(state.birthday_height(), 500); // Unchanged
         assert_eq!(state.last_scanned_height(), Some(600));
@@ -346,5 +398,44 @@ mod tests {
         assert_eq!(state.birthday_height(), 0);
         assert_eq!(state.last_scanned_height(), None);
         assert_eq!(state.last_block_hash(), None);
+        assert_eq!(state.last_spend_height(), None);
+    }
+
+    #[test]
+    fn test_advance_spend_frontier_is_monotonic() {
+        let mut state = ScanState::new(0);
+        assert_eq!(state.last_spend_height(), None);
+
+        state.advance_spend_frontier(100);
+        assert_eq!(state.last_spend_height(), Some(100));
+
+        // A lower height must not move the frontier backward.
+        state.advance_spend_frontier(50);
+        assert_eq!(state.last_spend_height(), Some(100));
+
+        state.advance_spend_frontier(200);
+        assert_eq!(state.last_spend_height(), Some(200));
+    }
+
+    #[test]
+    fn test_spend_frontier_persistence() {
+        use std::env;
+
+        let temp_dir = env::temp_dir().join("bwk-sp-spend-frontier-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        let _ = fs::create_dir_all(&temp_dir);
+
+        {
+            let backend = JsonBackend::open(temp_dir.clone()).unwrap();
+            let mut state = ScanState::with_backend(0, Arc::new(backend));
+            state.advance_spend_frontier(420);
+            state.persist();
+        }
+
+        let backend = Arc::new(JsonBackend::open(temp_dir.clone()).unwrap());
+        let loaded = ScanState::load_from_backend(0, backend).expect("load scan state");
+        assert_eq!(loaded.last_spend_height(), Some(420));
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }

@@ -15,6 +15,8 @@ pub enum Error {
     WrongNetwork(String),
     #[error("invalid scan range: start ({0}) > end ({1})")]
     InvalidRange(u32, u32),
+    #[error("missing block hash for scanned block {0}")]
+    MissingBlockHash(u32),
     #[error("unknown recipient address type")]
     UnknownAddressType,
 

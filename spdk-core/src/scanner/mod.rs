@@ -51,45 +51,17 @@ pub trait SpScanner {
         with_cutthrough: bool,
     ) -> Result<()>;
 
-    /// Process a single block's data
-    ///
-    /// # Arguments
-    /// * `blockdata` - Block data containing tweaks and filters
-    ///
-    /// # Returns
-    /// * `(found_outputs, found_inputs)` - Tuple of found outputs and spent inputs
-    fn process_block(
-        &mut self,
-        blockdata: BlockData,
-    ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)>;
-
     /// Read-only output matching for a single block.
     ///
     /// This is the expensive, embarrassingly-parallel part of the scan
     /// (candidate-spk derivation + GCS output-filter test + UTXO scan). It only
     /// reads `&self` (the client / backend) and the block's own data, so it can
-    /// be run concurrently across a window of blocks. The order-dependent state
-    /// updates live in [`commit_block`](SpScanner::commit_block).
+    /// be run concurrently across a window of blocks by the two-phase receive
+    /// pass.
     ///
     /// # Returns
     /// * Map of outpoints to owned outputs found in this block
     fn match_block_outputs(&self, blockdata: &BlockData) -> Result<HashMap<OutPoint, OwnedOutput>>;
-
-    /// Commit a block's matched outputs, then match + record its inputs.
-    ///
-    /// This is the ordered, state-mutating counterpart of
-    /// [`match_block_outputs`](SpScanner::match_block_outputs): it extends the
-    /// owned-outpoint set with `outputs`, matches inputs against that set (which
-    /// depends on every prior block's commit), and removes spent outpoints. It
-    /// MUST be called in ascending block-height order.
-    ///
-    /// # Returns
-    /// * `(found_outputs, found_inputs)` - echoes `outputs` and the spent inputs
-    fn commit_block(
-        &mut self,
-        blockdata: BlockData,
-        outputs: HashMap<OutPoint, OwnedOutput>,
-    ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)>;
 
     /// Process block outputs to find owned silent payment outputs
     ///
@@ -107,21 +79,10 @@ pub trait SpScanner {
         new_utxo_filter: FilterData,
     ) -> Result<HashMap<OutPoint, OwnedOutput>>;
 
-    /// Process block inputs to find spent outputs
+    /// Get the receive-only block data iterator for a range of blocks.
     ///
-    /// # Arguments
-    /// * `blkheight` - Block height
-    /// * `spent_filter` - Filter data for spent outputs
-    ///
-    /// # Returns
-    /// * Set of spent outpoints
-    fn process_block_inputs(
-        &self,
-        blkheight: Height,
-        spent_filter: FilterData,
-    ) -> Result<HashSet<OutPoint>>;
-
-    /// Get the block data iterator for a range of blocks
+    /// Used by the two-phase receive pass; the spent filter is fetched
+    /// separately in the spend sweep.
     ///
     /// # Arguments
     /// * `range` - Range of block heights
@@ -135,7 +96,10 @@ pub trait SpScanner {
         range: std::ops::RangeInclusive<u32>,
         dust_limit: Option<Amount>,
         with_cutthrough: bool,
-    ) -> crate::BlockDataIterator;
+    ) -> crate::BlockDataIterator {
+        self.backend()
+            .get_block_data_for_range(range, dust_limit, with_cutthrough)
+    }
 
     /// Check if scanning should be interrupted
     ///
@@ -190,77 +154,6 @@ pub trait SpScanner {
     fn updater(&mut self) -> &mut dyn Updater;
 
     // Helper methods with default implementations
-
-    /// Process multiple blocks from an iterator
-    ///
-    /// This is a default implementation that can be overridden if needed.
-    /// Blocks are processed as soon as they form a contiguous sequence from start,
-    /// allowing pipelining with parallel fetching. Out-of-order blocks are buffered
-    /// until earlier blocks arrive. If any block fetch fails, the error is returned
-    /// after processing all successfully fetched blocks.
-    fn process_blocks<I>(&mut self, start: Height, end: Height, block_data_iter: I) -> Result<()>
-    where
-        I: Iterator<Item = Result<BlockData>>,
-        Self: MaybeSync,
-    {
-        process_ordered_block_results(
-            self,
-            start,
-            end,
-            block_data_iter,
-            |scanner, blockdata, matched_outputs, save_to_storage| {
-                let blkheight = blockdata.blkheight;
-                let blkhash = blockdata.blkhash;
-
-                let (found_outputs, found_inputs) =
-                    scanner.commit_block(blockdata, matched_outputs)?;
-
-                let mut save_to_storage = save_to_storage;
-                if !found_outputs.is_empty() {
-                    save_to_storage = true;
-                    scanner.record_outputs(blkheight, blkhash, found_outputs)?;
-                }
-
-                if !found_inputs.is_empty() {
-                    save_to_storage = true;
-                    scanner.record_inputs(blkheight, blkhash, found_inputs)?;
-                }
-
-                scanner.record_progress(start, blkheight, end)?;
-
-                if save_to_storage {
-                    scanner.save_state()?;
-                }
-
-                Ok(())
-            },
-        )
-    }
-
-    /// Helper method to process blocks sequentially
-    ///
-    /// # Arguments
-    /// * `start` - Start height
-    /// * `end` - End height
-    /// * `block_data_iter` - Iterator of block data
-    /// * `with_cutthrough` - Whether cutthrough is enabled (unused, kept for API compatibility)
-    ///
-    /// # Returns
-    /// * Result indicating success or failure
-    fn process_blocks_auto<I>(
-        &mut self,
-        start: Height,
-        end: Height,
-        block_data_iter: I,
-        _with_cutthrough: bool,
-    ) -> Result<()>
-    where
-        I: Iterator<Item = Result<BlockData>>,
-        Self: MaybeSync,
-    {
-        // Always use sequential processing
-        self.process_blocks(start, end, block_data_iter)
-    }
 
     /// Scan UTXOs for a given block and secrets map
     ///
@@ -414,8 +307,71 @@ pub trait SpScanner {
         }
     }
 
-    /// Get input hashes for owned outpoints
-    fn get_input_hashes(&self, blkhash: BlockHash) -> Result<HashMap<[u8; 8], OutPoint>>;
+    /// Get input hashes for an explicit owned-outpoint set.
+    ///
+    /// The two-phase spend pass owns its set in memory (it is not on `self`),
+    /// so this takes the set as a parameter instead of reading the scanner's.
+    fn input_hashes_for(
+        &self,
+        blkhash: BlockHash,
+        owned: &HashSet<OutPoint>,
+    ) -> Result<HashMap<[u8; 8], OutPoint>>;
+
+    /// Match a block's spent filter against an explicit owned set.
+    ///
+    /// Order-free spend detection used by the two-phase pass: builds the input
+    /// hashes for `owned`, tests the GCS spent filter, and on a hit fetches the
+    /// spent index and returns the owned outpoints spent in this block.
+    fn match_inputs_for(
+        &self,
+        blkheight: Height,
+        spent_filter: FilterData,
+        owned: &HashSet<OutPoint>,
+    ) -> Result<HashSet<OutPoint>> {
+        let mut res = HashSet::new();
+        let blkhash = spent_filter.block_hash;
+        let input_hashes_map = self.input_hashes_for(blkhash, owned)?;
+
+        let blkfilter = BlockFilter::new(&spent_filter.data);
+        let matched_inputs = self.check_block_inputs(
+            blkfilter,
+            blkhash,
+            input_hashes_map.keys().cloned().collect(),
+        )?;
+
+        if matched_inputs {
+            let spent = self.backend().spent_index(blkheight)?.data;
+            for spent in spent {
+                let hex: &[u8] = spent.as_ref();
+                if let Some(outpoint) = input_hashes_map.get(hex) {
+                    res.insert(*outpoint);
+                }
+            }
+        }
+        Ok(res)
+    }
+
+    /// Advance the contiguous receive frontier to a fully received block.
+    ///
+    /// Used by the two-phase receive pass as its contiguous tip fills in, so the
+    /// frontier stays contiguous and monotonic despite order-free commits.
+    fn record_frontier(&mut self, height: Height, block_hash: BlockHash) -> Result<()> {
+        self.updater().record_scan_frontier(height, block_hash)
+    }
+
+    /// Advance the spend frontier to a fully swept height.
+    ///
+    /// Used by the two-phase spend sweep; the default delegates to the updater.
+    fn record_spend_frontier(&mut self, height: Height) -> Result<()> {
+        self.updater().record_spend_frontier(height)
+    }
+
+    /// Return the highest spend-swept height, if any.
+    ///
+    /// Used to resume the spend sweep; the default delegates to the updater.
+    fn spend_frontier(&mut self) -> Result<Option<u32>> {
+        self.updater().spend_frontier()
+    }
 
     /// Check if block contains relevant input transactions
     ///
@@ -469,121 +425,6 @@ fn match_window_cap() -> usize {
         .min(MATCH_WINDOW_MAX)
 }
 
-/// Drain block results in height order and run a callback for each contiguous block.
-///
-/// Output matching is performed in parallel across a window of contiguous blocks
-/// (sized to the core count, read-only on the scanner), then `handle_block` is invoked
-/// once per block in ascending height order with that block's matched outputs,
-/// so the order-dependent commit/record/save semantics are byte-identical to the
-/// old per-block sequential path.
-pub fn process_ordered_block_results<S, I, F>(
-    scanner: &mut S,
-    start: Height,
-    end: Height,
-    block_data_iter: I,
-    mut handle_block: F,
-) -> Result<()>
-where
-    S: SpScanner + MaybeSync + ?Sized,
-    I: Iterator<Item = Result<BlockData>>,
-    F: FnMut(&mut S, BlockData, HashMap<OutPoint, OwnedOutput>, bool) -> Result<()>,
-{
-    use std::collections::BTreeMap;
-    use std::time::{Duration, Instant};
-
-    let mut iter = block_data_iter;
-    let mut update_time = Instant::now();
-    let mut pending: BTreeMap<u32, BlockData> = BTreeMap::new();
-    let mut next_height = start.to_consensus_u32();
-    let end_height = end.to_consensus_u32();
-    let mut first_error: Option<crate::error::Error> = None;
-
-    // Window of contiguous in-order blocks awaiting parallel output matching,
-    // sized to the core count (~one block per core) and capped, so it fills cores
-    // on many-core machines without over-buffering on low-core ones.
-    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-    let window_cap = match_window_cap();
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
-    let window_cap = 1usize;
-
-    // Process buffered in-order blocks BEFORE pulling more from the fetch channel.
-    // We only pull when the next height isn't already buffered, so `pending` stays
-    // bounded to the fetch reorder window instead of absorbing the whole range, and
-    // the bounded fetch channel can apply backpressure (workers block on send while
-    // we're busy matching). The earlier "pull one every iteration" loop drained the
-    // channel into `pending` faster than matching, defeating backpressure and
-    // buffering all blocks in RAM.
-    'outer: loop {
-        // Collect up to `window_cap` contiguous blocks starting at `next_height`,
-        // pulling from the fetch channel only as far as needed to fill the gap at
-        // each successive height. We stop early at the first missing height so the
-        // window is always a contiguous run (preserving in-order processing and the
-        // bounded-pull backpressure).
-        let mut window: Vec<BlockData> = Vec::with_capacity(window_cap);
-        let mut want = next_height;
-        while window.len() < window_cap {
-            while !pending.contains_key(&want) {
-                match iter.next() {
-                    Some(Ok(blockdata)) => {
-                        pending.insert(blockdata.blkheight.to_consensus_u32(), blockdata);
-                    }
-                    Some(Err(e)) => {
-                        if first_error.is_none() {
-                            first_error = Some(e);
-                        }
-                    }
-                    None => break,
-                }
-            }
-            match pending.remove(&want) {
-                Some(blockdata) => {
-                    window.push(blockdata);
-                    want += 1;
-                }
-                // Channel drained without producing this height: end of stream.
-                None => break,
-            }
-        }
-
-        if window.is_empty() {
-            break 'outer;
-        }
-
-        // Check interrupt once per window (the previous per-block check is
-        // preserved at window granularity; W blocks is a small unit of work).
-        if scanner.should_interrupt() {
-            scanner.save_state()?;
-            return Ok(());
-        }
-
-        // Parallel, read-only output matching across the window. Results are
-        // collected per block; the first error (lowest index) is propagated.
-        let matched = match_window_outputs(scanner, &window)?;
-
-        // Commit each block IN ORDER: this is the only order-dependent work and
-        // its semantics (owned_outpoints update, input match, record, progress,
-        // 30s/last-block save cadence) are identical to the old loop.
-        for (blockdata, outs) in window.into_iter().zip(matched) {
-            let blkheight = blockdata.blkheight;
-
-            let save_to_storage = blkheight.to_consensus_u32() == end_height
-                || update_time.elapsed() > Duration::from_secs(30);
-            handle_block(scanner, blockdata, outs, save_to_storage)?;
-
-            if save_to_storage {
-                update_time = Instant::now();
-            }
-
-            next_height = blkheight.to_consensus_u32() + 1;
-        }
-    }
-
-    match first_error {
-        Some(e) => Err(e),
-        None => Ok(()),
-    }
-}
-
 /// Match outputs for every block in `window` (read-only), preserving order.
 ///
 /// Native+parallel: the blocks are matched concurrently with `par_iter`
@@ -612,182 +453,184 @@ where
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::error::Error;
-    use bitcoin::hashes::Hash;
-    use std::cell::RefCell;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+/// How often the receive frontier and spend frontier are persisted.
+const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-    struct MockScanner {
-        saves: AtomicUsize,
+/// Two-phase, order-free scan over `[start, end]` with two persisted frontiers.
+///
+/// RECEIVE frontier: highest height whose receive (output) scan is contiguously
+/// done. Drives the caller's `next_scan_start`. SPEND frontier: highest height
+/// whose spend (input) sweep is done; trails the receive frontier.
+///
+/// Phase 1 runs a single order-free receive pass over `[start, end]`: blocks are
+/// matched in arrival order (a slow block does not stall others), discovered
+/// coins are recorded and added to `owned`, and a completion bitmap advances the
+/// contiguous receive frontier, checkpointed about once a minute. Phase 2 then
+/// sweeps spends over the un-swept tail up to `end` (the receive frontier).
+///
+/// `owned` is the starting owned outpoint set (restored coins plus any found
+/// here). Returns the final in-memory owned set so the caller can refresh its
+/// owned-outpoint view.
+pub fn process_two_phase<S>(
+    scanner: &mut S,
+    start: Height,
+    end: Height,
+    dust_limit: Option<Amount>,
+    with_cutthrough: bool,
+    mut owned: HashSet<OutPoint>,
+) -> Result<HashSet<OutPoint>>
+where
+    S: SpScanner + MaybeSync + ?Sized,
+{
+    use std::time::Instant;
+
+    let start_u32 = start.to_consensus_u32();
+    let end_u32 = end.to_consensus_u32();
+    let len = (end_u32 - start_u32 + 1) as usize;
+
+    // Seed the spend frontier to start-1 before receiving, so a crash mid-receive
+    // resumes the spend sweep from this floor rather than from a later receive
+    // frontier. Nothing below `start` was received without also being spend-swept,
+    // so start-1 is the correct floor on the first run.
+    if scanner.spend_frontier()?.is_none() {
+        if let Some(floor) = start_u32.checked_sub(1) {
+            scanner.record_spend_frontier(Height::from_consensus(floor)?)?;
+            scanner.save_state()?;
+        }
     }
 
-    impl MockScanner {
-        fn new() -> Self {
-            Self {
-                saves: AtomicUsize::new(0),
+    // Phase 1 RECEIVE: order-free over [start, end]. `done`/`hashes` record which
+    // heights have been received and their block hash; `recv_tip` is the highest
+    // contiguously-done height (the receive frontier), advancing only as the gap
+    // below it fills, so a slow block never stalls others.
+    let mut iter =
+        scanner.get_block_data_iterator(start_u32..=end_u32, dust_limit, with_cutthrough);
+    let mut done = vec![false; len];
+    let mut hashes: Vec<Option<BlockHash>> = vec![None; len];
+    let mut recv_tip: Option<u32> = None;
+    let mut first_error: Option<crate::error::Error> = None;
+    let mut last_checkpoint = Instant::now();
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+    let window_cap = match_window_cap();
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+    let window_cap = 1usize;
+
+    'receive: loop {
+        // Pull up to `window_cap` blocks in arrival order (no height gating).
+        let mut window: Vec<BlockData> = Vec::with_capacity(window_cap);
+        while window.len() < window_cap {
+            match iter.next() {
+                Some(Ok(blockdata)) => window.push(blockdata),
+                Some(Err(e)) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+                None => break,
             }
         }
-    }
 
-    impl SpScanner for MockScanner {
-        fn scan_blocks(
-            &mut self,
-            _start: Height,
-            _end: Height,
-            _dust_limit: Option<Amount>,
-            _with_cutthrough: bool,
-        ) -> Result<()> {
-            panic!("not used");
+        if window.is_empty() {
+            break 'receive;
         }
 
-        fn process_block(
-            &mut self,
-            _blockdata: BlockData,
-        ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)> {
-            panic!("not used");
+        if scanner.should_interrupt() {
+            scanner.save_state()?;
+            return Ok(owned);
         }
 
-        fn match_block_outputs(
-            &self,
-            _blockdata: &BlockData,
-        ) -> Result<HashMap<OutPoint, OwnedOutput>> {
-            Ok(HashMap::new())
+        let matched = match_window_outputs(scanner, &window)?;
+
+        for (blockdata, outs) in window.into_iter().zip(matched) {
+            let blkheight = blockdata.blkheight;
+            let blkhash = blockdata.blkhash;
+            let idx = (blkheight.to_consensus_u32() - start_u32) as usize;
+            done[idx] = true;
+            hashes[idx] = Some(blkhash);
+            if !outs.is_empty() {
+                for outpoint in outs.keys() {
+                    owned.insert(*outpoint);
+                }
+                scanner.record_outputs(blkheight, blkhash, outs)?;
+            }
         }
 
-        fn commit_block(
-            &mut self,
-            _blockdata: BlockData,
-            _outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)> {
-            panic!("not used");
+        // Advance the contiguous receive frontier over any newly-filled gap.
+        let mut next = recv_tip.map(|h| h + 1).unwrap_or(start_u32);
+        while next <= end_u32 && done[(next - start_u32) as usize] {
+            recv_tip = Some(next);
+            next += 1;
         }
 
-        fn process_block_outputs(
-            &self,
-            _blkheight: Height,
-            _tweaks: &[bitcoin::secp256k1::PublicKey],
-            _new_utxo_filter: FilterData,
-        ) -> Result<HashMap<OutPoint, OwnedOutput>> {
-            panic!("not used");
-        }
-
-        fn process_block_inputs(
-            &self,
-            _blkheight: Height,
-            _spent_filter: FilterData,
-        ) -> Result<HashSet<OutPoint>> {
-            panic!("not used");
-        }
-
-        fn get_block_data_iterator(
-            &self,
-            _range: std::ops::RangeInclusive<u32>,
-            _dust_limit: Option<Amount>,
-            _with_cutthrough: bool,
-        ) -> crate::BlockDataIterator {
-            panic!("not used");
-        }
-
-        fn should_interrupt(&self) -> bool {
-            false
-        }
-
-        fn save_state(&mut self) -> Result<()> {
-            self.saves.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        }
-
-        fn record_outputs(
-            &mut self,
-            _height: Height,
-            _block_hash: BlockHash,
-            _outputs: HashMap<OutPoint, OwnedOutput>,
-        ) -> Result<()> {
-            panic!("not used");
-        }
-
-        fn record_inputs(
-            &mut self,
-            _height: Height,
-            _block_hash: BlockHash,
-            _inputs: HashSet<OutPoint>,
-        ) -> Result<()> {
-            panic!("not used");
-        }
-
-        fn record_progress(
-            &mut self,
-            _start: Height,
-            _current: Height,
-            _end: Height,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        fn client(&self) -> &SpClient {
-            panic!("not used");
-        }
-
-        fn backend(&self) -> &dyn ChainBackend {
-            panic!("not used");
-        }
-
-        fn updater(&mut self) -> &mut dyn Updater {
-            panic!("not used");
-        }
-
-        fn get_input_hashes(&self, _blkhash: BlockHash) -> Result<HashMap<[u8; 8], OutPoint>> {
-            panic!("not used");
+        // Checkpoint the receive frontier about once a minute.
+        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            if let Some(tip) = recv_tip {
+                let idx = (tip - start_u32) as usize;
+                let hash = hashes[idx].ok_or(crate::error::Error::MissingBlockHash(tip))?;
+                scanner.record_frontier(Height::from_consensus(tip)?, hash)?;
+                scanner.record_progress(start, Height::from_consensus(tip)?, end)?;
+                scanner.save_state()?;
+            }
+            last_checkpoint = Instant::now();
         }
     }
 
-    fn block(height: u32) -> BlockData {
-        BlockData {
-            blkheight: Height::from_consensus(height).expect("valid height"),
-            blkhash: BlockHash::from_byte_array([height as u8; 32]),
-            tweaks: Vec::new(),
-            new_utxo_filter: FilterData {
-                block_hash: BlockHash::from_byte_array([height as u8; 32]),
-                data: Vec::new(),
-            },
-            spent_filter: FilterData {
-                block_hash: BlockHash::from_byte_array([height as u8; 32]),
-                data: Vec::new(),
-            },
+    if let Some(e) = first_error {
+        return Err(e);
+    }
+
+    // The receive frontier must reach `end`; a short stream means a missing block.
+    if recv_tip != Some(end_u32) {
+        return Err(crate::error::Error::MissingBlockHash(end_u32));
+    }
+    let end_hash = hashes[len - 1].ok_or(crate::error::Error::MissingBlockHash(end_u32))?;
+    scanner.record_frontier(end, end_hash)?;
+    scanner.record_progress(start, end, end)?;
+    scanner.save_state()?;
+
+    // Phase 2 SPEND: sweep the un-swept tail. INVARIANT: spend only sweeps heights
+    // <= the receive frontier (now `end`), so the owned set is complete for every
+    // swept height. A coin received at N can be spent only at M >= N, and N is
+    // above the prior receive frontier (>= spend frontier), so M is always in this
+    // un-swept tail; this is what prevents missing such a spend.
+    // spend_start can trail `start`: the spend frontier persists separately and may
+    // lag the receive frontier after a crash, so the sweep covers the un-swept tail
+    // [spend_frontier+1 .. end] even where that dips below this call's start.
+    let spend_start = scanner
+        .spend_frontier()?
+        .map(|h| h + 1)
+        .unwrap_or(start_u32);
+    let mut last_checkpoint = Instant::now();
+    for h in spend_start..=end_u32 {
+        if scanner.should_interrupt() {
+            scanner.save_state()?;
+            return Ok(owned);
+        }
+        if owned.is_empty() {
+            break;
+        }
+        let height = Height::from_consensus(h)?;
+        let spent_filter = scanner.backend().spent_filter(height)?;
+        let blkhash = spent_filter.block_hash;
+        let ins = scanner.match_inputs_for(height, spent_filter, &owned)?;
+        if !ins.is_empty() {
+            for outpoint in &ins {
+                owned.remove(outpoint);
+            }
+            scanner.record_inputs(height, blkhash, ins)?;
+        }
+        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            scanner.record_spend_frontier(height)?;
+            scanner.save_state()?;
+            last_checkpoint = Instant::now();
         }
     }
+    // Persist the spend frontier once more at the end (last fully swept height).
+    scanner.record_spend_frontier(end)?;
+    scanner.save_state()?;
 
-    #[test]
-    fn drains_blocks_in_order_and_returns_first_error() {
-        let mut scanner = MockScanner::new();
-        let seen = RefCell::new(Vec::new());
-        let blocks = vec![
-            Ok(block(2)),
-            Ok(block(1)),
-            Err(Error::Sighash("boom".to_string())),
-            Ok(block(3)),
-        ];
-
-        let err = process_ordered_block_results(
-            &mut scanner,
-            Height::from_consensus(1).expect("valid height"),
-            Height::from_consensus(3).expect("valid height"),
-            blocks.into_iter(),
-            |_, blockdata, _matched_outputs, save_to_storage| {
-                seen.borrow_mut()
-                    .push((blockdata.blkheight.to_consensus_u32(), save_to_storage));
-                Ok(())
-            },
-        )
-        .expect_err("expected first fetch error");
-
-        assert_eq!(seen.into_inner(), vec![(1, false), (2, false), (3, true)]);
-        assert_eq!(err.to_string(), "sighash: boom");
-        assert_eq!(scanner.saves.load(Ordering::Relaxed), 0);
-    }
+    Ok(owned)
 }
 
 /// Async version of SpScanner for non-blocking I/O operations

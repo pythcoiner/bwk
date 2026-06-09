@@ -33,6 +33,31 @@ pub trait Updater {
         found_inputs: HashSet<OutPoint>,
     ) -> Result<()>;
 
+    /// Advance the contiguous scan frontier to a fully scanned block.
+    ///
+    /// Used by the two-phase scan at a sub-range boundary, where receives and
+    /// spends are recorded order-free and must not move the frontier per block.
+    /// The default is a no-op for updaters that do not track a frontier.
+    fn record_scan_frontier(&mut self, _height: Height, _block_hash: BlockHash) -> Result<()> {
+        Ok(())
+    }
+
+    /// Advance the spend frontier to a fully swept height.
+    ///
+    /// The spend (input) sweep trails the receive frontier; this persists how far
+    /// it has run so a resume skips swept heights. Default is a no-op for updaters
+    /// that do not track it.
+    fn record_spend_frontier(&mut self, _height: Height) -> Result<()> {
+        Ok(())
+    }
+
+    /// Return the highest spend-swept height, if any.
+    ///
+    /// Default is `None` (sweep starts from the scan range start).
+    fn spend_frontier(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Ask the updater to save all recorded changes to persistent storage.
     fn save_to_persistent_storage(&mut self) -> Result<()>;
 

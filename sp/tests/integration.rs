@@ -1768,7 +1768,9 @@ fn test_notification_order_full_sequence() {
     // 12. Verify notification order
     let notifs = notifications.lock().expect("poisoned");
 
-    // Should have: ScanProgress* -> OutputFound -> SaveCalled
+    // Two-phase order within a sub-range: the receive pass records discovered
+    // outputs first, then the sub-range boundary records progress and persists
+    // state. So: OutputFound -> ScanProgress -> SaveCalled.
     assert!(!notifs.is_empty(), "Should have received notifications");
 
     // Find the indices
@@ -1784,7 +1786,7 @@ fn test_notification_order_full_sequence() {
         }
     }
 
-    // Verify we got progress notifications
+    // Verify we got progress notifications (recorded at the sub-range boundary).
     assert!(
         !progress_indices.is_empty(),
         "Should have received ScanProgress notifications"
@@ -1796,15 +1798,15 @@ fn test_notification_order_full_sequence() {
     // Verify save was called
     let save_idx = save_index.expect("Should have received SaveCalled notification");
 
-    // Verify order: progress notifications come before or at the same time as output
-    // (progress is called as we scan through blocks)
-    let first_progress = *progress_indices.first().unwrap();
+    // Verify order: the output is recorded in the receive pass, before the
+    // boundary progress notification and the boundary state persist.
+    let last_progress = *progress_indices.last().unwrap();
     assert!(
-        first_progress <= output_idx,
-        "ScanProgress should come before or during OutputFound"
+        output_idx < last_progress,
+        "OutputFound (index {output_idx}) should come before the boundary ScanProgress (index {last_progress})"
     );
 
-    // Verify order: save comes after output
+    // Verify order: save comes after output (state persisted after recording it).
     assert!(
         output_idx < save_idx,
         "OutputFound (index {output_idx}) should come before SaveCalled (index {save_idx})"

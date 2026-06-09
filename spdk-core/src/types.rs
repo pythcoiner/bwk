@@ -5,7 +5,6 @@ pub struct BlockData {
     pub blkhash: BlockHash,
     pub tweaks: Vec<PublicKey>,
     pub new_utxo_filter: FilterData,
-    pub spent_filter: FilterData,
 }
 
 #[derive(Clone)]

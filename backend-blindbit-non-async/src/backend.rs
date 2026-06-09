@@ -115,6 +115,14 @@ impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
         Box::new(receiver.into_iter())
     }
 
+    /// Fetch the spent filter for a single height (two-phase spend pass).
+    pub fn spent_filter(
+        &self,
+        block_height: Height,
+    ) -> crate::error::Result<spdk_core::FilterData> {
+        Ok(self.client.filter_spent(block_height)?.into())
+    }
+
     /// Get spent index data for a block height
     pub fn spent_index(&self, block_height: Height) -> crate::error::Result<SpentIndexData> {
         Ok(self.client.spent_index(block_height)?.into())
@@ -168,14 +176,9 @@ fn get_block_data_for_height<H>(
             return;
         }
     };
+    // Receive-only fetch (two-phase receive pass): the spent filter is fetched
+    // separately by the spend sweep, never here.
     let new_utxo_filter = match client.filter_new_utxos(blkheight) {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = sender.send(Err(spdk_core::Error::from(e)));
-            return;
-        }
-    };
-    let spent_filter = match client.filter_spent(blkheight) {
         Ok(f) => f,
         Err(e) => {
             let _ = sender.send(Err(spdk_core::Error::from(e)));
@@ -188,7 +191,6 @@ fn get_block_data_for_height<H>(
         blkhash,
         tweaks,
         new_utxo_filter: new_utxo_filter.into(),
-        spent_filter: spent_filter.into(),
     }));
 }
 
@@ -200,6 +202,13 @@ impl<H: HttpClient + Clone + 'static> ChainBackend for BlindbitBackend<H> {
         with_cutthrough: bool,
     ) -> spdk_core::BlockDataIterator {
         self.get_block_data_for_range(range, dust_limit, with_cutthrough)
+    }
+
+    fn spent_filter(
+        &self,
+        block_height: Height,
+    ) -> spdk_core::error::Result<spdk_core::FilterData> {
+        Ok(self.spent_filter(block_height)?)
     }
 
     fn spent_index(&self, block_height: Height) -> spdk_core::error::Result<SpentIndexData> {

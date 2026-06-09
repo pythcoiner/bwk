@@ -1596,3 +1596,536 @@ fn test_sp_address_generation() {
         "SP address should start with 'sp' or 'tsp', got: {addr_str}"
     );
 }
+
+/// Two-phase correctness: a coin received then spent within the scan range is
+/// detected as received (in the receive pass over the whole range) and then
+/// marked spent (in the trailing spend sweep). The seeded case drives the spend
+/// path directly off the spent filter + spent index (independent of the oracle's
+/// cut-through).
+#[test]
+fn test_two_phase_detects_receive_then_spend() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use bitcoin::absolute::Height;
+    use bitcoin::{Amount, BlockHash};
+    use bwk_sign::{bip39, HotSigner};
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use spdk_core::account::SpAccount;
+    use spdk_core::{
+        FeeRate, OwnedOutput, Recipient, RecipientAddress, SpClient, SpScanner, Updater,
+    };
+
+    // Captures every recorded output and spent input over a scan.
+    struct TrackingUpdater {
+        outputs: Arc<Mutex<HashMap<OutPoint, OwnedOutput>>>,
+        spent: Arc<Mutex<HashSet<OutPoint>>>,
+    }
+    impl Updater for TrackingUpdater {
+        fn record_scan_progress(
+            &mut self,
+            _: Height,
+            _: Height,
+            _: Height,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_block_outputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            outputs: HashMap<OutPoint, OwnedOutput>,
+        ) -> Result<(), spdk_core::Error> {
+            self.outputs.lock().expect("poisoned").extend(outputs);
+            Ok(())
+        }
+        fn record_block_inputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            inputs: HashSet<OutPoint>,
+        ) -> Result<(), spdk_core::Error> {
+            self.spent.lock().expect("poisoned").extend(inputs);
+            Ok(())
+        }
+        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(HashSet::new())
+        }
+    }
+
+    // Restores a fixed owned set (simulating a reloaded wallet) and tracks spends.
+    struct SeedUpdater {
+        seed: HashSet<OutPoint>,
+        spent: Arc<Mutex<HashSet<OutPoint>>>,
+    }
+    impl Updater for SeedUpdater {
+        fn record_scan_progress(
+            &mut self,
+            _: Height,
+            _: Height,
+            _: Height,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_block_outputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            _: HashMap<OutPoint, OwnedOutput>,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_block_inputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            inputs: HashSet<OutPoint>,
+        ) -> Result<(), spdk_core::Error> {
+            self.spent.lock().expect("poisoned").extend(inputs);
+            Ok(())
+        }
+        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(self.seed.clone())
+        }
+    }
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let network = bitcoin::Network::Regtest;
+
+    let mut bbd = BlindbitD::new().unwrap();
+    let client = UreqClient::new();
+    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+
+    let mut bitcoind_node = bbd.bitcoin().unwrap();
+    let bitcoind = &mut bitcoind_node.client;
+
+    bwk_test::generate_blocks(bitcoind, 101);
+    wait_for_sync_and_index(&backend, 101);
+
+    let mnemonic_str = test_mnemonic();
+    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
+    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
+        .expect("create taproot signer");
+    let sp_address = sp_client.get_receiving_address();
+
+    // Use the oracle's reported endpoint mode (as the wallet does).
+    let with_cutthrough = backend
+        .info()
+        .map(|i| i.tweaks_cut_through_with_dust_filter)
+        .unwrap_or(false);
+
+    // Fund a taproot key and swap it to our SP address (one SP output at vout 0).
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
+    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
+    bwk_test::generate_blocks(bitcoind, 2);
+    wait_until_sync_at_height(&backend, 103);
+    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+    let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
+        .into_iter()
+        .next()
+        .expect("find txout");
+    let fund_outpoint = OutPoint {
+        txid: fund_txid,
+        vout: index as u32,
+    };
+    let recipient_pubkey = generate_recipient_pubkey(sk, fund_outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
+    let sp_tx = swap_to_sp(
+        sk,
+        fund_outpoint,
+        txout,
+        recipient_pubkey,
+        Amount::from_sat(1000),
+        &secp,
+    )
+    .expect("create sp tx");
+    let sp_txid = sp_tx.compute_txid();
+    bitcoind
+        .send_raw_transaction(&sp_tx)
+        .expect("broadcast sp tx");
+    bwk_test::generate_blocks(bitcoind, 1);
+    let recv_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("recv height") as u32;
+    wait_for_sync_and_index(&backend, recv_height);
+    let received = OutPoint {
+        txid: sp_txid,
+        vout: 0,
+    };
+
+    // Discover the real owned output (with its correct tweak) so the spend can
+    // be signed and accepted on-chain.
+    let discover_outputs = Arc::new(Mutex::new(HashMap::new()));
+    let discover_updater = TrackingUpdater {
+        outputs: discover_outputs.clone(),
+        spent: Arc::new(Mutex::new(HashSet::new())),
+    };
+    let mut discover_scanner = SpAccount::new(
+        BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap(),
+        sp_client.clone(),
+        discover_updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    discover_scanner
+        .scan_blocks(
+            Height::from_consensus(1).unwrap(),
+            Height::from_consensus(recv_height).unwrap(),
+            None,
+            with_cutthrough,
+        )
+        .expect("discover scan");
+    let received_out = discover_outputs
+        .lock()
+        .expect("poisoned")
+        .get(&received)
+        .cloned()
+        .expect("discovered the received SP output");
+
+    // Spend the received coin back to our SP address (new owned output; the
+    // original becomes spent) in a later block within the same range.
+    let unsigned = sp_client
+        .create_new_transaction(
+            vec![(received, received_out)],
+            vec![Recipient {
+                address: RecipientAddress::SpAddress(sp_address),
+                amount: Amount::from_sat(100_000),
+            }],
+            FeeRate::from_sat_per_vb(1.0),
+            network,
+        )
+        .expect("create spend tx");
+    let finalized = SpClient::finalize_transaction(unsigned).expect("finalize");
+    let mut aux_rand = [0u8; 32];
+    getrandom::getrandom(&mut aux_rand).expect("aux rand");
+    let signed = sp_client
+        .sign_transaction(finalized, &aux_rand)
+        .expect("sign");
+    let spend_txid = signed.compute_txid();
+    bitcoind
+        .send_raw_transaction(&signed)
+        .expect("broadcast spend");
+    bwk_test::generate_blocks(bitcoind, 1);
+    let spend_height = bwk_test::get_tx_height(bitcoind, spend_txid).expect("spend height") as u32;
+    wait_for_sync_and_index(&backend, spend_height);
+    // The spend tx pays our SP address (recipient + change), so both of its SP
+    // outputs are ours; the original received coin becomes spent.
+    let new_output_0 = OutPoint {
+        txid: spend_txid,
+        vout: 0,
+    };
+    let new_output_1 = OutPoint {
+        txid: spend_txid,
+        vout: 1,
+    };
+    let end_height = spend_height;
+
+    // Run `passes` scan ranges in order on a fresh two-phase scanner (owned state
+    // retained across passes, as a wallet does). Returns the final owned set, the
+    // cumulative spent set, and the owned balance.
+    let two_phase = |passes: &[(u32, u32)]| -> (Vec<OutPoint>, Vec<OutPoint>, u64) {
+        let outputs = Arc::new(Mutex::new(HashMap::new()));
+        let spent = Arc::new(Mutex::new(HashSet::new()));
+        let updater = TrackingUpdater {
+            outputs: outputs.clone(),
+            spent: spent.clone(),
+        };
+        let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
+        let mut scanner = SpAccount::new(
+            scan_backend,
+            sp_client.clone(),
+            updater,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+
+        for (s, e) in passes {
+            scanner
+                .scan_blocks(
+                    Height::from_consensus(*s).unwrap(),
+                    Height::from_consensus(*e).unwrap(),
+                    None,
+                    with_cutthrough,
+                )
+                .expect("scan");
+        }
+
+        let mut owned = scanner.outpoints();
+        owned.sort();
+        let mut spent_vec: Vec<OutPoint> =
+            spent.lock().expect("poisoned").iter().copied().collect();
+        spent_vec.sort();
+        let outputs = outputs.lock().expect("poisoned");
+        let balance: u64 = owned
+            .iter()
+            .map(|op| outputs.get(op).map(|o| o.amount.to_sat()).unwrap_or(0))
+            .sum();
+        (owned, spent_vec, balance)
+    };
+
+    // Case 1: one fresh scan over the whole range [1, spend_height]. The spend
+    // tx's two SP outputs (recipient + change) are at the tip and are owned; the
+    // spent original must not remain owned.
+    let (full_owned, _full_spent, full_balance) = two_phase(&[(1u32, end_height)]);
+    assert!(
+        full_owned.contains(&new_output_0) && full_owned.contains(&new_output_1),
+        "spend-tx outputs should be owned, got {full_owned:?}"
+    );
+    assert!(
+        !full_owned.contains(&received),
+        "the spent coin must not remain owned"
+    );
+    assert!(full_balance > 0, "owned balance should be non-zero");
+
+    // Case 2: incremental flow. The receive is detected in the first pass; a
+    // second pass over the spend block then surfaces the spend. The spend sweep
+    // runs after the receive pass over the range, so the coin (born earlier, in
+    // a prior pass) is owned when its spend block is swept.
+    let (incr_owned, _incr_spent, _incr_balance) =
+        two_phase(&[(1u32, recv_height), (recv_height + 1, end_height)]);
+    assert!(
+        incr_owned.contains(&new_output_0) && incr_owned.contains(&new_output_1),
+        "spend-tx outputs should be owned after the incremental passes, got {incr_owned:?}"
+    );
+    assert!(
+        !incr_owned.contains(&received),
+        "the spent coin must not remain owned after the incremental spend pass"
+    );
+
+    // Case 3: seed the owned set with the received coin (as a reloaded wallet
+    // would via persistence) and scan only the spend block. This drives the spend
+    // path directly off the spent filter + spent index, independent of the
+    // oracle's cut-through: the seeded coin must be detected as spent.
+    let seeded_spent = Arc::new(Mutex::new(HashSet::new()));
+    let seeded_updater = SeedUpdater {
+        seed: [received].into_iter().collect(),
+        spent: seeded_spent.clone(),
+    };
+    let scan_backend = BlindbitBackend::new(bbd.url(), UreqClient::new()).unwrap();
+    let mut seeded_scanner = SpAccount::restore(
+        scan_backend,
+        sp_client.clone(),
+        seeded_updater,
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .expect("restore scanner");
+
+    seeded_scanner
+        .scan_blocks(
+            Height::from_consensus(recv_height + 1).unwrap(),
+            Height::from_consensus(end_height).unwrap(),
+            None,
+            with_cutthrough,
+        )
+        .expect("seeded spend scan");
+
+    let mut seeded_owned = seeded_scanner.outpoints();
+    seeded_owned.sort();
+    let seeded_spent_vec: Vec<OutPoint> = seeded_spent
+        .lock()
+        .expect("poisoned")
+        .iter()
+        .copied()
+        .collect();
+
+    assert_eq!(
+        seeded_spent_vec,
+        vec![received],
+        "the seeded coin should be detected as spent"
+    );
+    assert!(
+        !seeded_owned.contains(&received),
+        "the spent seeded coin must be removed from the owned set"
+    );
+}
+
+/// Spend-frontier resume: a second `scan_blocks` over a fresh tail must not
+/// re-sweep heights an earlier scan already swept. The first scan advances the
+/// spend frontier to its end; the second sweeps only the new tail (proven by a
+/// backend that records every height for which a spent filter is fetched).
+#[test]
+fn test_spend_frontier_resume_skips_swept_heights() {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    use bitcoin::absolute::Height;
+    use bitcoin::BlockHash;
+    use spdk_core::account::SpAccount;
+    use spdk_core::{
+        BlockDataIterator, ChainBackend, FilterData, OwnedOutput, SpClient, SpScanner,
+        SpentIndexData, Updater, UtxoData,
+    };
+
+    // Wraps a real backend, recording each height a spent filter is fetched for.
+    struct CountingBackend {
+        inner: BlindbitBackend<UreqClient>,
+        spent_heights: Arc<Mutex<Vec<u32>>>,
+    }
+    impl ChainBackend for CountingBackend {
+        fn get_block_data_for_range(
+            &self,
+            range: std::ops::RangeInclusive<u32>,
+            dust_limit: Option<bitcoin::Amount>,
+            with_cutthrough: bool,
+        ) -> BlockDataIterator {
+            ChainBackend::get_block_data_for_range(&self.inner, range, dust_limit, with_cutthrough)
+        }
+        fn spent_filter(&self, block_height: Height) -> Result<FilterData, spdk_core::Error> {
+            self.spent_heights
+                .lock()
+                .expect("poisoned")
+                .push(block_height.to_consensus_u32());
+            ChainBackend::spent_filter(&self.inner, block_height)
+        }
+        fn spent_index(&self, block_height: Height) -> Result<SpentIndexData, spdk_core::Error> {
+            ChainBackend::spent_index(&self.inner, block_height)
+        }
+        fn utxos(&self, block_height: Height) -> Result<Vec<UtxoData>, spdk_core::Error> {
+            ChainBackend::utxos(&self.inner, block_height)
+        }
+        fn block_height(&self) -> Result<Height, spdk_core::Error> {
+            ChainBackend::block_height(&self.inner)
+        }
+    }
+
+    // Persists the spend frontier across scans (an Arc-shared cell stands in for
+    // on-disk state), and seeds a fixed owned set so the sweep has work to do.
+    struct ResumeUpdater {
+        seed: HashSet<OutPoint>,
+        spend_frontier: Arc<Mutex<Option<u32>>>,
+    }
+    impl Updater for ResumeUpdater {
+        fn record_scan_progress(
+            &mut self,
+            _: Height,
+            _: Height,
+            _: Height,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_block_outputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            _: HashMap<OutPoint, OwnedOutput>,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_block_inputs(
+            &mut self,
+            _: Height,
+            _: BlockHash,
+            _: HashSet<OutPoint>,
+        ) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn record_spend_frontier(&mut self, height: Height) -> Result<(), spdk_core::Error> {
+            let mut cur = self.spend_frontier.lock().expect("poisoned");
+            let h = height.to_consensus_u32();
+            if cur.map(|c| h > c).unwrap_or(true) {
+                *cur = Some(h);
+            }
+            Ok(())
+        }
+        fn spend_frontier(&self) -> Result<Option<u32>, spdk_core::Error> {
+            Ok(*self.spend_frontier.lock().expect("poisoned"))
+        }
+        fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
+            Ok(())
+        }
+        fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, spdk_core::Error> {
+            Ok(self.seed.clone())
+        }
+    }
+
+    let network = bitcoin::Network::Regtest;
+
+    let mut bbd = BlindbitD::new().unwrap();
+    let client = UreqClient::new();
+    let backend = BlindbitBackend::new(bbd.url(), client).unwrap();
+
+    let mut bitcoind_node = bbd.bitcoin().unwrap();
+    let bitcoind = &mut bitcoind_node.client;
+
+    // Plain blocks: the seeded owned outpoint is never actually spent on-chain,
+    // so the sweep finds nothing; we only assert which heights were swept.
+    bwk_test::generate_blocks(bitcoind, 120);
+    wait_for_sync_and_index(&backend, 120);
+
+    let mnemonic = bwk_sign::bip39::Mnemonic::parse(test_mnemonic()).expect("valid mnemonic");
+    let sp_client = SpClient::new_from_mnemonic(mnemonic, network).expect("sp_client");
+
+    let with_cutthrough = backend
+        .info()
+        .map(|i| i.tweaks_cut_through_with_dust_filter)
+        .unwrap_or(false);
+
+    let spend_frontier = Arc::new(Mutex::new(None));
+    let spent_heights = Arc::new(Mutex::new(Vec::new()));
+
+    let make_scanner = |url: &str| {
+        let inner = BlindbitBackend::new(url.to_string(), UreqClient::new()).unwrap();
+        let counting = CountingBackend {
+            inner,
+            spent_heights: spent_heights.clone(),
+        };
+        let updater = ResumeUpdater {
+            seed: [test_outpoint()].into_iter().collect(),
+            spend_frontier: spend_frontier.clone(),
+        };
+        SpAccount::restore(
+            counting,
+            sp_client.clone(),
+            updater,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .expect("restore scanner")
+    };
+
+    // First scan over [1, 60]: sweeps 1..=60, frontier ends at 60.
+    let mut scanner = make_scanner(&bbd.url());
+    scanner
+        .scan_blocks(
+            Height::from_consensus(1).unwrap(),
+            Height::from_consensus(60).unwrap(),
+            None,
+            with_cutthrough,
+        )
+        .expect("first scan");
+    assert_eq!(
+        *spend_frontier.lock().expect("poisoned"),
+        Some(60),
+        "spend frontier should advance to the first scan's end"
+    );
+    spent_heights.lock().expect("poisoned").clear();
+
+    // Second scan over [61, 120]: must sweep only the new tail, not re-sweep
+    // 1..=60. With the spend frontier at 60, the sweep starts at 61.
+    let mut scanner = make_scanner(&bbd.url());
+    scanner
+        .scan_blocks(
+            Height::from_consensus(61).unwrap(),
+            Height::from_consensus(120).unwrap(),
+            None,
+            with_cutthrough,
+        )
+        .expect("second scan");
+
+    let swept = spent_heights.lock().expect("poisoned").clone();
+    assert!(
+        swept.iter().all(|&h| h >= 61),
+        "second scan must not re-sweep already-swept heights, swept: {swept:?}"
+    );
+    assert!(
+        swept.contains(&61) && swept.contains(&120),
+        "second scan should sweep the full new tail [61, 120], swept: {swept:?}"
+    );
+    assert_eq!(
+        *spend_frontier.lock().expect("poisoned"),
+        Some(120),
+        "spend frontier should advance to the second scan's end"
+    );
+}

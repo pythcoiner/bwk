@@ -18,12 +18,17 @@ pub type BlockDataIterator = Box<dyn Iterator<Item = Result<BlockData>> + Send>;
 pub type BlockDataIterator = Box<dyn Iterator<Item = Result<BlockData>>>;
 
 pub trait ChainBackend {
+    /// Fetch receive-only block data for a range (tweaks + new-utxo filter).
+    /// The spent filter is fetched separately by the two-phase spend pass.
     fn get_block_data_for_range(
         &self,
         range: RangeInclusive<u32>,
         dust_limit: Option<Amount>,
         with_cutthrough: bool,
     ) -> BlockDataIterator;
+
+    /// Fetch the spent filter for a single height (two-phase spend pass).
+    fn spent_filter(&self, block_height: Height) -> Result<crate::FilterData>;
 
     fn spent_index(&self, block_height: Height) -> Result<SpentIndexData>;
 

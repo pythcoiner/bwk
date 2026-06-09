@@ -1610,16 +1610,12 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
 
     fn record_block_outputs(
         &mut self,
-        height: Height,
-        block_hash: BlockHash,
+        _height: Height,
+        _block_hash: BlockHash,
         found_outputs: HashMap<OutPoint, OwnedOutput>,
     ) -> Result<(), spdk_core::Error> {
-        // Update scan state
-        {
-            let mut state = self.scan_state.lock().expect("poisoned");
-            state.update(height.to_consensus_u32(), *block_hash.as_byte_array());
-            state.persist();
-        }
+        // Two-phase receives arrive order-free, so they never move the frontier;
+        // the contiguous receive frontier advances via `record_scan_frontier`.
 
         // Insert outputs into coin store AND persist in same lock scope
         {
@@ -1638,16 +1634,12 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
 
     fn record_block_inputs(
         &mut self,
-        height: Height,
+        _height: Height,
         block_hash: BlockHash,
         found_inputs: HashSet<OutPoint>,
     ) -> Result<(), spdk_core::Error> {
-        // Update scan state
-        {
-            let mut state = self.scan_state.lock().expect("poisoned");
-            state.update(height.to_consensus_u32(), *block_hash.as_byte_array());
-            state.persist();
-        }
+        // Two-phase spends arrive order-free; the receive frontier advances via
+        // `record_scan_frontier` and the spend frontier via `record_spend_frontier`.
 
         // Mark inputs as spent AND persist in same lock scope
         {
@@ -1662,6 +1654,36 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         }
 
         Ok(())
+    }
+
+    fn record_scan_frontier(
+        &mut self,
+        height: Height,
+        block_hash: BlockHash,
+    ) -> Result<(), spdk_core::Error> {
+        // Advance and persist the contiguous receive frontier (height plus its
+        // hash). The matching `record_scan_progress` call emits the progress
+        // notification, so this only persists state.
+        let mut state = self.scan_state.lock().expect("poisoned");
+        state.advance_frontier(height.to_consensus_u32(), *block_hash.as_byte_array());
+        state.persist();
+        Ok(())
+    }
+
+    fn record_spend_frontier(&mut self, height: Height) -> Result<(), spdk_core::Error> {
+        // Advance and persist the spend frontier (the trailing input sweep).
+        let mut state = self.scan_state.lock().expect("poisoned");
+        state.advance_spend_frontier(height.to_consensus_u32());
+        state.persist();
+        Ok(())
+    }
+
+    fn spend_frontier(&self) -> Result<Option<u32>, spdk_core::Error> {
+        Ok(self
+            .scan_state
+            .lock()
+            .expect("poisoned")
+            .last_spend_height())
     }
 
     fn save_to_persistent_storage(&mut self) -> Result<(), spdk_core::Error> {
