@@ -9,9 +9,7 @@ path = "src/bin/kernel_bench.rs"
 required-features = ["bench"]
 
 [features]
-default = ["parallel", "mnemonic"]
-# Enable CPU parallelization with scoped threads (native only, recommended).
-parallel = []
+default = ["mnemonic"]
 # Enable usage of bip39 mnemonics.
 mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
@@ -47,6 +45,9 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 hex = { workspace = true, features = ["serde"] }
+
+# MPMC channel for the scan worker pipeline (cloneable receiver, blocking recv).
+crossbeam = { workspace = true }
 
 # Random number generation
 getrandom = { workspace = true }

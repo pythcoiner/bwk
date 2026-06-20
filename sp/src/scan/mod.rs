@@ -20,6 +20,8 @@ use bitcoin::{
     Amount, BlockHash, OutPoint, Txid, XOnlyPublicKey,
 };
 
+use crossbeam::channel;
+
 use crate::{
     account::coin_store::SpCoinStore,
     blindbit,
@@ -150,7 +152,7 @@ pub(crate) fn candidate_spks(
 /// immediately. The bounded channel applies backpressure, so fetching stays at
 /// most `fetch_channel_cap()` blocks ahead of the consumer.
 pub fn fetch_blocks<P: SpStorageProfile>(
-    sender: mpsc::SyncSender<std::result::Result<BlockData, receiver::error::Error>>,
+    sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     backend: &BackendContext,
     scan: &ScanContext<P>,
 ) {
@@ -176,7 +178,7 @@ fn spawn_block_fetchers(
     range: RangeInclusive<u32>,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
-    sender: mpsc::SyncSender<std::result::Result<BlockData, receiver::error::Error>>,
+    sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     block_data_observer: Option<BlockDataObserver>,
     pool: ThreadPool,
 ) {
@@ -205,7 +207,7 @@ fn fetch_block_data_for_height(
     height: u32,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
-    sender: mpsc::SyncSender<std::result::Result<BlockData, receiver::error::Error>>,
+    sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     block_data_observer: Option<BlockDataObserver>,
 ) {
     let blkheight = match Height::from_consensus(height) {
@@ -246,6 +248,38 @@ fn fetch_block_data_for_height(
     let _ = sender.send(Ok(block_data));
 }
 
+/// Concurrent spent-filter fetch for the spend sweep: one `filter/spent/{h}` GET
+/// per height, fanned out across the fetch pool into a bounded channel, the same
+/// pipeline `fetch_blocks` uses on the receive side. Input matching is ~free, so
+/// the collector just drains and tests each filter as it arrives; the bound applies
+/// backpressure. The pool is dropped here (workers keep draining the queue, then
+/// exit), so this returns immediately after enqueuing.
+fn fetch_spent_filters(
+    sender: channel::Sender<Result<(Height, FilterData), receiver::error::Error>>,
+    backend: &BackendContext,
+    range: RangeInclusive<u32>,
+) {
+    let pool = ThreadPool::new(fetch_concurrency());
+    for height in range {
+        let agent = backend.agent.clone();
+        let url = backend.url.clone();
+        let sender = sender.clone();
+        pool.execute(move || {
+            let blkheight = match Height::from_consensus(height) {
+                Ok(bh) => bh,
+                Err(e) => {
+                    let _ = sender.send(Err(receiver::error::Error::from(e)));
+                    return;
+                }
+            };
+            let res = blindbit::spent_filter(&agent, &url, blkheight, None)
+                .map(|filter| (blkheight, filter))
+                .map_err(receiver::error::Error::from);
+            let _ = sender.send(res);
+        });
+    }
+}
+
 pub struct ScanStores<P: SpStorageProfile> {
     pub coin_store: Arc<Mutex<SpCoinStore<P>>>,
     pub tx_store: Arc<Mutex<crate::account::tx_store::SpTxStore<P>>>,
@@ -284,7 +318,7 @@ pub fn scan_blocks<P: SpStorageProfile>(
     end: Height,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     scan_blocks_with_observer(
         agent,
         blindbit_url,
@@ -311,7 +345,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
     block_data_observer: Option<BlockDataObserver>,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     if start > end {
         return Err(receiver::error::Error::InvalidRange(
             start.to_consensus_u32(),
@@ -349,9 +383,7 @@ fn should_interrupt(stop: &Arc<AtomicBool>) -> bool {
     stop.load(Ordering::Relaxed)
 }
 
-fn save_state<P: SpStorageProfile>(
-    stores: &ScanStores<P>,
-) -> std::result::Result<(), receiver::error::Error> {
+fn save_state<P: SpStorageProfile>(stores: &ScanStores<P>) -> Result<(), receiver::error::Error> {
     stores.coin_store.lock().expect("poisoned").persist();
     stores.tx_store.lock().expect("poisoned").persist();
     stores.scan_state.lock().expect("poisoned").persist();
@@ -361,7 +393,7 @@ fn save_state<P: SpStorageProfile>(
 fn record_outputs<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     outputs: HashMap<OutPoint, OwnedOutput>,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let mut store = stores.coin_store.lock().expect("poisoned");
     for (outpoint, output) in outputs {
         store.insert(outpoint, output);
@@ -377,7 +409,7 @@ fn record_inputs<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     block_hash: BlockHash,
     inputs: HashSet<OutPoint>,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let mut store = stores.coin_store.lock().expect("poisoned");
     for outpoint in inputs {
         store.mark_mined(&outpoint, *block_hash.as_byte_array());
@@ -395,7 +427,7 @@ fn record_progress<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     current: Height,
     end: Height,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let _ = stores
         .sender
         .send(crate::Notification::Sp(SpNotification::ScanProgress {
@@ -409,7 +441,7 @@ fn record_scan_frontier<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     height: Height,
     block_hash: BlockHash,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let mut state = stores.scan_state.lock().expect("poisoned");
     state.advance_frontier(height.to_consensus_u32(), *block_hash.as_byte_array());
     state.persist();
@@ -419,7 +451,7 @@ fn record_scan_frontier<P: SpStorageProfile>(
 fn record_spend_frontier<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     height: Height,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let mut state = stores.scan_state.lock().expect("poisoned");
     state.advance_spend_frontier(height.to_consensus_u32());
     state.persist();
@@ -428,7 +460,7 @@ fn record_spend_frontier<P: SpStorageProfile>(
 
 fn spend_frontier<P: SpStorageProfile>(
     stores: &ScanStores<P>,
-) -> std::result::Result<Option<u32>, receiver::error::Error> {
+) -> Result<Option<u32>, receiver::error::Error> {
     Ok(stores
         .scan_state
         .lock()
@@ -437,15 +469,13 @@ fn spend_frontier<P: SpStorageProfile>(
 }
 
 fn scan_utxos(
-    backend: &BackendContext,
+    agent: &ureq::Agent,
+    url: &str,
     sp_receiver: &SpReceiver,
     blkheight: Height,
     secrets_map: HashMap<[u8; 34], bitcoin::secp256k1::PublicKey>,
-) -> std::result::Result<
-    Vec<(Option<Label>, UtxoData, bitcoin::secp256k1::Scalar)>,
-    receiver::error::Error,
-> {
-    let utxos = blindbit::utxos(&backend.agent, &backend.url, blkheight)?;
+) -> Result<Vec<(Option<Label>, UtxoData, bitcoin::secp256k1::Scalar)>, receiver::error::Error> {
+    let utxos = blindbit::utxos(agent, url, blkheight)?;
     let mut txmap: HashMap<Txid, Vec<UtxoData>> = HashMap::new();
     for utxo in utxos {
         txmap.entry(utxo.txid).or_default().push(utxo);
@@ -466,7 +496,7 @@ fn scan_utxos(
             None => continue,
         };
 
-        let output_keys: std::result::Result<Vec<XOnlyPublicKey>, receiver::error::Error> = utxos
+        let output_keys: Result<Vec<XOnlyPublicKey>, receiver::error::Error> = utxos
             .iter()
             .filter_map(|x| {
                 if x.scriptpubkey.is_p2tr() {
@@ -504,7 +534,7 @@ fn check_block_outputs(
     created_utxo_filter: BlockFilter,
     blkhash: BlockHash,
     candidate_spks: Vec<&[u8; 34]>,
-) -> std::result::Result<bool, receiver::error::Error> {
+) -> Result<bool, receiver::error::Error> {
     let output_keys: Vec<_> = candidate_spks
         .into_iter()
         .map(|spk| spk[2..].as_ref())
@@ -516,59 +546,59 @@ fn check_block_outputs(
     }
 }
 
-fn match_block_outputs(
-    backend: &BackendContext,
+/// Backend-agnostic crypto: derive the candidate output spks for the block's tweaks
+/// and test them against its new-utxo GCS filter. `true` if the block may pay us
+/// (confirmed and expanded by [`derive_owned`] on the collector).
+fn candidate_match(
     sp_receiver: &SpReceiver,
     blockdata: &BlockData,
-) -> std::result::Result<HashMap<OutPoint, OwnedOutput>, receiver::error::Error> {
-    process_block_outputs(
-        backend,
-        sp_receiver,
-        blockdata.blkheight,
-        &blockdata.tweaks,
-        blockdata.new_utxo_filter.clone(),
-    )
-}
-
-fn process_block_outputs(
-    backend: &BackendContext,
-    sp_receiver: &SpReceiver,
-    blkheight: Height,
-    tweaks: &[[u8; 33]],
-    new_utxo_filter: FilterData,
-) -> std::result::Result<HashMap<OutPoint, OwnedOutput>, receiver::error::Error> {
-    let mut res = HashMap::new();
-    if tweaks.is_empty() {
-        return Ok(res);
+) -> Result<bool, receiver::error::Error> {
+    if blockdata.tweaks.is_empty() {
+        return Ok(false);
     }
-
-    let tweaks: Vec<bitcoin::secp256k1::PublicKey> = tweaks
+    let tweaks: Vec<bitcoin::secp256k1::PublicKey> = blockdata
+        .tweaks
         .iter()
         .map(|t| bitcoin::secp256k1::PublicKey::from_slice(t))
-        .collect::<std::result::Result<_, _>>()?;
+        .collect::<Result<_, _>>()?;
     let candidate_spks = candidate_spks(sp_receiver, &tweaks)?;
     let candidate_spks: Vec<&[u8; 34]> = candidate_spks.iter().collect();
 
     #[cfg(feature = "scan-profile")]
     let __t = std::time::Instant::now();
-    let blkfilter = BlockFilter::new(&new_utxo_filter.data);
-    let blkhash = new_utxo_filter.block_hash;
-    let matched_outputs = check_block_outputs(blkfilter, blkhash, candidate_spks)?;
+    let blkfilter = BlockFilter::new(&blockdata.new_utxo_filter.data);
+    let matched = check_block_outputs(
+        blkfilter,
+        blockdata.new_utxo_filter.block_hash,
+        candidate_spks,
+    )?;
     #[cfg(feature = "scan-profile")]
     profiling::add(&profiling::OUTPUT_FILTER_NS, __t.elapsed());
 
-    if !matched_outputs {
-        return Ok(res);
-    }
+    Ok(matched)
+}
 
-    log::info!("matched outputs on: {}", blkheight);
+/// Deferred, on-match-only: re-derive the shared secrets for the block's tweaks,
+/// fetch its UTXOs from the backend, and build the owned-output map.
+fn derive_owned(
+    agent: &ureq::Agent,
+    url: &str,
+    sp_receiver: &SpReceiver,
+    blkheight: Height,
+    tweaks: &[[u8; 33]],
+) -> Result<HashMap<OutPoint, OwnedOutput>, receiver::error::Error> {
+    let tweaks: Vec<bitcoin::secp256k1::PublicKey> = tweaks
+        .iter()
+        .map(|t| bitcoin::secp256k1::PublicKey::from_slice(t))
+        .collect::<Result<_, _>>()?;
     let secrets_map = script_to_secret_map(sp_receiver, tweaks)?;
     #[cfg(feature = "scan-profile")]
     let __t = std::time::Instant::now();
-    let found = scan_utxos(backend, sp_receiver, blkheight, secrets_map)?;
+    let found = scan_utxos(agent, url, sp_receiver, blkheight, secrets_map)?;
     #[cfg(feature = "scan-profile")]
     profiling::add(&profiling::SCAN_UTXOS_NS, __t.elapsed());
 
+    let mut res = HashMap::new();
     for (label, utxo, tweak) in found {
         let outpoint = OutPoint {
             txid: utxo.txid,
@@ -590,7 +620,7 @@ fn process_block_outputs(
 fn input_hashes_for(
     blkhash: BlockHash,
     owned: &HashSet<OutPoint>,
-) -> std::result::Result<HashMap<[u8; 8], OutPoint>, receiver::error::Error> {
+) -> Result<HashMap<[u8; 8], OutPoint>, receiver::error::Error> {
     let mut map = HashMap::new();
     for outpoint in owned {
         let mut arr = [0u8; 68];
@@ -609,7 +639,7 @@ fn check_block_inputs(
     spent_filter: BlockFilter,
     blkhash: BlockHash,
     input_hashes: Vec<[u8; 8]>,
-) -> std::result::Result<bool, receiver::error::Error> {
+) -> Result<bool, receiver::error::Error> {
     if !input_hashes.is_empty() {
         Ok(spent_filter.match_any(&blkhash, &mut input_hashes.into_iter())?)
     } else {
@@ -622,7 +652,7 @@ fn match_inputs_for(
     blkheight: Height,
     spent_filter: FilterData,
     owned: &HashSet<OutPoint>,
-) -> std::result::Result<HashSet<OutPoint>, receiver::error::Error> {
+) -> Result<HashSet<OutPoint>, receiver::error::Error> {
     let mut res = HashSet::new();
     let blkhash = spent_filter.block_hash;
     let input_hashes_map = input_hashes_for(blkhash, owned)?;
@@ -645,10 +675,8 @@ fn match_inputs_for(
     Ok(res)
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
 const MATCH_WINDOW_MAX: usize = 64;
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
 fn match_window_cap() -> usize {
     static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -671,7 +699,8 @@ fn commit_block<P: SpStorageProfile>(
     scan: &mut ScanContext<P>,
     start_u32: u32,
     end_u32: u32,
-    blockdata: BlockData,
+    blkheight: Height,
+    blkhash: BlockHash,
     outs: HashMap<OutPoint, OwnedOutput>,
     done: &mut [bool],
     hashes: &mut [Option<BlockHash>],
@@ -679,9 +708,7 @@ fn commit_block<P: SpStorageProfile>(
     last_progress: &mut u32,
     notified_any: &mut bool,
     last_checkpoint: &mut std::time::Instant,
-) -> std::result::Result<(), receiver::error::Error> {
-    let blkheight = blockdata.blkheight;
-    let blkhash = blockdata.blkhash;
+) -> Result<(), receiver::error::Error> {
     let idx = (blkheight.to_consensus_u32() - start_u32) as usize;
     done[idx] = true;
     hashes[idx] = Some(blkhash);
@@ -721,6 +748,21 @@ fn commit_block<P: SpStorageProfile>(
 
 const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// The crypto stage's per-block verdict for the collector. A no-match (the common
+/// case) carries only progress; a match additionally carries the tweaks the
+/// collector needs to derive the owned outputs.
+enum BlockOutcome {
+    NoMatch {
+        height: Height,
+        hash: BlockHash,
+    },
+    Matched {
+        height: Height,
+        hash: BlockHash,
+        tweaks: Vec<[u8; 33]>,
+    },
+}
+
 /// Consume `BlockData` from `receiver` (produced by [`fetch_blocks`]), derive the
 /// owned outputs of each block, and commit them in height order. Returns `true`
 /// if the scan was interrupted via `stop` (state already persisted); on normal
@@ -728,8 +770,8 @@ const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 fn process_blocks<P: SpStorageProfile>(
     backend: &BackendContext,
     scan: &mut ScanContext<P>,
-    receiver: mpsc::Receiver<std::result::Result<BlockData, receiver::error::Error>>,
-) -> std::result::Result<bool, receiver::error::Error> {
+    receiver: channel::Receiver<Result<BlockData, receiver::error::Error>>,
+) -> Result<bool, receiver::error::Error> {
     let start_u32 = scan.start.to_consensus_u32();
     let end_u32 = scan.end.to_consensus_u32();
     let len = (end_u32 - start_u32 + 1) as usize;
@@ -741,102 +783,85 @@ fn process_blocks<P: SpStorageProfile>(
     let mut notified_any = false;
     let mut last_checkpoint = Instant::now();
 
-    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-    {
-        // Copy the `&'a` handles out so the scoped workers don't borrow `scan`,
-        // leaving the main loop free to hold `&mut scan` for `scan.owned`.
-        let sp_receiver = scan.sp_receiver;
-        let stop = scan.stop;
-        let n_workers = match_window_cap();
-        let receiver = std::sync::Mutex::new(receiver);
-        let (tx, rx) = std::sync::mpsc::sync_channel::<
-            std::result::Result<
-                (BlockData, HashMap<OutPoint, OwnedOutput>),
-                receiver::error::Error,
-            >,
-        >(n_workers * 2);
-        let interrupted =
-            std::thread::scope(|s| -> std::result::Result<bool, receiver::error::Error> {
-                for _ in 0..n_workers {
-                    let receiver = &receiver;
-                    let tx = tx.clone();
-                    s.spawn(move || loop {
-                        if should_interrupt(stop) {
-                            break;
-                        }
-                        let next = { receiver.lock().expect("poisoned").recv() };
-                        match next {
-                            Ok(Ok(bd)) => {
-                                let r = match_block_outputs(backend, sp_receiver, &bd)
-                                    .map(|outs| (bd, outs));
-                                let stop = r.is_err();
-                                if tx.send(r).is_err() || stop {
-                                    break;
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                let _ = tx.send(Err(e));
-                                break;
-                            }
-                            Err(_) => break,
-                        }
-                    });
-                }
-                drop(tx);
-                for msg in rx {
-                    let (blockdata, outs) = msg?;
-                    commit_block(
-                        scan,
-                        start_u32,
-                        end_u32,
-                        blockdata,
-                        outs,
-                        &mut done,
-                        &mut hashes,
-                        &mut recv_tip,
-                        &mut last_progress,
-                        &mut notified_any,
-                        &mut last_checkpoint,
-                    )?;
-                    if should_interrupt(stop) {
-                        save_state(scan.stores)?;
-                        return Ok(true);
-                    }
-                }
-                Ok(false)
-            })?;
-        if interrupted {
-            return Ok(true);
-        }
-    }
+    let n = match_window_cap();
+    let (tx, rx) = mpsc::sync_channel::<Result<BlockOutcome, receiver::error::Error>>(n * 2);
 
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
-    {
-        loop {
-            if should_interrupt(scan.stop) {
-                save_state(scan.stores)?;
-                return Ok(true);
-            }
-            match receiver.recv() {
-                Ok(Ok(blockdata)) => {
-                    let outs = match_block_outputs(backend, scan.sp_receiver, &blockdata)?;
-                    commit_block(
-                        scan,
-                        start_u32,
-                        end_u32,
-                        blockdata,
-                        outs,
-                        &mut done,
-                        &mut hashes,
-                        &mut recv_tip,
-                        &mut last_progress,
-                        &mut notified_any,
-                        &mut last_checkpoint,
-                    )?;
+    // Backend-agnostic crypto workers: each clones the input receiver, pulls blocks,
+    // runs the candidate/filter check, and ships a minimal outcome. The bounded
+    // input channel applies backpressure; the only per-worker state is a cloned
+    // `SpReceiver`.
+    let pool = ThreadPool::new(n);
+    for _ in 0..n {
+        let input = receiver.clone();
+        let sp_receiver = scan.sp_receiver.clone();
+        let tx = tx.clone();
+        pool.execute(move || {
+            while let Ok(msg) = input.recv() {
+                let bd = match msg {
+                    Ok(bd) => bd,
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                };
+                let outcome = match candidate_match(&sp_receiver, &bd) {
+                    Ok(true) => Ok(BlockOutcome::Matched {
+                        height: bd.blkheight,
+                        hash: bd.blkhash,
+                        tweaks: bd.tweaks,
+                    }),
+                    Ok(false) => Ok(BlockOutcome::NoMatch {
+                        height: bd.blkheight,
+                        hash: bd.blkhash,
+                    }),
+                    Err(e) => Err(e),
+                };
+                let failed = outcome.is_err();
+                if tx.send(outcome).is_err() || failed {
+                    break;
                 }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => break,
             }
+        });
+    }
+    drop(tx);
+
+    // Collector = this thread: derive owned outputs for the rare matches (with the
+    // backend), commit every block in arrival order.
+    for msg in rx {
+        let (blkheight, blkhash, outs) = match msg? {
+            BlockOutcome::NoMatch { height, hash } => (height, hash, HashMap::new()),
+            BlockOutcome::Matched {
+                height,
+                hash,
+                tweaks,
+            } => {
+                let outs = derive_owned(
+                    &backend.agent,
+                    &backend.url,
+                    scan.sp_receiver,
+                    height,
+                    &tweaks,
+                )?;
+                (height, hash, outs)
+            }
+        };
+        commit_block(
+            scan,
+            start_u32,
+            end_u32,
+            blkheight,
+            blkhash,
+            outs,
+            &mut done,
+            &mut hashes,
+            &mut recv_tip,
+            &mut last_progress,
+            &mut notified_any,
+            &mut last_checkpoint,
+        )?;
+        if should_interrupt(scan.stop) {
+            save_state(scan.stores)?;
+            return Ok(true);
         }
     }
 
@@ -853,29 +878,47 @@ fn process_blocks<P: SpStorageProfile>(
 /// Sweep `[spend_frontier+1, end]` for inputs spending any still-owned output:
 /// remove those outputs, record the spends, and advance the spend frontier
 /// (checkpointing periodically), persisting it at `end` on completion. Returns
-/// early with state persisted if interrupted via `stop` or once nothing remains
-/// owned.
+/// early with state persisted if interrupted via `stop`.
+///
+/// Spent filters are fetched concurrently through the same pool the receive scan
+/// uses (`fetch_spent_filters`), so the sweep is fetch-pipelined rather than one
+/// blocking request per block; the input match is ~free, so the collector just
+/// tests each filter as it arrives, advancing the frontier over the contiguous
+/// prefix that has been swept.
 fn process_spends<P: SpStorageProfile>(
     backend: &BackendContext,
     scan: &mut ScanContext<P>,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let start_u32 = scan.start.to_consensus_u32();
     let end_u32 = scan.end.to_consensus_u32();
     let spend_start = spend_frontier(scan.stores)?
         .map(|h| h + 1)
         .unwrap_or(start_u32);
+
+    // Own nothing (or already swept): a future block can only spend an output we
+    // own, so the frontier jumps straight to `end` with no fetching.
+    if spend_start > end_u32 || scan.owned.is_empty() {
+        record_spend_frontier(scan.stores, scan.end)?;
+        save_state(scan.stores)?;
+        return Ok(());
+    }
+
+    let len = (end_u32 - spend_start + 1) as usize;
+    let mut done = vec![false; len];
+    let mut spend_tip = spend_start - 1; // highest contiguous swept height
+    let mut last_progress = spend_start - 1;
     let mut last_checkpoint = Instant::now();
-    let mut last_progress = spend_start.saturating_sub(1);
-    for h in spend_start..=end_u32 {
+
+    let (sender, receiver) = channel::bounded(fetch_channel_cap());
+    fetch_spent_filters(sender, backend, spend_start..=end_u32);
+
+    for msg in receiver {
         if should_interrupt(scan.stop) {
+            record_spend_frontier(scan.stores, Height::from_consensus(spend_tip)?)?;
             save_state(scan.stores)?;
             return Ok(());
         }
-        if scan.owned.is_empty() {
-            break;
-        }
-        let height = Height::from_consensus(h)?;
-        let spent_filter = blindbit::spent_filter(&backend.agent, &backend.url, height, None)?;
+        let (height, spent_filter) = msg?;
         let blkhash = spent_filter.block_hash;
         let ins = match_inputs_for(backend, height, spent_filter, &scan.owned)?;
         if !ins.is_empty() {
@@ -884,16 +927,24 @@ fn process_spends<P: SpStorageProfile>(
             }
             record_inputs(scan.stores, blkhash, ins)?;
         }
-        if h - last_progress >= 1000 {
-            record_progress(scan.stores, height, scan.end)?;
-            last_progress = h;
+
+        // Advance the frontier over the contiguous swept prefix (filters arrive
+        // out of order), checkpointing periodically for crash recovery.
+        done[(height.to_consensus_u32() - spend_start) as usize] = true;
+        while spend_tip < end_u32 && done[(spend_tip + 1 - spend_start) as usize] {
+            spend_tip += 1;
+        }
+        if spend_tip.saturating_sub(last_progress) >= 1000 {
+            record_progress(scan.stores, Height::from_consensus(spend_tip)?, scan.end)?;
+            last_progress = spend_tip;
         }
         if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-            record_spend_frontier(scan.stores, height)?;
+            record_spend_frontier(scan.stores, Height::from_consensus(spend_tip)?)?;
             save_state(scan.stores)?;
             last_checkpoint = Instant::now();
         }
     }
+
     record_spend_frontier(scan.stores, scan.end)?;
     save_state(scan.stores)?;
     Ok(())
@@ -902,7 +953,7 @@ fn process_spends<P: SpStorageProfile>(
 fn process_scan<P: SpStorageProfile>(
     backend: &BackendContext,
     scan: &mut ScanContext<P>,
-) -> std::result::Result<(), receiver::error::Error> {
+) -> Result<(), receiver::error::Error> {
     let start_u32 = scan.start.to_consensus_u32();
 
     if spend_frontier(scan.stores)?.is_none() {
@@ -912,7 +963,7 @@ fn process_scan<P: SpStorageProfile>(
         }
     }
 
-    let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
+    let (sender, receiver) = channel::bounded(fetch_channel_cap());
     fetch_blocks(sender, backend, scan);
 
     if process_blocks(backend, scan, receiver)? {
