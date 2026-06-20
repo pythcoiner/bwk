@@ -1,7 +1,7 @@
 pub(crate) mod ssl_client;
 pub(crate) mod tcp_client;
 
-use std::{collections::HashMap, fmt::Display, net, thread, time::Duration};
+use std::{collections::HashMap, fmt::Display, thread, time::Duration};
 
 use crate::electrum::{
     self,
@@ -18,12 +18,11 @@ pub const PEEK_BUFFER_SIZE: usize = 10;
 pub enum Error {
     TcpStream(std::io::Error),
     SocketAddr,
-    SslStream(openssl::ssl::HandshakeError<net::TcpStream>),
+    Tls(native_tls::Error),
+    TlsHandshake(String),
+    Io(std::io::Error),
     Electrum(electrum::Error),
-    SslPeek,
     Mutex,
-    SslConnector(std::io::Error),
-    SslErrorStack,
     AlreadyConnected,
     NotConnected,
     NotConfigured,

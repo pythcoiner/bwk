@@ -13,11 +13,11 @@ pub struct ThreadPool {
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
 
-/// Per-worker stack size. Workers fetch over HTTP(S) and parse tweaks/filters; the
-/// SP work is shallow, so the floor is the rustls/webpki TLS handshake on an HTTPS
-/// oracle (cert-chain verification), comfortable in ~256 KiB and tight below
-/// ~128 KiB. 256 KiB is 32x under the ~8 MiB glibc default — a big cut to the
-/// per-worker virtual reserve on 32-bit/mobile targets — while staying TLS-safe.
+/// Per-worker stack size. A worker does HTTP(S) I/O, the openssl (native-tls) TLS
+/// handshake + cert-chain verification on HTTPS oracles, gzip-decompress, and
+/// parsing. The deepest path is the openssl handshake; 256 KiB covers it with
+/// margin while still cutting ~32x under the ~8 MiB glibc default, trimming the
+/// per-worker virtual reserve for 32-bit/mobile targets.
 const WORKER_STACK_SIZE: usize = 256 * 1024;
 
 impl ThreadPool {

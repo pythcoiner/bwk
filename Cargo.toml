@@ -46,7 +46,7 @@ home = "=0.5.9"
 libc = "0.2.170"
 log = "0.4.20"
 miniscript = { version = "12.2.0", features = ["base64"] }
-native-tls = "=0.2.13"
+native-tls = "0.2"
 openssl = "0.10.66"
 rand = "0.9.1"
 serde = { version = "1.0.218", features = ["derive"] }

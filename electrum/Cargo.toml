@@ -18,13 +18,18 @@ doctest = false
 miniscript = { workspace = true, features = ["serde", "base64"] }
 bitcoin_slices.workspace = true
 log.workspace = true
-openssl = { workspace = true, features = ["vendored"] }
+native-tls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 hex-conservative.workspace = true
 bwk-backoff.workspace = true
 bwk-utils.workspace = true
 thiserror.workspace = true
+
+# Android uses native-tls's openssl backend, which looks for certs at the
+# build-host paths, so vendor a static openssl only there.
+[target.'cfg(target_os = "android")'.dependencies]
+native-tls = { workspace = true, features = ["vendored"] }
 
 [dev-dependencies]
 hex_lit.workspace = true

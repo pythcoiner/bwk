@@ -4,6 +4,16 @@ use crate::error::{Error, Result};
 
 use super::http_trait::HttpClient;
 
+/// TLS config selecting the native-tls (openssl) provider. ureq defaults to
+/// rustls, which we don't compile (the backend builds ureq with only the
+/// `native-tls`/`vendored` providers); root certs default to the bundled WebPki
+/// roots, so HTTPS works without a system cert store (e.g. Android).
+fn native_tls_config() -> ureq::tls::TlsConfig {
+    ureq::tls::TlsConfig::builder()
+        .provider(ureq::tls::TlsProvider::NativeTls)
+        .build()
+}
+
 /// Minimal HTTP client implementation using ureq.
 #[derive(Clone)]
 pub struct UreqClient {
@@ -15,6 +25,7 @@ impl UreqClient {
     pub fn new() -> Self {
         Self {
             agent: ureq::Agent::config_builder()
+                .tls_config(native_tls_config())
                 .timeout_global(Some(Duration::from_secs(30)))
                 // ureq defaults to max 10 idle connections (3 per host), but the
                 // scanner runs up to 200 concurrent threads (CONCURRENT_FILTER_REQUESTS).
@@ -35,6 +46,7 @@ impl UreqClient {
     pub fn with_timeout(timeout_secs: u64) -> Self {
         Self {
             agent: ureq::Agent::config_builder()
+                .tls_config(native_tls_config())
                 .timeout_global(Some(Duration::from_secs(timeout_secs)))
                 // See new() for rationale on pool size.
                 .max_idle_connections(200)

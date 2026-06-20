@@ -10,8 +10,11 @@ spdk-core.workspace = true
 spdk-core.default-features = false
 spdk-core.features = ["sync"]
 
-# TLS support via rustls is required for HTTPS connections to blindbit
-ureq = { git = "https://github.com/pythcoiner/ureq.git", branch = "gzip", default-features = false, features = [ "gzip"]}
+# HTTPS via native-tls, which maps to the platform TLS (system openssl on Linux,
+# SChannel on Windows, Secure Transport on Apple). Provider is selected explicitly
+# in ureq_impl.rs (ureq defaults to rustls, which we don't compile). openssl is
+# vendored only on Android, see the android target table below.
+ureq = { git = "https://github.com/pythcoiner/ureq.git", branch = "gzip", default-features = false, features = ["gzip", "native-tls"] }
 
 # Logging
 log.workspace = true
@@ -27,6 +30,11 @@ hex = { workspace = true, features = ["serde"] }
 # Parallelization
 rayon.workspace = true
 rayon.optional = true
+
+# Vendor a static openssl only on Android, where native-tls's openssl backend
+# looks for certs at the build-host paths.
+[target.'cfg(target_os = "android")'.dependencies]
+ureq = { git = "https://github.com/pythcoiner/ureq.git", branch = "gzip", features = ["vendored"] }
 
 [dev-dependencies]
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }

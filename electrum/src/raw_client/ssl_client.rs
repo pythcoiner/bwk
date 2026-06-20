@@ -1,7 +1,6 @@
-use super::{Error, PEEK_BUFFER_SIZE};
-use openssl::ssl::{self, SslConnector, SslMethod, SslVerifyMode};
+use super::Error;
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{ErrorKind, Read, Write},
     net::{self, SocketAddr},
     str::FromStr,
     sync::{Arc, Mutex},
@@ -9,9 +8,23 @@ use std::{
 };
 
 #[cfg(target_os = "android")]
-use {openssl::x509::X509, std::fs};
+use {native_tls::Certificate, std::fs};
 
-type SslStream = Arc<Mutex<ssl::SslStream<net::TcpStream>>>;
+/// A connected TLS stream plus the bytes already read past the last delimiter.
+/// native-tls has no peek, so we keep a residual buffer across read calls to
+/// implement a non-blocking `try_read`.
+pub struct TlsState {
+    tls: native_tls::TlsStream<net::TcpStream>,
+    buf: Vec<u8>,
+}
+
+impl std::fmt::Debug for TlsState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsState").finish()
+    }
+}
+
+type SslStream = Arc<Mutex<TlsState>>;
 
 #[derive(Debug)]
 pub struct SslClient {
@@ -80,51 +93,52 @@ impl SslClient {
 
     pub fn try_connect(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         let url = format!("{}:{}", self.url, self.port);
-        let mut ssl = SslConnector::builder(SslMethod::tls()).unwrap();
+        let mut builder = native_tls::TlsConnector::builder();
 
         #[cfg(target_os = "android")]
         {
-            // NOTE: as we use a vendored openssl, on android it will look for cert
-            // at path of the build host, so we need to manually load certificates
-
+            // native-tls uses a vendored openssl on android, which looks for
+            // certs at the build-host paths, so we load them manually.
             // /system/etc/security/cacerts contains one file per CA (hash.0)
             let ca_dir = std::path::Path::new("/system/etc/security/cacerts");
             if ca_dir.is_dir() {
-                for entry in fs::read_dir(ca_dir).map_err(Error::SslConnector)? {
-                    let path = entry.map_err(Error::SslConnector)?.path();
-                    let cert = fs::read(&path).map_err(Error::SslConnector)?;
-                    let x509 = X509::from_pem(&cert)
-                        .or_else(|_| X509::from_der(&cert)) // some are DER
-                        .map_err(|_| Error::SslErrorStack)?;
-                    ssl.cert_store_mut()
-                        .add_cert(x509)
-                        .map_err(|_| Error::SslErrorStack)?;
+                for entry in fs::read_dir(ca_dir).map_err(Error::Io)? {
+                    let path = entry.map_err(Error::Io)?.path();
+                    let cert = fs::read(&path).map_err(Error::Io)?;
+                    let cert = Certificate::from_pem(&cert)
+                        .or_else(|_| Certificate::from_der(&cert)) // some are DER
+                        .map_err(Error::Tls)?;
+                    builder.add_root_certificate(cert);
                 }
             }
         }
 
         // do not verify for self-signed certs
         if !self.verif_certificate {
-            ssl.set_verify(SslVerifyMode::NONE);
+            builder.danger_accept_invalid_certs(true);
+            builder.danger_accept_invalid_hostnames(true);
         }
-        let ssl = ssl.build();
-        let stream = if let Some(timeout) = timeout {
+        let connector = builder.build().map_err(Error::Tls)?;
+        let tcp = if let Some(timeout) = timeout {
             let addr = SocketAddr::from_str(&url).map_err(|_| Error::SocketAddr)?;
             net::TcpStream::connect_timeout(&addr, timeout).map_err(Error::TcpStream)?
         } else {
             net::TcpStream::connect(url).map_err(Error::TcpStream)?
         };
-        stream
-            .set_read_timeout(self.read_timeout)
+        tcp.set_read_timeout(self.read_timeout)
             .map_err(Error::TcpStream)?;
-        stream
-            .set_write_timeout(self.write_timeout)
+        tcp.set_write_timeout(self.write_timeout)
             .map_err(Error::TcpStream)?;
-        let stream = ssl.connect(&self.url, stream).map_err(Error::SslStream)?;
-        let stream = Arc::new(Mutex::new(stream));
+        let tls = connector
+            .connect(&self.url, tcp)
+            .map_err(|e| Error::TlsHandshake(e.to_string()))?;
+        let state = Arc::new(Mutex::new(TlsState {
+            tls,
+            buf: Vec::new(),
+        }));
 
         if self.stream.is_none() {
-            self.stream = Some(stream);
+            self.stream = Some(state);
             Ok(())
         } else {
             Err(Error::AlreadyConnected)
@@ -133,9 +147,10 @@ impl SslClient {
 
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         if let Some(stream) = self.stream.as_mut() {
-            let mut stream = stream.lock().map_err(|_| Error::Mutex)?;
+            let stream = stream.lock().map_err(|_| Error::Mutex)?;
             stream
-                .get_mut()
+                .tls
+                .get_ref()
                 .set_read_timeout(timeout)
                 .map_err(Error::TcpStream)?;
         }
@@ -145,9 +160,10 @@ impl SslClient {
 
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         if let Some(stream) = self.stream.as_mut() {
-            let mut stream = stream.lock().map_err(|_| Error::Mutex)?;
+            let stream = stream.lock().map_err(|_| Error::Mutex)?;
             stream
-                .get_mut()
+                .tls
+                .get_ref()
                 .set_write_timeout(timeout)
                 .map_err(Error::TcpStream)?;
         }
@@ -155,51 +171,82 @@ impl SslClient {
         Ok(())
     }
 
-    pub fn send(stream: &mut ssl::SslStream<net::TcpStream>, request: &str) -> Result<(), Error> {
-        stream
+    pub fn send(state: &mut TlsState, request: &str) -> Result<(), Error> {
+        state
+            .tls
             .write_all(request.as_bytes())
             .map_err(Error::TcpStream)?;
         // add a \n char for EOL
-        stream.write_all(&[10]).map_err(Error::TcpStream)?;
-        stream.flush().map_err(Error::TcpStream)?;
+        state.tls.write_all(&[10]).map_err(Error::TcpStream)?;
+        state.tls.flush().map_err(Error::TcpStream)?;
         Ok(())
     }
 
-    fn raw_read(
-        stream: &mut ssl::SslStream<net::TcpStream>,
-        blocking: bool,
-    ) -> Result<Option<String>, Error> {
-        let mut peek_buffer = [0u8; PEEK_BUFFER_SIZE];
-        // SslStream will block if `nonblocking` is false
-        stream
+    /// Split off the first line (including the trailing `\n`) from the residual
+    /// buffer if it holds a complete one, leaving the remainder in `buf`.
+    fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+        let pos = buf.iter().position(|b| *b == b'\n')?;
+        let rest = buf.split_off(pos + 1);
+        let line = std::mem::replace(buf, rest);
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+
+    /// Non-blocking read of one newline-terminated line. Returns `Ok(None)` when
+    /// no full line is available yet.
+    pub fn try_read(state: &mut TlsState) -> Result<Option<String>, Error> {
+        if let Some(line) = Self::take_line(&mut state.buf) {
+            return Ok(Some(line));
+        }
+        state
+            .tls
             .get_mut()
             .set_nonblocking(true)
             .map_err(|_| Error::SetNonBlocking)?;
-        // SslStream.ssl_peek() will error if there is no data in the
-        // stream receiving end
-        let peek = stream.ssl_peek(&mut peek_buffer).ok();
-        stream
+        let mut tmp = [0u8; 1024];
+        let result = loop {
+            match state.tls.read(&mut tmp) {
+                // connection closed
+                Ok(0) => break Ok(None),
+                Ok(n) => {
+                    state.buf.extend_from_slice(&tmp[..n]);
+                    if let Some(line) = Self::take_line(&mut state.buf) {
+                        break Ok(Some(line));
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break Ok(None),
+                Err(e) => break Err(Error::TcpStream(e)),
+            }
+        };
+        state
+            .tls
             .get_mut()
             .set_nonblocking(false)
             .map_err(|_| Error::SetBlocking)?;
+        result
+    }
 
-        // If blocking or data in the receiving end of the stream
-        if blocking || peek.is_some() {
-            let mut response = String::new();
-            let mut reader = BufReader::new(stream);
-            reader.read_line(&mut response).map_err(Error::TcpStream)?;
-            Ok(Some(response))
-        } else {
-            Ok(None)
+    /// Blocking read of one newline-terminated line.
+    pub fn read(state: &mut TlsState) -> Result<String, Error> {
+        state
+            .tls
+            .get_mut()
+            .set_nonblocking(false)
+            .map_err(|_| Error::SetBlocking)?;
+        let mut tmp = [0u8; 1024];
+        loop {
+            if let Some(line) = Self::take_line(&mut state.buf) {
+                return Ok(line);
+            }
+            match state.tls.read(&mut tmp) {
+                // connection closed: flush whatever remains as the final line
+                Ok(0) => {
+                    let line = std::mem::take(&mut state.buf);
+                    return Ok(String::from_utf8_lossy(&line).into_owned());
+                }
+                Ok(n) => state.buf.extend_from_slice(&tmp[..n]),
+                Err(e) => return Err(Error::TcpStream(e)),
+            }
         }
-    }
-
-    pub fn try_read(stream: &mut ssl::SslStream<net::TcpStream>) -> Result<Option<String>, Error> {
-        Self::raw_read(stream, false)
-    }
-
-    pub fn read(stream: &mut ssl::SslStream<net::TcpStream>) -> Result<String, Error> {
-        Ok(Self::raw_read(stream, true)?.expect("blocking"))
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
@@ -207,6 +254,7 @@ impl SslClient {
             stream
                 .try_lock()
                 .map_err(|_| Error::Mutex)?
+                .tls
                 .shutdown()
                 .map_err(|_| Error::ShutDown)?;
             Ok(())
