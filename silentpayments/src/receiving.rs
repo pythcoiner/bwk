@@ -508,20 +508,19 @@ impl Receiver {
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
     ) -> Result<Vec<[u8; 34]>> {
-        let secp = Secp256k1::new();
-        let xonly = crate::secp256k1::silentpayments::recipient_scan_lightclient_spend_points(
-            &secp,
-            tweak,
-            scan_key,
-            spend_points,
-        )?;
+        // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
+        // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
+        let tweak = tweak.serialize();
+        let scan_key = scan_key.secret_bytes();
+        let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
+        let xonly = bwk_spscan_sys::scan_spend_points(&scan_key, &tweak, &spend_points);
         Ok(xonly
             .into_iter()
-            .map(|key| {
+            .map(|xonly_bytes| {
                 let mut spk = [0u8; 34];
                 // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
                 spk[..2].copy_from_slice(&[0x51, 0x20]);
-                spk[2..].copy_from_slice(&key.serialize());
+                spk[2..].copy_from_slice(&xonly_bytes);
                 spk
             })
             .collect())
@@ -542,24 +541,22 @@ impl Receiver {
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
     ) -> Result<Vec<Vec<[u8; 34]>>> {
-        let secp = Secp256k1::new();
-        let per_tweak =
-            crate::secp256k1::silentpayments::recipient_scan_lightclient_spend_points_batch(
-                &secp,
-                tweaks,
-                scan_key,
-                spend_points,
-            )?;
+        // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
+        // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
+        let tweaks: Vec<[u8; 33]> = tweaks.iter().map(|t| t.serialize()).collect();
+        let scan_key = scan_key.secret_bytes();
+        let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
+        let per_tweak = bwk_spscan_sys::scan_spend_points_batch(&scan_key, &tweaks, &spend_points);
         Ok(per_tweak
             .into_iter()
             .map(|xonly| {
                 xonly
                     .into_iter()
-                    .map(|key| {
+                    .map(|xonly_bytes| {
                         let mut spk = [0u8; 34];
                         // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
                         spk[..2].copy_from_slice(&[0x51, 0x20]);
-                        spk[2..].copy_from_slice(&key.serialize());
+                        spk[2..].copy_from_slice(&xonly_bytes);
                         spk
                     })
                     .collect()

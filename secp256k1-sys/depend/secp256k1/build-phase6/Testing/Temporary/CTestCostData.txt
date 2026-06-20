@@ -1,7 +1,0 @@
-rustsecp256k1_v0_10_0_noverify_tests 0 0
-rustsecp256k1_v0_10_0_tests 0 0
-rustsecp256k1_v0_10_0_exhaustive_tests 0 0
----
-rustsecp256k1_v0_10_0_noverify_tests
-rustsecp256k1_v0_10_0_tests
-rustsecp256k1_v0_10_0_exhaustive_tests

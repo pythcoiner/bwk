@@ -1,1 +1,0 @@
-/usr/bin/cc -O2 -g  -Wl,--dependency-file=CMakeFiles/exhaustive_tests.dir/link.d CMakeFiles/exhaustive_tests.dir/tests_exhaustive.c.o -o ../bin/exhaustive_tests

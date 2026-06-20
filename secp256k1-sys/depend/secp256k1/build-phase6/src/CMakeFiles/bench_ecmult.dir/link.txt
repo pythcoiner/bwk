@@ -1,1 +1,0 @@
-/usr/bin/cc -O2 -g  -Wl,--dependency-file=CMakeFiles/bench_ecmult.dir/link.d CMakeFiles/bench_ecmult.dir/bench_ecmult.c.o CMakeFiles/rustsecp256k1_v0_10_0_precomputed.dir/precomputed_ecmult.c.o CMakeFiles/rustsecp256k1_v0_10_0_precomputed.dir/precomputed_ecmult_gen.c.o -o ../bin/bench_ecmult
