@@ -11,7 +11,7 @@ impl DummyUpdater {
 
 impl Updater for DummyUpdater {
     fn record_scan_progress(
-        &mut self,
+        &self,
         _start: bitcoin::absolute::Height,
         _current: bitcoin::absolute::Height,
         _end: bitcoin::absolute::Height,
@@ -20,7 +20,7 @@ impl Updater for DummyUpdater {
     }
 
     fn record_block_outputs(
-        &mut self,
+        &self,
         _height: bitcoin::absolute::Height,
         _blkhash: bitcoin::BlockHash,
         _found_outputs: std::collections::HashMap<bitcoin::OutPoint, crate::spdk_core::OwnedOutput>,
@@ -29,7 +29,7 @@ impl Updater for DummyUpdater {
     }
 
     fn record_block_inputs(
-        &mut self,
+        &self,
         _blkheight: bitcoin::absolute::Height,
         _blkhash: bitcoin::BlockHash,
         _found_inputs: std::collections::HashSet<bitcoin::OutPoint>,
@@ -37,7 +37,7 @@ impl Updater for DummyUpdater {
         Ok(())
     }
 
-    fn save_to_persistent_storage(&mut self) -> crate::spdk_core::error::Result<()> {
+    fn save_to_persistent_storage(&self) -> crate::spdk_core::error::Result<()> {
         Ok(())
     }
 

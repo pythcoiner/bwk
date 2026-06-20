@@ -21,13 +21,14 @@ use {
 };
 
 /// Tweaks per batched native candidate-derivation call. Each chunk is one FFI
-/// call; rayon parallelism is kept across chunks, so this is kept small enough
-/// that a block's tweaks split into many chunks and all cores stay busy. Matches
-/// the native primitive's internal tweak-chunk size so each call is one chunk.
+/// call; a block's tweaks split into chunks processed sequentially (the scan
+/// parallelizes across blocks in the match window, not across a block's chunks).
+/// Matches the native primitive's internal tweak-chunk size so each call is one
+/// chunk.
 const CANDIDATE_TWEAK_CHUNK: usize = 32;
 
-/// Tweak-chunk size, overridable via `BWK_SP_CANDIDATE_CHUNK` for sweeping the
-/// rayon task granularity. Only changes how a block's tweaks split into batched
+/// Tweak-chunk size, overridable via `BWK_SP_CANDIDATE_CHUNK` for tuning the
+/// batch granularity. Only changes how a block's tweaks split into batched
 /// calls; the native primitive's internal chunk (`SP_BATCH_TWEAK_CHUNK`) is
 /// compile-time. Defaults to the const above.
 fn candidate_tweak_chunk() -> usize {
@@ -199,43 +200,17 @@ impl SpClient {
     ) -> Result<HashMap<[u8; 34], PublicKey>> {
         let b_scan = &self.get_scan_key();
 
-        // Use parallel iteration for CPU-intensive ECDH calculations
-        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-        let shared_secrets: Vec<PublicKey> = {
-            use rayon::prelude::*;
-            tweak_data_vec
-                .into_par_iter()
-                .map(|tweak| sp_utils::receiving::calculate_ecdh_shared_secret(&tweak, b_scan))
-                .collect()
-        };
-
-        // Sequential fallback (WASM or no parallel feature)
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+        // ECDH per tweak, then SPK derivation. Only reached on a filter match;
+        // sequential within the block, as the scan parallelizes across blocks.
         let shared_secrets: Vec<PublicKey> = tweak_data_vec
             .into_iter()
             .map(|tweak| sp_utils::receiving::calculate_ecdh_shared_secret(&tweak, b_scan))
             .collect();
 
-        // Use parallel iteration for CPU-intensive SPK derivation
-        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-        let items: Result<Vec<_>> = {
-            use rayon::prelude::*;
-            shared_secrets
-                .into_par_iter()
-                .map(|secret| {
-                    let spks = self.sp_receiver.get_spks_from_shared_secret(&secret)?;
-                    Ok((secret, spks.into_values()))
-                })
-                .collect()
-        };
-
-        // Sequential fallback (WASM or no parallel feature)
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
         let items: Result<Vec<_>> = shared_secrets
             .into_iter()
             .map(|secret| {
                 let spks = self.sp_receiver.get_spks_from_shared_secret(&secret)?;
-
                 Ok((secret, spks.into_values()))
             })
             .collect();
@@ -260,22 +235,8 @@ impl SpClient {
         let spend_points = self.sp_receiver.candidate_spend_points()?;
 
         let __t = std::time::Instant::now();
-        // One batched native call per chunk of tweaks, keeping rayon parallelism
-        // across chunks.
-        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-        let spks: Result<Vec<Vec<Vec<[u8; 34]>>>> = {
-            use rayon::prelude::*;
-            tweaks
-                .par_chunks(candidate_tweak_chunk())
-                .map(|chunk| {
-                    self.sp_receiver
-                        .candidate_output_spks_batch(chunk, &scan_key, &spend_points)
-                        .map_err(Into::into)
-                })
-                .collect()
-        };
-
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+        // One batched native call per chunk of tweaks. Sequential within the
+        // block; the scan parallelizes across blocks in the match window.
         let spks: Result<Vec<Vec<Vec<[u8; 34]>>>> = tweaks
             .chunks(candidate_tweak_chunk())
             .map(|chunk| {

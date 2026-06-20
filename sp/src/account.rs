@@ -1574,7 +1574,7 @@ struct AccountUpdater<P: crate::profile::SpStorageProfile> {
 
 impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
     fn record_scan_progress(
-        &mut self,
+        &self,
         _start: Height,
         current: Height,
         end: Height,
@@ -1592,7 +1592,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
     }
 
     fn record_block_outputs(
-        &mut self,
+        &self,
         _height: Height,
         _block_hash: BlockHash,
         found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -1616,7 +1616,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
     }
 
     fn record_block_inputs(
-        &mut self,
+        &self,
         _height: Height,
         block_hash: BlockHash,
         found_inputs: HashSet<OutPoint>,
@@ -1640,7 +1640,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
     }
 
     fn record_scan_frontier(
-        &mut self,
+        &self,
         height: Height,
         block_hash: BlockHash,
     ) -> Result<(), crate::spdk_core::Error> {
@@ -1653,7 +1653,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         Ok(())
     }
 
-    fn record_spend_frontier(&mut self, height: Height) -> Result<(), crate::spdk_core::Error> {
+    fn record_spend_frontier(&self, height: Height) -> Result<(), crate::spdk_core::Error> {
         // Advance and persist the spend frontier (the trailing input sweep).
         let mut state = self.scan_state.lock().expect("poisoned");
         state.advance_spend_frontier(height.to_consensus_u32());
@@ -1669,7 +1669,7 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
             .last_spend_height())
     }
 
-    fn save_to_persistent_storage(&mut self) -> Result<(), crate::spdk_core::Error> {
+    fn save_to_persistent_storage(&self) -> Result<(), crate::spdk_core::Error> {
         self.coin_store.lock().expect("poisoned").persist();
         self.tx_store.lock().expect("poisoned").persist();
         self.scan_state.lock().expect("poisoned").persist();

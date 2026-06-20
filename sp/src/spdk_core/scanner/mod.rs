@@ -1,15 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::silentpayments::receiving::Label;
-#[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
 use crate::spdk_core::error::Error;
 use crate::spdk_core::error::Result;
 use bitcoin::{
     absolute::Height, bip158::BlockFilter, Amount, BlockHash, OutPoint, Txid, XOnlyPublicKey,
 };
-
-#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-use rayon::prelude::*;
 
 use crate::spdk_core::{
     BlockData, ChainBackend, FilterData, OwnedOutput, SpClient, Updater, UtxoData,
@@ -18,8 +14,8 @@ use crate::spdk_core::{
 /// Marker for "must be `Sync` when the windowed parallel scan is enabled".
 ///
 /// On native builds with the `parallel` feature the read-only output matching is
-/// run with `par_iter` over a window of blocks, which shares `&Self` across rayon
-/// threads and therefore requires `Sync`. On wasm / no-parallel builds the scan
+/// run across a pool of scoped threads over a window of blocks, which shares
+/// `&Self` across threads and therefore requires `Sync`. On wasm / no-parallel builds the scan
 /// is sequential, so this imposes no bound. Keeping it as one marker lets the
 /// `SpScanner` impl and the windowed loop carry a single, conditionally-empty
 /// bound instead of duplicating their definitions per cfg.
@@ -77,7 +73,7 @@ pub trait SpScanner {
     fn process_block_outputs(
         &self,
         blkheight: Height,
-        tweaks: &[bitcoin::secp256k1::PublicKey],
+        tweaks: &[[u8; 33]],
         new_utxo_filter: FilterData,
     ) -> Result<HashMap<OutPoint, OwnedOutput>>;
 
@@ -110,7 +106,7 @@ pub trait SpScanner {
     fn should_interrupt(&self) -> bool;
 
     /// Save current state to persistent storage
-    fn save_state(&mut self) -> Result<()>;
+    fn save_state(&self) -> Result<()>;
 
     /// Record found outputs for a block
     ///
@@ -119,7 +115,7 @@ pub trait SpScanner {
     /// * `block_hash` - Block hash
     /// * `outputs` - Found outputs
     fn record_outputs(
-        &mut self,
+        &self,
         height: Height,
         block_hash: BlockHash,
         outputs: HashMap<OutPoint, OwnedOutput>,
@@ -132,7 +128,7 @@ pub trait SpScanner {
     /// * `block_hash` - Block hash
     /// * `inputs` - Spent inputs
     fn record_inputs(
-        &mut self,
+        &self,
         height: Height,
         block_hash: BlockHash,
         inputs: HashSet<OutPoint>,
@@ -144,7 +140,7 @@ pub trait SpScanner {
     /// * `start` - Start height
     /// * `current` - Current height
     /// * `end` - End height
-    fn record_progress(&mut self, start: Height, current: Height, end: Height) -> Result<()>;
+    fn record_progress(&self, start: Height, current: Height, end: Height) -> Result<()>;
 
     /// Get the silent payment client
     fn client(&self) -> &SpClient;
@@ -153,7 +149,7 @@ pub trait SpScanner {
     fn backend(&self) -> &dyn ChainBackend;
 
     /// Get the updater
-    fn updater(&mut self) -> &mut dyn Updater;
+    fn updater(&self) -> &dyn Updater;
 
     // Helper methods with default implementations
 
@@ -175,59 +171,9 @@ pub trait SpScanner {
 
         let client = self.client();
 
-        // Parallel transaction scanning on native platforms with parallel feature
-        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-        let res: Vec<_> = txmap
-            .into_par_iter()
-            .filter_map(|(_, utxos)| {
-                // check if we know the secret to any of the spks
-                let secret = utxos.iter().find_map(|utxo| {
-                    let spk = utxo.scriptpubkey.as_bytes();
-                    secrets_map.get(spk)
-                })?;
-
-                let output_keys: Vec<XOnlyPublicKey> = utxos
-                    .iter()
-                    .filter_map(|x| {
-                        if x.scriptpubkey.is_p2tr() {
-                            XOnlyPublicKey::from_slice(&x.scriptpubkey.as_bytes()[2..]).ok()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                // CPU-intensive cryptographic operation
-                let ours = client
-                    .sp_receiver
-                    .scan_transaction(secret, output_keys)
-                    .ok()?;
-
-                // Match UTXOs against our keys
-                let matched: Vec<_> = utxos
-                    .into_iter()
-                    .filter(|utxo| utxo.scriptpubkey.is_p2tr() && !utxo.spent)
-                    .filter_map(|utxo| {
-                        let xonly =
-                            XOnlyPublicKey::from_slice(&utxo.scriptpubkey.as_bytes()[2..]).ok()?;
-                        ours.iter().find_map(|(label, map)| {
-                            map.get(&xonly)
-                                .map(|scalar| (label.clone(), utxo.clone(), *scalar))
-                        })
-                    })
-                    .collect();
-
-                if matched.is_empty() {
-                    None
-                } else {
-                    Some(matched)
-                }
-            })
-            .flatten()
-            .collect();
-
-        // Sequential fallback (WASM or no parallel feature)
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+        // Transaction scanning (only reached when a block matches the filter).
+        // Sequential within the block; the scan parallelizes across blocks in the
+        // match window.
         let res: Vec<_> = {
             let mut result = Vec::new();
             for utxos in txmap.into_values() {
@@ -357,21 +303,21 @@ pub trait SpScanner {
     ///
     /// Used by the two-phase receive pass as its contiguous tip fills in, so the
     /// frontier stays contiguous and monotonic despite order-free commits.
-    fn record_frontier(&mut self, height: Height, block_hash: BlockHash) -> Result<()> {
+    fn record_frontier(&self, height: Height, block_hash: BlockHash) -> Result<()> {
         self.updater().record_scan_frontier(height, block_hash)
     }
 
     /// Advance the spend frontier to a fully swept height.
     ///
     /// Used by the two-phase spend sweep; the default delegates to the updater.
-    fn record_spend_frontier(&mut self, height: Height) -> Result<()> {
+    fn record_spend_frontier(&self, height: Height) -> Result<()> {
         self.updater().record_spend_frontier(height)
     }
 
     /// Return the highest spend-swept height, if any.
     ///
     /// Used to resume the spend sweep; the default delegates to the updater.
-    fn spend_frontier(&mut self) -> Result<Option<u32>> {
+    fn spend_frontier(&self) -> Result<Option<u32>> {
         self.updater().spend_frontier()
     }
 
@@ -396,9 +342,9 @@ pub trait SpScanner {
 /// Number of contiguous in-order blocks matched in parallel per window.
 ///
 /// The expensive output matching ([`SpScanner::match_block_outputs`]) is run
-/// with an outer `par_iter` over the W blocks in a window, so that even sparse
-/// early-mainnet blocks (few tweaks each) keep every core busy — the inner
-/// per-tweak `par_chunks` alone leaves cores idle on such blocks. W is sized to
+/// across a pool of scoped threads over the W blocks in a window, so that even
+/// sparse early-mainnet blocks (few tweaks each) keep every core busy —
+/// parallelizing within a block alone leaves cores idle on such blocks. W is sized to
 /// give the pool well over 2x the core count of independent tasks while keeping
 /// memory bounded to W blocks held at once.
 ///
@@ -427,32 +373,70 @@ fn match_window_cap() -> usize {
         .min(MATCH_WINDOW_MAX)
 }
 
-/// Match outputs for every block in `window` (read-only), preserving order.
-///
-/// Native+parallel: the blocks are matched concurrently with `par_iter`
-/// (outer parallelism that saturates cores even for sparse blocks). The first
-/// error in height order is returned. WASM/no-parallel: sequential fallback.
-fn match_window_outputs<S>(
+/// Commit one matched block in the order-free receive pass: mark it done, record
+/// any found outputs, advance the contiguous receive frontier over newly-filled
+/// gaps, notify progress (first advance, then every 100 blocks), and persist the
+/// frontier about once a minute. All scanner calls go through `&self`, so this
+/// runs on the committing thread while the compute workers keep matching.
+#[allow(clippy::too_many_arguments)]
+fn commit_block<S>(
     scanner: &S,
-    window: &[BlockData],
-) -> Result<Vec<HashMap<OutPoint, OwnedOutput>>>
+    start: Height,
+    end: Height,
+    start_u32: u32,
+    end_u32: u32,
+    blockdata: BlockData,
+    outs: HashMap<OutPoint, OwnedOutput>,
+    owned: &mut HashSet<OutPoint>,
+    done: &mut [bool],
+    hashes: &mut [Option<BlockHash>],
+    recv_tip: &mut Option<u32>,
+    last_progress: &mut u32,
+    notified_any: &mut bool,
+    last_checkpoint: &mut std::time::Instant,
+) -> Result<()>
 where
-    S: SpScanner + MaybeSync + ?Sized,
+    S: SpScanner + ?Sized,
 {
-    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-    {
-        window
-            .par_iter()
-            .map(|blockdata| scanner.match_block_outputs(blockdata))
-            .collect()
+    let blkheight = blockdata.blkheight;
+    let blkhash = blockdata.blkhash;
+    let idx = (blkheight.to_consensus_u32() - start_u32) as usize;
+    done[idx] = true;
+    hashes[idx] = Some(blkhash);
+    if !outs.is_empty() {
+        for outpoint in outs.keys() {
+            owned.insert(*outpoint);
+        }
+        scanner.record_outputs(blkheight, blkhash, outs)?;
     }
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
-    {
-        window
-            .iter()
-            .map(|blockdata| scanner.match_block_outputs(blockdata))
-            .collect()
+
+    // Advance the contiguous receive frontier over any newly-filled gap.
+    let mut next = recv_tip.map(|h| h + 1).unwrap_or(start_u32);
+    while next <= end_u32 && done[(next - start_u32) as usize] {
+        *recv_tip = Some(next);
+        next += 1;
     }
+
+    // Notify on the first advance, then every 100 blocks the frontier advances.
+    if let Some(tip) = *recv_tip {
+        if !*notified_any || tip - *last_progress >= 100 {
+            scanner.record_progress(start, Height::from_consensus(tip)?, end)?;
+            *last_progress = tip;
+            *notified_any = true;
+        }
+    }
+
+    // Persist the receive frontier about once a minute.
+    if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+        if let Some(tip) = *recv_tip {
+            let i = (tip - start_u32) as usize;
+            let hash = hashes[i].ok_or(crate::spdk_core::error::Error::MissingBlockHash(tip))?;
+            scanner.record_frontier(Height::from_consensus(tip)?, hash)?;
+            scanner.save_state()?;
+        }
+        *last_checkpoint = std::time::Instant::now();
+    }
+    Ok(())
 }
 
 /// How often the receive frontier and spend frontier are persisted.
@@ -474,7 +458,7 @@ const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 /// here). Returns the final in-memory owned set so the caller can refresh its
 /// owned-outpoint view.
 pub fn process_two_phase<S>(
-    scanner: &mut S,
+    scanner: &S,
     start: Height,
     end: Height,
     dust_limit: Option<Amount>,
@@ -505,8 +489,7 @@ where
     // heights have been received and their block hash; `recv_tip` is the highest
     // contiguously-done height (the receive frontier), advancing only as the gap
     // below it fills, so a slow block never stalls others.
-    let mut iter =
-        scanner.get_block_data_iterator(start_u32..=end_u32, dust_limit, with_cutthrough);
+    let iter = scanner.get_block_data_iterator(start_u32..=end_u32, dust_limit, with_cutthrough);
     let mut done = vec![false; len];
     let mut hashes: Vec<Option<BlockHash>> = vec![None; len];
     let mut recv_tip: Option<u32> = None;
@@ -516,76 +499,109 @@ where
     let mut notified_any = false;
     let mut last_checkpoint = Instant::now();
 
+    // Pipeline: the fetch backend feeds `iter`; the compute workers pull-and-match
+    // blocks continuously (no per-window barrier); this thread commits results as
+    // they arrive. The receive frontier is order-free, so out-of-order arrival is
+    // fine. Commits go through `&self` (interior mutability), so the workers can
+    // keep matching while this thread commits.
     #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
-    let window_cap = match_window_cap();
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
-    let window_cap = 1usize;
+    {
+        let n_workers = match_window_cap();
+        let iter = std::sync::Mutex::new(iter);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<
+            Result<(BlockData, HashMap<OutPoint, OwnedOutput>)>,
+        >(n_workers * 2);
+        let interrupted = std::thread::scope(|s| -> Result<bool> {
+            for _ in 0..n_workers {
+                let iter = &iter;
+                let tx = tx.clone();
+                s.spawn(move || loop {
+                    if scanner.should_interrupt() {
+                        break;
+                    }
+                    // Hold the lock only to pull the next fetched block; matching
+                    // (the expensive part) runs outside the lock.
+                    let next = { iter.lock().expect("poisoned").next() };
+                    match next {
+                        Some(Ok(bd)) => {
+                            let r = scanner.match_block_outputs(&bd).map(|outs| (bd, outs));
+                            let stop = r.is_err();
+                            if tx.send(r).is_err() || stop {
+                                break;
+                            }
+                        }
+                        // Fail fast on a fetch error (e.g. the oracle is still
+                        // syncing and cannot serve the range).
+                        Some(Err(e)) => {
+                            let _ = tx.send(Err(e));
+                            break;
+                        }
+                        None => break,
+                    }
+                });
+            }
+            drop(tx);
+            for msg in rx {
+                let (blockdata, outs) = msg?;
+                commit_block(
+                    scanner,
+                    start,
+                    end,
+                    start_u32,
+                    end_u32,
+                    blockdata,
+                    outs,
+                    &mut owned,
+                    &mut done,
+                    &mut hashes,
+                    &mut recv_tip,
+                    &mut last_progress,
+                    &mut notified_any,
+                    &mut last_checkpoint,
+                )?;
+                if scanner.should_interrupt() {
+                    scanner.save_state()?;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })?;
+        if interrupted {
+            return Ok(owned);
+        }
+    }
 
-    'receive: loop {
-        // Pull up to `window_cap` blocks in arrival order (no height gating).
-        let mut window: Vec<BlockData> = Vec::with_capacity(window_cap);
-        while window.len() < window_cap {
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+    {
+        let mut iter = iter;
+        loop {
+            if scanner.should_interrupt() {
+                scanner.save_state()?;
+                return Ok(owned);
+            }
             match iter.next() {
-                Some(Ok(blockdata)) => window.push(blockdata),
-                // Fail fast on a fetch error (e.g. the oracle is still syncing
-                // and cannot serve the range) rather than crawling the whole
-                // range of timeouts before reporting.
+                Some(Ok(blockdata)) => {
+                    let outs = scanner.match_block_outputs(&blockdata)?;
+                    commit_block(
+                        scanner,
+                        start,
+                        end,
+                        start_u32,
+                        end_u32,
+                        blockdata,
+                        outs,
+                        &mut owned,
+                        &mut done,
+                        &mut hashes,
+                        &mut recv_tip,
+                        &mut last_progress,
+                        &mut notified_any,
+                        &mut last_checkpoint,
+                    )?;
+                }
                 Some(Err(e)) => return Err(e),
                 None => break,
             }
-        }
-
-        if window.is_empty() {
-            break 'receive;
-        }
-
-        if scanner.should_interrupt() {
-            scanner.save_state()?;
-            return Ok(owned);
-        }
-
-        let matched = match_window_outputs(scanner, &window)?;
-
-        for (blockdata, outs) in window.into_iter().zip(matched) {
-            let blkheight = blockdata.blkheight;
-            let blkhash = blockdata.blkhash;
-            let idx = (blkheight.to_consensus_u32() - start_u32) as usize;
-            done[idx] = true;
-            hashes[idx] = Some(blkhash);
-            if !outs.is_empty() {
-                for outpoint in outs.keys() {
-                    owned.insert(*outpoint);
-                }
-                scanner.record_outputs(blkheight, blkhash, outs)?;
-            }
-        }
-
-        // Advance the contiguous receive frontier over any newly-filled gap.
-        let mut next = recv_tip.map(|h| h + 1).unwrap_or(start_u32);
-        while next <= end_u32 && done[(next - start_u32) as usize] {
-            recv_tip = Some(next);
-            next += 1;
-        }
-
-        // Notify on the first advance, then every 100 blocks the frontier advances.
-        if let Some(tip) = recv_tip {
-            if !notified_any || tip - last_progress >= 100 {
-                scanner.record_progress(start, Height::from_consensus(tip)?, end)?;
-                last_progress = tip;
-                notified_any = true;
-            }
-        }
-
-        // Persist the receive frontier about once a minute.
-        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-            if let Some(tip) = recv_tip {
-                let idx = (tip - start_u32) as usize;
-                let hash =
-                    hashes[idx].ok_or(crate::spdk_core::error::Error::MissingBlockHash(tip))?;
-                scanner.record_frontier(Height::from_consensus(tip)?, hash)?;
-                scanner.save_state()?;
-            }
-            last_checkpoint = Instant::now();
         }
     }
 

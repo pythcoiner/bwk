@@ -5,25 +5,20 @@ use std::{
 
 use bitcoin::{absolute::Height, Amount};
 
-#[cfg(feature = "parallel")]
-use rayon::{
-    iter::{IntoParallelIterator, ParallelIterator},
-    ThreadPoolBuilder,
-};
-
 use crate::blindbit::client::{BlindbitClient, HttpClient};
 use crate::spdk_core::{BlockData, ChainBackend, SpentIndexData, UtxoData};
 
-/// Number of blocks fetched concurrently. Enough to stay ahead of the
-/// single-threaded matcher even on a high-latency link (~3 requests/block), while
-/// keeping the thread/connection count modest for mobile.
+/// Number of blocks fetched concurrently. Each fetch worker also parses the
+/// block's tweaks into curve points (CPU work), so this is kept modest: too many
+/// workers oversubscribe the cores and thrash against the matcher. Override with
+/// `BWK_SP_FETCH_CONCURRENCY`.
 const CONCURRENT_FILTER_REQUESTS: usize = 64;
 
 /// Bound on the channel of fetched-but-unprocessed blocks. Fetching outruns the
 /// matcher, so without a bound the whole range is buffered in RAM (~6 GB for
 /// mainnet); a bounded channel applies backpressure (fetch workers block on send
-/// when full), capping memory to ~this many blocks regardless of range. 64 blocks
-/// is ~0.5s of matcher lookahead, so the matcher never starves.
+/// when full), capping memory to ~this many blocks regardless of range. Override
+/// with `BWK_SP_FETCH_CHANNEL_CAP`.
 const BLOCK_CHANNEL_CAPACITY: usize = 64;
 
 /// Fetch concurrency, overridable via `BWK_SP_FETCH_CONCURRENCY` for tuning a
@@ -80,28 +75,12 @@ impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
         dust_limit: Option<Amount>,
         with_cutthrough: bool,
     ) -> crate::spdk_core::BlockDataIterator {
-        // blindbit will return an error 500 for genesis block
+        use crate::blindbit::thread_pool::ThreadPool;
+
+        // blindbit returns an error 500 for the genesis block.
         if *range.start() == 0 {
             range = RangeInclusive::new(1, *range.end());
         }
-
-        #[cfg(feature = "parallel")]
-        let iter = self.get_block_data_for_range_rayon(range, dust_limit, with_cutthrough);
-
-        #[cfg(not(feature = "parallel"))]
-        let iter = self.get_block_data_for_range_thread_pool(range, dust_limit, with_cutthrough);
-
-        iter
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    pub fn get_block_data_for_range_thread_pool(
-        &self,
-        range: RangeInclusive<u32>,
-        dust_limit: Option<Amount>,
-        with_cutthrough: bool,
-    ) -> crate::spdk_core::BlockDataIterator {
-        use crate::blindbit::thread_pool::ThreadPool;
 
         let client = Arc::new(self.client.clone());
 
@@ -110,49 +89,19 @@ impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
         // of range. See BLOCK_CHANNEL_CAPACITY.
         let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
 
+        // A blocking worker pool (not rayon): the workers do network I/O and block
+        // on recv when idle, so they never busy-spin or contend with the compute
+        // threads. `execute` queues each height without blocking, so the receiver
+        // is returned immediately and drained concurrently; on drop the pool keeps
+        // its detached workers running until the queue empties.
         let pool = ThreadPool::new(fetch_concurrency());
-
         for height in range {
             let client = client.clone();
             let sender = sender.clone();
-
             pool.execute(move || {
                 get_block_data_for_height(height, dust_limit, with_cutthrough, sender, client);
             });
         }
-        Box::new(receiver.into_iter())
-    }
-    #[cfg(feature = "parallel")]
-    pub fn get_block_data_for_range_rayon(
-        &self,
-        range: RangeInclusive<u32>,
-        dust_limit: Option<Amount>,
-        with_cutthrough: bool,
-    ) -> crate::spdk_core::BlockDataIterator {
-        let client = Arc::new(self.client.clone());
-
-        // Bounded channel for backpressure; see BLOCK_CHANNEL_CAPACITY.
-        let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
-
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(fetch_concurrency())
-            .build()
-            .unwrap();
-
-        // `pool.install` blocks the calling thread until the parallel fetch
-        // finishes, but the workers block on the bounded send once the channel
-        // fills and the only drainer is `receiver` below, so the fetch must run
-        // on its own thread or producer and consumer deadlock.
-        std::thread::spawn(move || {
-            pool.install(|| {
-                range.into_par_iter().for_each(move |height| {
-                    let client = client.clone();
-                    let sender = sender.clone();
-
-                    get_block_data_for_height(height, dust_limit, with_cutthrough, sender, client);
-                })
-            });
-        });
         Box::new(receiver.into_iter())
     }
 

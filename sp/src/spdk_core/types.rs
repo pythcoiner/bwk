@@ -1,9 +1,13 @@
-use bitcoin::{absolute::Height, secp256k1::PublicKey, Amount, BlockHash, ScriptBuf, Txid};
+use bitcoin::{absolute::Height, Amount, BlockHash, ScriptBuf, Txid};
 
 pub struct BlockData {
     pub blkheight: Height,
     pub blkhash: BlockHash,
-    pub tweaks: Vec<PublicKey>,
+    // Raw 33-byte compressed tweak points, NOT parsed to `PublicKey` here: point
+    // validation is crypto and is deferred to the bounded compute threads (see
+    // `process_block_outputs`), so the many fetch workers stay pure I/O and never
+    // oversubscribe the cores.
+    pub tweaks: Vec<[u8; 33]>,
     pub new_utxo_filter: FilterData,
 }
 

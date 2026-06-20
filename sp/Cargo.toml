@@ -10,8 +10,8 @@ required-features = ["bench"]
 
 [features]
 default = ["parallel", "mnemonic", "blindbit"]
-# Enable CPU parallelization with rayon (native only, recommended).
-parallel = ["dep:rayon"]
+# Enable CPU parallelization with scoped threads (native only, recommended).
+parallel = []
 # Enable usage of bip39 mnemonics.
 mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
@@ -57,9 +57,6 @@ getrandom = { workspace = true }
 
 # Bip39 mnemonics (optional, mnemonic feature)
 bip39 = { workspace = true, optional = true }
-
-# Parallelization (optional, parallel feature; not available on WASM)
-rayon = { workspace = true, optional = true }
 
 # Blindbit HTTP transport (optional, blindbit feature).
 # HTTPS via native-tls, which maps to the platform TLS (system openssl on Linux,

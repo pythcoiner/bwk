@@ -738,7 +738,7 @@ fn test_new_output_notification() {
 
     impl Updater for NotifyingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -747,7 +747,7 @@ fn test_new_output_notification() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -760,7 +760,7 @@ fn test_new_output_notification() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -768,7 +768,7 @@ fn test_new_output_notification() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -1623,7 +1623,7 @@ fn test_two_phase_detects_receive_then_spend() {
     }
     impl Updater for TrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -1631,7 +1631,7 @@ fn test_two_phase_detects_receive_then_spend() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -1640,7 +1640,7 @@ fn test_two_phase_detects_receive_then_spend() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
@@ -1648,7 +1648,7 @@ fn test_two_phase_detects_receive_then_spend() {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -1663,7 +1663,7 @@ fn test_two_phase_detects_receive_then_spend() {
     }
     impl Updater for SeedUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -1671,7 +1671,7 @@ fn test_two_phase_detects_receive_then_spend() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             _: HashMap<OutPoint, OwnedOutput>,
@@ -1679,7 +1679,7 @@ fn test_two_phase_detects_receive_then_spend() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
@@ -1687,7 +1687,7 @@ fn test_two_phase_detects_receive_then_spend() {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -2005,7 +2005,7 @@ fn test_spend_frontier_resume_skips_swept_heights() {
     }
     impl Updater for ResumeUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -2013,7 +2013,7 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             _: HashMap<OutPoint, OwnedOutput>,
@@ -2021,17 +2021,14 @@ fn test_spend_frontier_resume_skips_swept_heights() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
         ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn record_spend_frontier(
-            &mut self,
-            height: Height,
-        ) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn record_spend_frontier(&self, height: Height) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut cur = self.spend_frontier.lock().expect("poisoned");
             let h = height.to_consensus_u32();
             if cur.map(|c| h > c).unwrap_or(true) {
@@ -2042,7 +2039,7 @@ fn test_spend_frontier_resume_skips_swept_heights() {
         fn spend_frontier(&self) -> Result<Option<u32>, bwk_sp::spdk_core::Error> {
             Ok(*self.spend_frontier.lock().expect("poisoned"))
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {

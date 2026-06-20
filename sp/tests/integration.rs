@@ -656,7 +656,7 @@ fn test_double_spend_via_reorg() {
     }
     impl Updater for TrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -664,7 +664,7 @@ fn test_double_spend_via_reorg() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -673,14 +673,14 @@ fn test_double_spend_via_reorg() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
         ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -931,7 +931,7 @@ fn test_double_spend_attempt_rejected() {
     }
     impl Updater for TrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -939,7 +939,7 @@ fn test_double_spend_attempt_rejected() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -948,7 +948,7 @@ fn test_double_spend_attempt_rejected() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
@@ -956,7 +956,7 @@ fn test_double_spend_attempt_rejected() {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -1274,7 +1274,7 @@ fn test_concurrent_funding_during_scan() {
     }
     impl Updater for ConcurrentUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -1282,7 +1282,7 @@ fn test_concurrent_funding_during_scan() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -1291,14 +1291,14 @@ fn test_concurrent_funding_during_scan() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             _: HashSet<OutPoint>,
         ) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             self.scan_complete.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -1624,7 +1624,7 @@ fn test_notification_order_full_sequence() {
 
     impl Updater for OrderTrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             start: Height,
             current: Height,
             end: Height,
@@ -1639,7 +1639,7 @@ fn test_notification_order_full_sequence() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -1655,7 +1655,7 @@ fn test_notification_order_full_sequence() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -1663,7 +1663,7 @@ fn test_notification_order_full_sequence() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut guard = self.notifications.lock().expect("poisoned");
             guard.push(TestNotification::SaveCalled);
             Ok(())
@@ -1854,7 +1854,7 @@ fn test_notification_multiple_outputs_same_block() {
 
     impl Updater for MultiOutputUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -1863,7 +1863,7 @@ fn test_notification_multiple_outputs_same_block() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -1881,7 +1881,7 @@ fn test_notification_multiple_outputs_same_block() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -1889,7 +1889,7 @@ fn test_notification_multiple_outputs_same_block() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -2362,7 +2362,7 @@ fn test_dust_limit_filters_small_outputs() {
 
     impl Updater for DustTestUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -2371,7 +2371,7 @@ fn test_dust_limit_filters_small_outputs() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -2384,7 +2384,7 @@ fn test_dust_limit_filters_small_outputs() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -2392,7 +2392,7 @@ fn test_dust_limit_filters_small_outputs() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -2607,7 +2607,7 @@ fn test_dust_limit_zero_accepts_all() {
 
     impl Updater for DustTestUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -2616,7 +2616,7 @@ fn test_dust_limit_zero_accepts_all() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -2629,7 +2629,7 @@ fn test_dust_limit_zero_accepts_all() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -2637,7 +2637,7 @@ fn test_dust_limit_zero_accepts_all() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -3024,7 +3024,7 @@ fn test_receive_with_sp_label() {
 
     impl Updater for LabelCapturingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -3033,7 +3033,7 @@ fn test_receive_with_sp_label() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -3046,7 +3046,7 @@ fn test_receive_with_sp_label() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -3054,7 +3054,7 @@ fn test_receive_with_sp_label() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {
@@ -3369,7 +3369,7 @@ fn test_persists_immediately_on_new_output() {
 
     impl Updater for PersistTrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -3378,7 +3378,7 @@ fn test_persists_immediately_on_new_output() {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             found_outputs: HashMap<OutPoint, OwnedOutput>,
@@ -3391,7 +3391,7 @@ fn test_persists_immediately_on_new_output() {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _height: Height,
             _block_hash: BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -3399,7 +3399,7 @@ fn test_persists_immediately_on_new_output() {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             let mut save_guard = self.save_called.lock().expect("poisoned");
             *save_guard = true;
             // Record how many outputs were found before save was called
@@ -3635,7 +3635,7 @@ fn test_persists_on_spent_detection() {
 
     impl Updater for SpentTrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -3643,7 +3643,7 @@ fn test_persists_on_spent_detection() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -3653,7 +3653,7 @@ fn test_persists_on_spent_detection() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
@@ -3662,7 +3662,7 @@ fn test_persists_on_spent_detection() {
             guard.extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {

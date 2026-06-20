@@ -3,7 +3,6 @@ mod backend;
 mod client;
 pub mod error;
 
-#[cfg(not(feature = "parallel"))]
 mod thread_pool;
 
 // Re-export backend functionality

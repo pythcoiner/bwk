@@ -470,7 +470,7 @@ fn test_reorg_spent_status_reset() {
     }
     impl Updater for TrackingUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _: Height,
             _: Height,
             _: Height,
@@ -478,7 +478,7 @@ fn test_reorg_spent_status_reset() {
             Ok(())
         }
         fn record_block_outputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             outputs: HashMap<OutPoint, OwnedOutput>,
@@ -487,7 +487,7 @@ fn test_reorg_spent_status_reset() {
             Ok(())
         }
         fn record_block_inputs(
-            &mut self,
+            &self,
             _: Height,
             _: BlockHash,
             inputs: HashSet<OutPoint>,
@@ -495,7 +495,7 @@ fn test_reorg_spent_status_reset() {
             self.spent.lock().expect("poisoned").extend(inputs);
             Ok(())
         }
-        fn save_to_persistent_storage(&mut self) -> Result<(), bwk_sp::spdk_core::Error> {
+        fn save_to_persistent_storage(&self) -> Result<(), bwk_sp::spdk_core::Error> {
             Ok(())
         }
         fn restore_owned_outpoints(&self) -> Result<HashSet<OutPoint>, bwk_sp::spdk_core::Error> {

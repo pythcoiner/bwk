@@ -1,6 +1,6 @@
 use bitcoin::{absolute::Height, secp256k1::PublicKey, Amount, Txid};
 
-use crate::blindbit::error::Result;
+use crate::blindbit::error::{Error, Result};
 
 use crate::blindbit::client::structs::InfoResponse;
 
@@ -48,26 +48,26 @@ impl<H: HttpClient> BlindbitClient<H> {
         &self,
         block_height: Height,
         dust_limit: Option<Amount>,
-    ) -> Result<Vec<PublicKey>> {
+    ) -> Result<Vec<[u8; 33]>> {
         let url = join(&self.host_url, &format!("tweaks/{}", block_height));
         let params = dust_limit
             .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
             .unwrap_or_default();
         let body = self.http_client.get(url.as_str(), &params)?;
-        Ok(serde_json::from_str(&body)?)
+        parse_tweaks(&body)
     }
 
     pub fn tweak_index(
         &self,
         block_height: Height,
         dust_limit: Option<Amount>,
-    ) -> Result<Vec<PublicKey>> {
+    ) -> Result<Vec<[u8; 33]>> {
         let url = join(&self.host_url, &format!("tweak-index/{}", block_height));
         let params = dust_limit
             .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
             .unwrap_or_default();
         let body = self.http_client.get(url.as_str(), &params)?;
-        Ok(serde_json::from_str(&body)?)
+        parse_tweaks(&body)
     }
 
     pub fn utxos(&self, block_height: Height) -> Result<Vec<UtxoResponse>> {
@@ -115,4 +115,22 @@ impl<H: HttpClient> BlindbitClient<H> {
 fn join(url: &str, route: &str) -> String {
     let url = url.trim_end_matches('/');
     format!("{url}/{route}")
+}
+
+/// Deserialize the oracle's tweak list (a JSON array of hex-encoded 33-byte
+/// compressed points) into raw bytes WITHOUT validating the points. Point
+/// validation is crypto and is deferred to the scan kernel, which runs on the
+/// bounded compute threads, so the fetch workers stay pure I/O.
+fn parse_tweaks(body: &str) -> Result<Vec<[u8; 33]>> {
+    #[derive(serde::Deserialize)]
+    #[serde(transparent)]
+    struct TweakHex(#[serde(with = "hex::serde")] Vec<u8>);
+
+    let raw: Vec<TweakHex> = serde_json::from_str(body)?;
+    raw.into_iter()
+        .map(|t| {
+            t.0.try_into()
+                .map_err(|_| Error::ResponseBody("tweak is not 33 bytes".to_string()))
+        })
+        .collect()
 }

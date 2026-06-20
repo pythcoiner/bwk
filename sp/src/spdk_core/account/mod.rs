@@ -86,7 +86,7 @@ impl<B: ChainBackend, U: Updater> SpAccount<B, U> {
 }
 
 // `MaybeSync` is `Sync` on native+parallel (so the windowed scan can share
-// `&SpAccount` across rayon threads for read-only matching) and a no-op bound on
+// `&SpAccount` across scoped threads for read-only matching) and a no-op bound on
 // wasm/no-parallel, where the scan stays sequential.
 impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccount<B, U> {
     fn scan_blocks(
@@ -146,7 +146,7 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
     fn process_block_outputs(
         &self,
         blkheight: bitcoin::absolute::Height,
-        tweaks: &[bitcoin::secp256k1::PublicKey],
+        tweaks: &[[u8; 33]],
         new_utxo_filter: crate::spdk_core::FilterData,
     ) -> crate::spdk_core::error::Result<
         std::collections::HashMap<bitcoin::OutPoint, crate::spdk_core::OwnedOutput>,
@@ -154,10 +154,16 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         let mut res = HashMap::new();
 
         if !tweaks.is_empty() {
+            // Validate the raw tweak points here, on the bounded compute threads,
+            // rather than on the many fetch workers (keeps crypto <= core count).
+            let tweaks: Vec<bitcoin::secp256k1::PublicKey> = tweaks
+                .iter()
+                .map(|t| bitcoin::secp256k1::PublicKey::from_slice(t))
+                .collect::<std::result::Result<_, _>>()?;
             // Derive the candidate spks in one native call per tweak; the shared
             // secrets needed to recover spend tweaks are recomputed only on a
             // filter match below.
-            let candidate_spks = self.client.get_candidate_spks(tweaks)?;
+            let candidate_spks = self.client.get_candidate_spks(&tweaks)?;
             let candidate_spks: Vec<&[u8; 34]> = candidate_spks.iter().collect();
 
             //get block gcs & check match
@@ -222,12 +228,12 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         self.stop.load(Ordering::Relaxed)
     }
 
-    fn save_state(&mut self) -> crate::spdk_core::error::Result<()> {
+    fn save_state(&self) -> crate::spdk_core::error::Result<()> {
         self.updater.save_to_persistent_storage()
     }
 
     fn record_outputs(
-        &mut self,
+        &self,
         height: bitcoin::absolute::Height,
         block_hash: bitcoin::BlockHash,
         outputs: std::collections::HashMap<bitcoin::OutPoint, crate::spdk_core::OwnedOutput>,
@@ -237,7 +243,7 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
     }
 
     fn record_inputs(
-        &mut self,
+        &self,
         height: bitcoin::absolute::Height,
         block_hash: bitcoin::BlockHash,
         inputs: std::collections::HashSet<bitcoin::OutPoint>,
@@ -246,7 +252,7 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
     }
 
     fn record_progress(
-        &mut self,
+        &self,
         start: bitcoin::absolute::Height,
         current: bitcoin::absolute::Height,
         end: bitcoin::absolute::Height,
@@ -262,8 +268,8 @@ impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccoun
         &self.backend
     }
 
-    fn updater(&mut self) -> &mut dyn Updater {
-        &mut self.updater
+    fn updater(&self) -> &dyn Updater {
+        &self.updater
     }
 
     fn input_hashes_for(
@@ -440,7 +446,7 @@ mod tests {
 
     impl Updater for MockUpdater {
         fn record_scan_progress(
-            &mut self,
+            &self,
             _start: Height,
             _current: Height,
             _end: Height,
@@ -449,7 +455,7 @@ mod tests {
         }
 
         fn record_block_outputs(
-            &mut self,
+            &self,
             _height: Height,
             _blkhash: bitcoin::BlockHash,
             _found_outputs: HashMap<OutPoint, crate::spdk_core::OwnedOutput>,
@@ -458,7 +464,7 @@ mod tests {
         }
 
         fn record_block_inputs(
-            &mut self,
+            &self,
             _blkheight: Height,
             _blkhash: bitcoin::BlockHash,
             _found_inputs: HashSet<OutPoint>,
@@ -466,7 +472,7 @@ mod tests {
             Ok(())
         }
 
-        fn save_to_persistent_storage(&mut self) -> crate::spdk_core::error::Result<()> {
+        fn save_to_persistent_storage(&self) -> crate::spdk_core::error::Result<()> {
             Ok(())
         }
 
@@ -576,7 +582,7 @@ mod tests {
         }
         impl Updater for LagUpdater {
             fn record_scan_progress(
-                &mut self,
+                &self,
                 _: Height,
                 _: Height,
                 _: Height,
@@ -584,7 +590,7 @@ mod tests {
                 Ok(())
             }
             fn record_block_outputs(
-                &mut self,
+                &self,
                 _: Height,
                 _: bitcoin::BlockHash,
                 _: HashMap<OutPoint, crate::spdk_core::OwnedOutput>,
@@ -592,14 +598,14 @@ mod tests {
                 Ok(())
             }
             fn record_block_inputs(
-                &mut self,
+                &self,
                 _: Height,
                 _: bitcoin::BlockHash,
                 _: HashSet<OutPoint>,
             ) -> crate::spdk_core::error::Result<()> {
                 Ok(())
             }
-            fn save_to_persistent_storage(&mut self) -> crate::spdk_core::error::Result<()> {
+            fn save_to_persistent_storage(&self) -> crate::spdk_core::error::Result<()> {
                 Ok(())
             }
             fn restore_owned_outpoints(
@@ -708,7 +714,7 @@ mod tests {
         }
         impl Updater for ProgressUpdater {
             fn record_scan_progress(
-                &mut self,
+                &self,
                 _: Height,
                 current: Height,
                 _: Height,
@@ -720,7 +726,7 @@ mod tests {
                 Ok(())
             }
             fn record_block_outputs(
-                &mut self,
+                &self,
                 _: Height,
                 _: bitcoin::BlockHash,
                 _: HashMap<OutPoint, crate::spdk_core::OwnedOutput>,
@@ -728,14 +734,14 @@ mod tests {
                 Ok(())
             }
             fn record_block_inputs(
-                &mut self,
+                &self,
                 _: Height,
                 _: bitcoin::BlockHash,
                 _: HashSet<OutPoint>,
             ) -> crate::spdk_core::error::Result<()> {
                 Ok(())
             }
-            fn save_to_persistent_storage(&mut self) -> crate::spdk_core::error::Result<()> {
+            fn save_to_persistent_storage(&self) -> crate::spdk_core::error::Result<()> {
                 Ok(())
             }
             fn restore_owned_outpoints(
