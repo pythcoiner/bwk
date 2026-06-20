@@ -69,7 +69,9 @@ jobs:
           profile: minimal
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        # gdb: lets the integration-test watchdog dump thread backtraces if a
+        # scan ever hangs, so the job fails fast with a trace instead of stalling.
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev gdb
 
       - name: Run CI checks
         run: "$RUNNER_TEMP/ci-checks.sh"

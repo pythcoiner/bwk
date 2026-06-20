@@ -21,7 +21,11 @@ echo "=== clippy ==="
 cargo clippy --all-targets -- -D warnings
 
 echo "=== tests ==="
-cargo test --features test --verbose --color always -- --nocapture
+# Run integration tests single-threaded: each spins up its own bitcoind/blindbit
+# (and electrsd) regtest daemon, and running dozens concurrently starves CPU/IO,
+# causing flaky sync timeouts and wallet-state races (e.g. spurious -6 "Insufficient
+# funds" after invalidateblock). One daemon set at a time trades runtime for reliability.
+cargo test --features test --verbose --color always -- --nocapture --test-threads=1
 
 echo "=== build ==="
 cargo build --release
