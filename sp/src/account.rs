@@ -1579,32 +1579,15 @@ impl<P: crate::profile::SpStorageProfile> Updater for AccountUpdater<P> {
         current: Height,
         end: Height,
     ) -> Result<(), crate::spdk_core::Error> {
-        let current_u32 = current.to_consensus_u32();
-        let end_u32 = end.to_consensus_u32();
-        log::debug!("record_scan_progress: current={current_u32}, end={end_u32}");
-
-        // Checkpoint (persist + notify) every 100 blocks and on the last block.
-        // The in-memory height is updated every block (cheap, keeps next_scan_start
-        // accurate within the session), but persisting it to disk every block is
-        // wasteful — when persist=true that's several disk writes per block. On a
-        // crash we lose at most ~99 blocks of progress, which just rescans cheaply.
-        let checkpoint = current_u32 % 100 == 0 || current_u32 == end_u32;
-        {
-            let mut state = self.scan_state.lock().expect("poisoned");
-            state.set_last_scanned_height(current_u32);
-            if checkpoint {
-                state.persist();
-            }
-        }
-
-        if checkpoint {
-            let _ = self
-                .sender
-                .send(Notification::Sp(SpNotification::ScanProgress {
-                    current: current_u32,
-                    end: end_u32,
-                }));
-        }
+        // Notification only; the scan loop drives the cadence (every 100 blocks in
+        // the receive phase, every 1000 in the spend sweep). The receive frontier is
+        // persisted separately via record_scan_frontier at the time checkpoint.
+        let _ = self
+            .sender
+            .send(Notification::Sp(SpNotification::ScanProgress {
+                current: current.to_consensus_u32(),
+                end: end.to_consensus_u32(),
+            }));
         Ok(())
     }
 
@@ -1998,7 +1981,7 @@ mod tests {
     // the full flow.
 
     #[test]
-    fn test_scan_progress_throttling() {
+    fn test_record_scan_progress_notifies_each_call() {
         let scan_state = Arc::new(Mutex::new(ScanState::new(0)));
         let coin_store = Arc::new(Mutex::new(SpCoinStore::new()));
         let tx_store = Arc::new(Mutex::new(SpTxStore::new()));
@@ -2012,64 +1995,28 @@ mod tests {
                 sender,
             };
 
-        // Helper to collect all ScanProgress current values from the channel
-        let drain = |rx: &mpsc::Receiver<Notification>| -> Vec<u32> {
-            let mut v = Vec::new();
-            while let Ok(notif) = rx.try_recv() {
-                if let Notification::Sp(SpNotification::ScanProgress { current, .. }) = notif {
-                    v.push(current);
-                }
+        // The cadence now lives in the scan loop (every 100 blocks in the receive
+        // phase, every 1000 in the spend sweep); the updater just forwards a
+        // ScanProgress notification on every call.
+        let end = Height::from_consensus(500).unwrap();
+        for h in [100u32, 137, 200, 500] {
+            updater
+                .record_scan_progress(
+                    Height::from_consensus(0).unwrap(),
+                    Height::from_consensus(h).unwrap(),
+                    end,
+                )
+                .unwrap();
+        }
+
+        let mut notified = Vec::new();
+        while let Ok(notif) = receiver.try_recv() {
+            if let Notification::Sp(SpNotification::ScanProgress { current, end }) = notif {
+                assert_eq!(end, 500);
+                notified.push(current);
             }
-            v
-        };
-
-        // --- Range 1: blocks 0..=350 (end=350) ---
-        // Expected notifications: 0, 100, 200, 300, 350 (last block)
-        let end = Height::from_consensus(350).unwrap();
-        for h in 0..=350u32 {
-            let current = Height::from_consensus(h).unwrap();
-            updater
-                .record_scan_progress(Height::from_consensus(0).unwrap(), current, end)
-                .unwrap();
         }
-        let notified = drain(&receiver);
-        assert_eq!(notified, vec![0, 100, 200, 300, 350]);
-
-        // --- Range 2: blocks 351..=400 (end=400) ---
-        // Expected: 400 (both %100 and last)
-        let end = Height::from_consensus(400).unwrap();
-        for h in 351..=400u32 {
-            let current = Height::from_consensus(h).unwrap();
-            updater
-                .record_scan_progress(Height::from_consensus(351).unwrap(), current, end)
-                .unwrap();
-        }
-        let notified = drain(&receiver);
-        assert_eq!(notified, vec![400]);
-
-        // --- Range 3: blocks 401..=410 (end=410, short range, no %100 hit) ---
-        // Expected: 410 (last block only)
-        let end = Height::from_consensus(410).unwrap();
-        for h in 401..=410u32 {
-            let current = Height::from_consensus(h).unwrap();
-            updater
-                .record_scan_progress(Height::from_consensus(401).unwrap(), current, end)
-                .unwrap();
-        }
-        let notified = drain(&receiver);
-        assert_eq!(notified, vec![410]);
-
-        // --- Range 4: blocks 411..=700 (end=700, end is %100) ---
-        // Expected: 500, 600, 700 (700 is both %100 and last — should appear once)
-        let end = Height::from_consensus(700).unwrap();
-        for h in 411..=700u32 {
-            let current = Height::from_consensus(h).unwrap();
-            updater
-                .record_scan_progress(Height::from_consensus(411).unwrap(), current, end)
-                .unwrap();
-        }
-        let notified = drain(&receiver);
-        assert_eq!(notified, vec![500, 600, 700]);
+        assert_eq!(notified, vec![100, 137, 200, 500]);
     }
 
     // -----------------------------------------------------------------

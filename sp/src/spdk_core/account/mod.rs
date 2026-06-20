@@ -650,4 +650,132 @@ mod tests {
             "spend sweep must cover the lagging-frontier gap below start"
         );
     }
+
+    // The receive phase emits a ScanProgress at most every 100 blocks (the cadence
+    // lives in the scan loop, not per block). Drive a 500-block scan with no owned
+    // coins (the spend sweep is then a no-op) and check the progress is throttled,
+    // not per-block, and reaches the end.
+    #[test]
+    fn test_receive_progress_cadence() {
+        use std::sync::Mutex;
+
+        struct ProgressBackend;
+        impl ChainBackend for ProgressBackend {
+            fn get_block_data_for_range(
+                &self,
+                range: RangeInclusive<u32>,
+                _dust_limit: Option<Amount>,
+                _with_cutthrough: bool,
+            ) -> crate::spdk_core::BlockDataIterator {
+                let blocks: Vec<crate::spdk_core::error::Result<crate::spdk_core::BlockData>> =
+                    range
+                        .map(|h| {
+                            Ok(crate::spdk_core::BlockData {
+                                blkheight: Height::from_consensus(h).expect("valid height"),
+                                blkhash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                                tweaks: vec![],
+                                new_utxo_filter: crate::spdk_core::FilterData {
+                                    block_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                                    data: vec![0u8],
+                                },
+                            })
+                        })
+                        .collect();
+                Box::new(blocks.into_iter())
+            }
+            fn spent_filter(
+                &self,
+                _h: Height,
+            ) -> crate::spdk_core::error::Result<crate::spdk_core::FilterData> {
+                Ok(crate::spdk_core::FilterData {
+                    block_hash: bitcoin::BlockHash::from_byte_array([0u8; 32]),
+                    data: vec![0u8],
+                })
+            }
+            fn spent_index(&self, _h: Height) -> crate::spdk_core::error::Result<SpentIndexData> {
+                Ok(SpentIndexData { data: vec![] })
+            }
+            fn utxos(&self, _h: Height) -> crate::spdk_core::error::Result<Vec<UtxoData>> {
+                Ok(vec![])
+            }
+            fn block_height(&self) -> crate::spdk_core::error::Result<Height> {
+                Ok(Height::from_consensus(500).expect("valid height"))
+            }
+        }
+
+        struct ProgressUpdater {
+            progress: Arc<Mutex<Vec<u32>>>,
+        }
+        impl Updater for ProgressUpdater {
+            fn record_scan_progress(
+                &mut self,
+                _: Height,
+                current: Height,
+                _: Height,
+            ) -> crate::spdk_core::error::Result<()> {
+                self.progress
+                    .lock()
+                    .expect("poisoned")
+                    .push(current.to_consensus_u32());
+                Ok(())
+            }
+            fn record_block_outputs(
+                &mut self,
+                _: Height,
+                _: bitcoin::BlockHash,
+                _: HashMap<OutPoint, crate::spdk_core::OwnedOutput>,
+            ) -> crate::spdk_core::error::Result<()> {
+                Ok(())
+            }
+            fn record_block_inputs(
+                &mut self,
+                _: Height,
+                _: bitcoin::BlockHash,
+                _: HashSet<OutPoint>,
+            ) -> crate::spdk_core::error::Result<()> {
+                Ok(())
+            }
+            fn save_to_persistent_storage(&mut self) -> crate::spdk_core::error::Result<()> {
+                Ok(())
+            }
+            fn restore_owned_outpoints(
+                &self,
+            ) -> crate::spdk_core::error::Result<HashSet<OutPoint>> {
+                Ok(HashSet::new())
+            }
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+        let mut account = SpAccount::restore(
+            ProgressBackend,
+            create_test_sp_client(),
+            ProgressUpdater {
+                progress: progress.clone(),
+            },
+            stop,
+        )
+        .unwrap();
+
+        account
+            .scan_blocks(
+                Height::from_consensus(0).unwrap(),
+                Height::from_consensus(500).unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+
+        let p = progress.lock().expect("poisoned").clone();
+        // Throttled to ~ every 100 blocks (about 5 over 500), never per-block.
+        assert!(
+            p.len() >= 2 && p.len() <= 12,
+            "receive progress should be throttled to ~100-block cadence, got {p:?}"
+        );
+        assert_eq!(*p.last().expect("at least one progress"), 500);
+        assert!(
+            p.windows(2).all(|w| w[1] >= w[0]),
+            "progress must be monotonic: {p:?}"
+        );
+    }
 }

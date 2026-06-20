@@ -510,7 +510,10 @@ where
     let mut done = vec![false; len];
     let mut hashes: Vec<Option<BlockHash>> = vec![None; len];
     let mut recv_tip: Option<u32> = None;
-    let mut first_error: Option<crate::spdk_core::error::Error> = None;
+    // Notify on the first frontier advance (immediate feedback that the scan is
+    // live), then every 100 blocks as the receive frontier advances.
+    let mut last_progress = start_u32.saturating_sub(1);
+    let mut notified_any = false;
     let mut last_checkpoint = Instant::now();
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
@@ -524,11 +527,10 @@ where
         while window.len() < window_cap {
             match iter.next() {
                 Some(Ok(blockdata)) => window.push(blockdata),
-                Some(Err(e)) => {
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
+                // Fail fast on a fetch error (e.g. the oracle is still syncing
+                // and cannot serve the range) rather than crawling the whole
+                // range of timeouts before reporting.
+                Some(Err(e)) => return Err(e),
                 None => break,
             }
         }
@@ -565,22 +567,26 @@ where
             next += 1;
         }
 
-        // Checkpoint the receive frontier about once a minute.
+        // Notify on the first advance, then every 100 blocks the frontier advances.
+        if let Some(tip) = recv_tip {
+            if !notified_any || tip - last_progress >= 100 {
+                scanner.record_progress(start, Height::from_consensus(tip)?, end)?;
+                last_progress = tip;
+                notified_any = true;
+            }
+        }
+
+        // Persist the receive frontier about once a minute.
         if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
             if let Some(tip) = recv_tip {
                 let idx = (tip - start_u32) as usize;
                 let hash =
                     hashes[idx].ok_or(crate::spdk_core::error::Error::MissingBlockHash(tip))?;
                 scanner.record_frontier(Height::from_consensus(tip)?, hash)?;
-                scanner.record_progress(start, Height::from_consensus(tip)?, end)?;
                 scanner.save_state()?;
             }
             last_checkpoint = Instant::now();
         }
-    }
-
-    if let Some(e) = first_error {
-        return Err(e);
     }
 
     // The receive frontier must reach `end`; a short stream means a missing block.
@@ -606,6 +612,8 @@ where
         .map(|h| h + 1)
         .unwrap_or(start_u32);
     let mut last_checkpoint = Instant::now();
+    // Notify progress every 1000 blocks in the spend sweep.
+    let mut last_progress = spend_start.saturating_sub(1);
     for h in spend_start..=end_u32 {
         if scanner.should_interrupt() {
             scanner.save_state()?;
@@ -623,6 +631,10 @@ where
                 owned.remove(outpoint);
             }
             scanner.record_inputs(height, blkhash, ins)?;
+        }
+        if h - last_progress >= 1000 {
+            scanner.record_progress(start, height, end)?;
+            last_progress = h;
         }
         if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
             scanner.record_spend_frontier(height)?;
