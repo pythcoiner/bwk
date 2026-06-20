@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["secp256k1", "secp256k1-sys"]
 
 members = [
     "bwk",
@@ -11,6 +12,9 @@ members = [
     "p2p",
     "hwi", "hwi/cli",
     "hwi/ledger-bitcoin-client", "hwi/ledger-transport-hidapi", "hwi/bitbox-api",
+    "silentpayments",
+    "spdk-core",
+    "backend-blindbit-non-async",
 ]
 
 [workspace.package]
@@ -21,6 +25,10 @@ license-file = "LICENSE"
 repository = "https://github.com/pythcoiner/bwk"
 keywords = ["bitcoin"]
 readme = "README.md"
+
+[workspace.lints.clippy]
+uninlined_format_args = "allow"
+io_other_error = "allow"
 
 [workspace.dependencies]
 crossbeam = "0.8"
@@ -51,10 +59,14 @@ corepc-node = { version = "0.10", features = ["download", "29_0"] }
 dns-lookup = "2.0"
 
 # spdk dependencies
-spdk-core = { git = "https://github.com/pythcoiner/spdk.git", rev = "f00f559", default-features = false }
-backend-blindbit-native-non-async = { git = "https://github.com/pythcoiner/spdk.git", rev = "f00f559" }
-silentpayments = { git = "https://github.com/pythcoiner/rust-silentpayments.git", branch = "secp_29" }
+spdk-core = { path = "spdk-core", package = "bwk-spdk-core", default-features = false }
+backend-blindbit-native-non-async = { path = "backend-blindbit-non-async", package = "bwk-backend-blindbit-non-async" }
+silentpayments = { path = "silentpayments", package = "bwk-silentpayments" }
 blindbitd = { git = "https://github.com/pythcoiner/blindbitd.git" }
+bdk_coin_select = "0.4.0"
+rayon = "1.9.0"
+futures = "0.3"
+async-trait = "0.1"
 
 # bwk crates
 bwk-electrum = { path = "electrum" }
@@ -68,3 +80,6 @@ bwk-utils = { path = "utils" }
 bwk-p2p = { path = "p2p" }
 bwk = { path = "bwk" }
 
+[patch.crates-io]
+secp256k1 = { path = "secp256k1" }
+secp256k1-sys = { path = "secp256k1-sys" }

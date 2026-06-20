@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 pub mod account;
 pub mod address_store;
 pub mod coin_store;

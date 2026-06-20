@@ -1,3 +1,4 @@
+#![allow(clippy::uninlined_format_args)]
 #![allow(dead_code)]
 pub mod client;
 pub mod electrum;

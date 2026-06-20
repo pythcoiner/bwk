@@ -1,3 +1,5 @@
+#![allow(clippy::uninlined_format_args)]
+
 pub mod error;
 pub mod hot_signer;
 #[cfg(feature = "hwi")]

@@ -1,0 +1,1 @@
+/usr/bin/cc -O2 -g  -Wl,--dependency-file=CMakeFiles/bench.dir/link.d CMakeFiles/bench.dir/bench.c.o -o ../bin/bench  -Wl,-rpath,/home/pyth/bwk/.claude/worktrees/sp-sync-bench/vendor/secp256k1-sys/depend/secp256k1/build-phase6/lib ../lib/libsecp256k1.so.5.0.1

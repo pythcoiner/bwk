@@ -1,3 +1,5 @@
+#![allow(clippy::large_enum_variant)]
+
 use std::error::Error;
 
 use bwk_hwi::{AddressScript, DeviceKind};

@@ -1,0 +1,7 @@
+[build]
+rustflags = [
+    "--cap-lints=allow",
+    "--check-cfg=cfg(bench)",
+    "--check-cfg=cfg(secp256k1_fuzz)",
+    "--check-cfg=cfg(rust_secp_no_symbol_renaming)",
+]
