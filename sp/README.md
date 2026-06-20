@@ -65,3 +65,45 @@ Notification ──► Account consumer
 - `SpTxStore` — Transaction history (incoming/outgoing)
 - `bwk::LabelStore` — User labels for coins and transactions (shared with bwk)
 - `ScanState` — Scan progress and checkpoint management
+
+## Benchmarking
+
+The `sp_sync_bench` binary measures SP sync throughput by driving the scanner
+directly against a Blindbit oracle (in-RAM, no persistence). It lives behind the
+`bench` feature (which pulls in `plotters` for the `plot` subcommand), so pass
+`--features bench` when building or running it. Only `--url` is required:
+
+```bash
+cargo run --release -p bwk-sp --features bench --bin sp_sync_bench -- --url http://localhost:8000
+```
+
+The URL can also come from `BWK_SP_BLINDBIT_URL`. Other options default to
+mainnet, the network birthday, the chain tip, and a 600 sat dust limit
+(`--dust-limit 0` disables it). `--dust-limit` also accepts a comma-separated
+list of values, running one full bench (and saving one file) per value, e.g.
+`--dust-limit 0,300,600`. The requested network must match the one the oracle
+serves, or the bench errors out. Run with `--help` for the full flag list.
+
+Every run auto-saves its per-block data (height, tweaks, filter bytes) as JSON
+into the `bench_data/` directory (gitignored), under a unique filename per run
+derived from the run config plus a timestamp. Existing files are never
+overwritten. Each file also records the run timing (elapsed / fetch / process
+seconds) and best-effort host info (CPU model, cores, RAM).
+
+The `plot` subcommand overlaps every run stored in `bench_data/` into a single
+PNG, plotting tweaks per block against block height. The curves are smoothed
+into a trend (moving average over `--smooth <PERCENT>` of the x range, default
+10, 0 disables). It writes to `bench_data/graph.png` by default, override with
+`--out`:
+
+```bash
+cargo run --release -p bwk-sp --features bench --bin sp_sync_bench -- plot
+cargo run --release -p bwk-sp --features bench --bin sp_sync_bench -- plot --out graph.png --smooth 10
+```
+
+The `clean` subcommand removes the `bench_data/` directory (every saved run and
+any rendered graph):
+
+```bash
+cargo run --release -p bwk-sp --features bench --bin sp_sync_bench -- clean
+```

@@ -21,6 +21,13 @@ pub static SCAN_UTXOS_NS: AtomicU64 = AtomicU64::new(0);
 /// Whole input side: input-hash derivation + spent GCS filter test.
 pub static INPUT_NS: AtomicU64 = AtomicU64::new(0);
 
+/// Wall-clock of the whole receive phase (`process_blocks`: concurrent fetch +
+/// per-block candidate match), recorded once per scan.
+pub static RECEIVE_WALL_NS: AtomicU64 = AtomicU64::new(0);
+/// Wall-clock of the whole spend sweep (`process_spends`: per-block spent-filter
+/// fetch + input-hash match), recorded once per scan.
+pub static SPEND_WALL_NS: AtomicU64 = AtomicU64::new(0);
+
 /// Add an elapsed duration to a phase counter.
 #[inline]
 pub fn add(counter: &AtomicU64, elapsed: Duration) {
@@ -29,7 +36,14 @@ pub fn add(counter: &AtomicU64, elapsed: Duration) {
 
 /// Reset every counter to zero (call before a measured run).
 pub fn reset() {
-    for c in [&CANDIDATES_NS, &OUTPUT_FILTER_NS, &SCAN_UTXOS_NS, &INPUT_NS] {
+    for c in [
+        &CANDIDATES_NS,
+        &OUTPUT_FILTER_NS,
+        &SCAN_UTXOS_NS,
+        &INPUT_NS,
+        &RECEIVE_WALL_NS,
+        &SPEND_WALL_NS,
+    ] {
         c.store(0, Ordering::Relaxed);
     }
 }
@@ -42,5 +56,14 @@ pub fn snapshot_secs() -> [(&'static str, f64); 4] {
         ("output_filter", s(&OUTPUT_FILTER_NS)),
         ("scan_utxos", s(&SCAN_UTXOS_NS)),
         ("input", s(&INPUT_NS)),
+    ]
+}
+
+/// `(label, seconds)` wall-clock for the two scan phases: receive, then spend.
+pub fn phase_wall_secs() -> [(&'static str, f64); 2] {
+    let s = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
+    [
+        ("receive", s(&RECEIVE_WALL_NS)),
+        ("spend", s(&SPEND_WALL_NS)),
     ]
 }

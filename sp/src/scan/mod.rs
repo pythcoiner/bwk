@@ -958,15 +958,23 @@ fn process_scan<P: SpStorageProfile>(
         }
     }
 
+    #[cfg(feature = "scan-profile")]
+    let recv_t = Instant::now();
     let (sender, receiver) = channel::bounded(fetch_channel_cap());
     fetch_blocks(sender, backend, scan);
-
-    if process_blocks(backend, scan, receiver)? {
+    let interrupted = process_blocks(backend, scan, receiver)?;
+    #[cfg(feature = "scan-profile")]
+    profiling::add(&profiling::RECEIVE_WALL_NS, recv_t.elapsed());
+    if interrupted {
         // Interrupted mid-scan; process_blocks already persisted state.
         return Ok(());
     }
 
+    #[cfg(feature = "scan-profile")]
+    let spend_t = Instant::now();
     process_spends(backend, scan)?;
+    #[cfg(feature = "scan-profile")]
+    profiling::add(&profiling::SPEND_WALL_NS, spend_t.elapsed());
     Ok(())
 }
 

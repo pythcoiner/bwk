@@ -442,6 +442,33 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         self.coin_store.lock().expect("poisoned").get(outpoint)
     }
 
+    /// Seed one synthetic unspent owned outpoint so a benchmark's spend (input)
+    /// sweep has an owned coin to scan for. Without one, the scan's spend phase
+    /// short-circuits on an empty owned set and measures nothing; the fake
+    /// txid/blockheight never matches a real spent filter, so the coin survives
+    /// the whole range. Bench-only, not part of the wallet API.
+    #[cfg(feature = "bench")]
+    pub fn seed_synthetic_owned_coin(&self) {
+        use bitcoin::hashes::Hash;
+        self.coin_store.lock().expect("poisoned").insert(
+            bitcoin::OutPoint {
+                txid: bitcoin::Txid::from_byte_array([0u8; 32]),
+                vout: 0,
+            },
+            crate::receiver::OwnedOutput {
+                blockheight: bitcoin::absolute::Height::from_consensus(
+                    self.config.birthday_height.unwrap_or(0),
+                )
+                .expect("valid bench height"),
+                tweak: [0u8; 32],
+                amount: bitcoin::Amount::from_sat(1),
+                script: bitcoin::ScriptBuf::new(),
+                label: None,
+                spend_status: crate::receiver::OutputSpendStatus::Unspent,
+            },
+        );
+    }
+
     /// Returns spendable coins and balance summary.
     pub fn spendable_coins(&self) -> CoinState {
         self.coin_store.lock().expect("poisoned").spendable_coins()

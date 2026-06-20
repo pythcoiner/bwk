@@ -4,9 +4,19 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
+name = "sp_sync_bench"
+path = "src/bin/sp_sync_bench.rs"
+required-features = ["bench"]
+
+[[bin]]
 name = "kernel_bench"
 path = "src/bin/kernel_bench.rs"
 required-features = ["bench"]
+
+[[bin]]
+name = "spdk_sync_bench"
+path = "src/bin/spdk_sync_bench.rs"
+required-features = ["bench-spdk"]
 
 [features]
 default = ["mnemonic"]
@@ -15,10 +25,13 @@ mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
 # Per-phase scan timing hooks (bench instrumentation only).
 scan-profile = []
-# Builds the sp_sync_bench binary driving the real Account scan (headline timing only).
-bench = []
+# Builds the sp_sync_bench binary driving the real Account scan. Pulls in scan-profile
+# so even the headline bench reports the receive- vs spend-phase wall-times.
+bench = ["scan-profile"]
 # Adds the instrumented bench harness: per-phase breakdown, data-volume stats, JSON, and plot.
-instrumentation = ["bench", "scan-profile"]
+instrumentation = ["bench", "dep:plotters"]
+# Comparison bench: drives the upstream async spdk-core scan (git dep) head-to-head vs sp_sync_bench.
+bench-spdk = ["dep:spdk-core", "dep:spdk-wallet", "dep:backend-blindbit-v1", "dep:tokio", "dep:anyhow"]
 
 [dependencies]
 # bwk crates
@@ -62,6 +75,17 @@ bip39 = { workspace = true, optional = true }
 ureq = { workspace = true, features = ["gzip", "native-tls"] }
 
 # Plotting (sp_sync_bench plot subcommand, behind the `instrumentation` feature)
+plotters = { workspace = true, optional = true }
+
+# spdk-core comparison bench (bench-spdk feature): the canonical upstream async scanner
+# bwk-sp descended from, pinned to a public cygnet3/spdk rev. bitcoin 0.32.8 / secp 0.29.0
+# unify with bwk's 0.32/0.29.1; the async backend (backend-blindbit-v1) is reqwest+tokio.
+# Throwaway bench bin only (edition 2024 / reqwest stack; not shipped, MSRV-exempt).
+spdk-core = { git = "https://github.com/cygnet3/spdk.git", rev = "8394a0cfa08d974f7aed1a1112a3d4caee6e63c0", optional = true }
+spdk-wallet = { git = "https://github.com/cygnet3/spdk.git", rev = "8394a0cfa08d974f7aed1a1112a3d4caee6e63c0", optional = true }
+backend-blindbit-v1 = { git = "https://github.com/cygnet3/spdk.git", rev = "8394a0cfa08d974f7aed1a1112a3d4caee6e63c0", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+anyhow = { version = "1", optional = true }
 
 # Vendor a static openssl only on Android, where native-tls's openssl backend
 # looks for certs at the build-host paths.
