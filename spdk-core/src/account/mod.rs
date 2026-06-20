@@ -1,4 +1,6 @@
-use crate::{ChainBackend, OutputSpendStatus, OwnedOutput, SpClient, SpScanner, Updater};
+use crate::{
+    scanner::MaybeSync, ChainBackend, OutputSpendStatus, OwnedOutput, SpClient, SpScanner, Updater,
+};
 use bitcoin::{
     absolute::Height,
     bip158::BlockFilter,
@@ -15,6 +17,11 @@ use std::{
     },
     time::Instant,
 };
+
+/// Blocks prefetched ahead of the single-threaded matcher (bounded for
+/// backpressure / capped memory). See the prefetch thread in `scan_blocks`.
+#[cfg(not(target_arch = "wasm32"))]
+const PREFETCH_DEPTH: usize = 64;
 
 pub struct SpAccount<B, U>
 where
@@ -83,7 +90,10 @@ impl<B: ChainBackend, U: Updater> SpAccount<B, U> {
     }
 }
 
-impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
+// `MaybeSync` is `Sync` on native+parallel (so the windowed scan can share
+// `&SpAccount` across rayon threads for read-only matching) and a no-op bound on
+// wasm/no-parallel, where the scan stays sequential.
+impl<B: ChainBackend + MaybeSync, U: Updater + MaybeSync> SpScanner for SpAccount<B, U> {
     fn scan_blocks(
         &mut self,
         start: bitcoin::absolute::Height,
@@ -107,7 +117,26 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
             self.backend
                 .get_block_data_for_range(range, dust_limit, with_cutthrough);
 
-        // process blocks using block data stream
+        // Prefetch on a dedicated thread so block fetch overlaps the single-threaded
+        // match: while we match a block, this thread keeps draining the backend into a
+        // bounded buffer instead of the match thread stalling fetch every block. The
+        // channel is bounded for backpressure (capped memory regardless of range).
+        // (wasm has no threads, and BlockDataIterator there isn't Send.)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = std::sync::mpsc::sync_channel(PREFETCH_DEPTH);
+            let prefetch = std::thread::spawn(move || {
+                for item in block_data_stream {
+                    if tx.send(item).is_err() {
+                        break; // matcher stopped (error / interrupt)
+                    }
+                }
+            });
+            let result = self.process_blocks(start, end, rx.into_iter());
+            let _ = prefetch.join();
+            result?;
+        }
+        #[cfg(target_arch = "wasm32")]
         self.process_blocks(start, end, block_data_stream)?;
 
         // time elapsed for the scan
@@ -126,15 +155,29 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
         std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
         std::collections::HashSet<bitcoin::OutPoint>,
     )> {
+        // Output matching is read-only on `self` (only reads `self.client` /
+        // `self.backend`), so it is factored into `match_block_outputs` and run
+        // in parallel across a window of blocks by the scanner. The ordered,
+        // state-mutating part stays in `commit_block`.
+        let outs = self.match_block_outputs(&blockdata)?;
+        self.commit_block(blockdata, outs)
+    }
+
+    fn commit_block(
+        &mut self,
+        blockdata: crate::BlockData,
+        outs: std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
+    ) -> crate::error::Result<(
+        std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>,
+        std::collections::HashSet<bitcoin::OutPoint>,
+    )> {
         let crate::BlockData {
             blkheight,
             blkhash: _,
-            tweaks,
-            new_utxo_filter,
+            tweaks: _,
+            new_utxo_filter: _,
             spent_filter,
         } = blockdata;
-
-        let outs = self.process_block_outputs(blkheight, &tweaks, new_utxo_filter)?;
 
         // after processing outputs, we add the found outputs to our list
         self.owned_outpoints.extend(outs.keys());
@@ -145,6 +188,20 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
         self.owned_outpoints.retain(|item| !ins.contains(item));
 
         Ok((outs, ins))
+    }
+
+    fn match_block_outputs(
+        &self,
+        blockdata: &crate::BlockData,
+    ) -> crate::error::Result<std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>>
+    {
+        // `new_utxo_filter` is cloned because the read-only match takes the block
+        // by reference (the window holds every block until its ordered commit).
+        self.process_block_outputs(
+            blockdata.blkheight,
+            &blockdata.tweaks,
+            blockdata.new_utxo_filter.clone(),
+        )
     }
 
     fn process_block_outputs(

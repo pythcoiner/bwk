@@ -21,6 +21,7 @@ pub struct SpentIndexData {
     pub data: Vec<Vec<u8>>,
 }
 
+#[derive(Clone)]
 pub struct FilterData {
     pub block_hash: BlockHash,
     pub data: Vec<u8>,

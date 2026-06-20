@@ -13,6 +13,24 @@ use rayon::prelude::*;
 
 use crate::{BlockData, ChainBackend, FilterData, OwnedOutput, SpClient, Updater, UtxoData};
 
+/// Marker for "must be `Sync` when the windowed parallel scan is enabled".
+///
+/// On native builds with the `parallel` feature the read-only output matching is
+/// run with `par_iter` over a window of blocks, which shares `&Self` across rayon
+/// threads and therefore requires `Sync`. On wasm / no-parallel builds the scan
+/// is sequential, so this imposes no bound. Keeping it as one marker lets the
+/// `SpScanner` impl and the windowed loop carry a single, conditionally-empty
+/// bound instead of duplicating their definitions per cfg.
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+pub trait MaybeSync: Sync {}
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+impl<T: Sync + ?Sized> MaybeSync for T {}
+
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+pub trait MaybeSync {}
+#[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+impl<T: ?Sized> MaybeSync for T {}
+
 /// Trait for scanning silent payment blocks
 ///
 /// This trait abstracts the core scanning functionality, allowing consumers
@@ -43,6 +61,34 @@ pub trait SpScanner {
     fn process_block(
         &mut self,
         blockdata: BlockData,
+    ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)>;
+
+    /// Read-only output matching for a single block.
+    ///
+    /// This is the expensive, embarrassingly-parallel part of the scan
+    /// (candidate-spk derivation + GCS output-filter test + UTXO scan). It only
+    /// reads `&self` (the client / backend) and the block's own data, so it can
+    /// be run concurrently across a window of blocks. The order-dependent state
+    /// updates live in [`commit_block`](SpScanner::commit_block).
+    ///
+    /// # Returns
+    /// * Map of outpoints to owned outputs found in this block
+    fn match_block_outputs(&self, blockdata: &BlockData) -> Result<HashMap<OutPoint, OwnedOutput>>;
+
+    /// Commit a block's matched outputs, then match + record its inputs.
+    ///
+    /// This is the ordered, state-mutating counterpart of
+    /// [`match_block_outputs`](SpScanner::match_block_outputs): it extends the
+    /// owned-outpoint set with `outputs`, matches inputs against that set (which
+    /// depends on every prior block's commit), and removes spent outpoints. It
+    /// MUST be called in ascending block-height order.
+    ///
+    /// # Returns
+    /// * `(found_outputs, found_inputs)` - echoes `outputs` and the spent inputs
+    fn commit_block(
+        &mut self,
+        blockdata: BlockData,
+        outputs: HashMap<OutPoint, OwnedOutput>,
     ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)>;
 
     /// Process block outputs to find owned silent payment outputs
@@ -155,17 +201,19 @@ pub trait SpScanner {
     fn process_blocks<I>(&mut self, start: Height, end: Height, block_data_iter: I) -> Result<()>
     where
         I: Iterator<Item = Result<BlockData>>,
+        Self: MaybeSync,
     {
         process_ordered_block_results(
             self,
             start,
             end,
             block_data_iter,
-            |scanner, blockdata, save_to_storage| {
+            |scanner, blockdata, matched_outputs, save_to_storage| {
                 let blkheight = blockdata.blkheight;
                 let blkhash = blockdata.blkhash;
 
-                let (found_outputs, found_inputs) = scanner.process_block(blockdata)?;
+                let (found_outputs, found_inputs) =
+                    scanner.commit_block(blockdata, matched_outputs)?;
 
                 let mut save_to_storage = save_to_storage;
                 if !found_outputs.is_empty() {
@@ -208,6 +256,7 @@ pub trait SpScanner {
     ) -> Result<()>
     where
         I: Iterator<Item = Result<BlockData>>,
+        Self: MaybeSync,
     {
         // Always use sequential processing
         self.process_blocks(start, end, block_data_iter)
@@ -386,7 +435,47 @@ pub trait SpScanner {
     }
 }
 
+/// Number of contiguous in-order blocks matched in parallel per window.
+///
+/// The expensive output matching ([`SpScanner::match_block_outputs`]) is run
+/// with an outer `par_iter` over the W blocks in a window, so that even sparse
+/// early-mainnet blocks (few tweaks each) keep every core busy — the inner
+/// per-tweak `par_chunks` alone leaves cores idle on such blocks. W is sized to
+/// give the pool well over 2x the core count of independent tasks while keeping
+/// memory bounded to W blocks held at once.
+///
+/// The window is sized to the core count at runtime (capped by this max); a fixed
+/// large window over-buffers and does a long serial commit burst, which regresses
+/// on low-core devices (e.g. mobile) while barely helping — per-core sizing fills
+/// many-core machines without that overhead.
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+const MATCH_WINDOW_MAX: usize = 64;
+
+/// Match-window size, overridable via `BWK_SP_MATCH_WINDOW` for sweeping. When
+/// set it overrides both the per-core sizing and the `MATCH_WINDOW_MAX` cap (so a
+/// sweep can exceed 64); unset keeps the per-core default capped at the max.
+#[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+fn match_window_cap() -> usize {
+    if let Some(n) = std::env::var("BWK_SP_MATCH_WINDOW")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return n;
+    }
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8)
+        .min(MATCH_WINDOW_MAX)
+}
+
 /// Drain block results in height order and run a callback for each contiguous block.
+///
+/// Output matching is performed in parallel across a window of contiguous blocks
+/// (sized to the core count, read-only on the scanner), then `handle_block` is invoked
+/// once per block in ascending height order with that block's matched outputs,
+/// so the order-dependent commit/record/save semantics are byte-identical to the
+/// old per-block sequential path.
 pub fn process_ordered_block_results<S, I, F>(
     scanner: &mut S,
     start: Height,
@@ -395,65 +484,98 @@ pub fn process_ordered_block_results<S, I, F>(
     mut handle_block: F,
 ) -> Result<()>
 where
-    S: SpScanner + ?Sized,
+    S: SpScanner + MaybeSync + ?Sized,
     I: Iterator<Item = Result<BlockData>>,
-    F: FnMut(&mut S, BlockData, bool) -> Result<()>,
+    F: FnMut(&mut S, BlockData, HashMap<OutPoint, OwnedOutput>, bool) -> Result<()>,
 {
     use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
+    let mut iter = block_data_iter;
     let mut update_time = Instant::now();
     let mut pending: BTreeMap<u32, BlockData> = BTreeMap::new();
     let mut next_height = start.to_consensus_u32();
+    let end_height = end.to_consensus_u32();
     let mut first_error: Option<crate::error::Error> = None;
 
-    for blockdata_result in block_data_iter {
-        match blockdata_result {
-            Ok(blockdata) => {
-                pending.insert(blockdata.blkheight.to_consensus_u32(), blockdata);
+    // Window of contiguous in-order blocks awaiting parallel output matching,
+    // sized to the core count (~one block per core) and capped, so it fills cores
+    // on many-core machines without over-buffering on low-core ones.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+    let window_cap = match_window_cap();
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+    let window_cap = 1usize;
+
+    // Process buffered in-order blocks BEFORE pulling more from the fetch channel.
+    // We only pull when the next height isn't already buffered, so `pending` stays
+    // bounded to the fetch reorder window instead of absorbing the whole range, and
+    // the bounded fetch channel can apply backpressure (workers block on send while
+    // we're busy matching). The earlier "pull one every iteration" loop drained the
+    // channel into `pending` faster than matching, defeating backpressure and
+    // buffering all blocks in RAM.
+    'outer: loop {
+        // Collect up to `window_cap` contiguous blocks starting at `next_height`,
+        // pulling from the fetch channel only as far as needed to fill the gap at
+        // each successive height. We stop early at the first missing height so the
+        // window is always a contiguous run (preserving in-order processing and the
+        // bounded-pull backpressure).
+        let mut window: Vec<BlockData> = Vec::with_capacity(window_cap);
+        let mut want = next_height;
+        while window.len() < window_cap {
+            while !pending.contains_key(&want) {
+                match iter.next() {
+                    Some(Ok(blockdata)) => {
+                        pending.insert(blockdata.blkheight.to_consensus_u32(), blockdata);
+                    }
+                    Some(Err(e)) => {
+                        if first_error.is_none() {
+                            first_error = Some(e);
+                        }
+                    }
+                    None => break,
+                }
             }
-            Err(e) if first_error.is_none() => {
-                first_error = Some(e);
+            match pending.remove(&want) {
+                Some(blockdata) => {
+                    window.push(blockdata);
+                    want += 1;
+                }
+                // Channel drained without producing this height: end of stream.
+                None => break,
             }
-            Err(_) => {}
         }
 
-        while let Some(blockdata) = pending.remove(&next_height) {
-            let blkheight = blockdata.blkheight;
-
-            if scanner.should_interrupt() {
-                scanner.save_state()?;
-                return Ok(());
-            }
-
-            let save_to_storage =
-                blkheight == end || update_time.elapsed() > Duration::from_secs(30);
-            handle_block(scanner, blockdata, save_to_storage)?;
-
-            if save_to_storage {
-                update_time = Instant::now();
-            }
-
-            next_height += 1;
+        if window.is_empty() {
+            break 'outer;
         }
-    }
 
-    while let Some(blockdata) = pending.remove(&next_height) {
-        let blkheight = blockdata.blkheight;
-
+        // Check interrupt once per window (the previous per-block check is
+        // preserved at window granularity; W blocks is a small unit of work).
         if scanner.should_interrupt() {
             scanner.save_state()?;
             return Ok(());
         }
 
-        let save_to_storage = blkheight == end || update_time.elapsed() > Duration::from_secs(30);
-        handle_block(scanner, blockdata, save_to_storage)?;
+        // Parallel, read-only output matching across the window. Results are
+        // collected per block; the first error (lowest index) is propagated.
+        let matched = match_window_outputs(scanner, &window)?;
 
-        if save_to_storage {
-            update_time = Instant::now();
+        // Commit each block IN ORDER: this is the only order-dependent work and
+        // its semantics (owned_outpoints update, input match, record, progress,
+        // 30s/last-block save cadence) are identical to the old loop.
+        for (blockdata, outs) in window.into_iter().zip(matched) {
+            let blkheight = blockdata.blkheight;
+
+            let save_to_storage = blkheight.to_consensus_u32() == end_height
+                || update_time.elapsed() > Duration::from_secs(30);
+            handle_block(scanner, blockdata, outs, save_to_storage)?;
+
+            if save_to_storage {
+                update_time = Instant::now();
+            }
+
+            next_height = blkheight.to_consensus_u32() + 1;
         }
-
-        next_height += 1;
     }
 
     match first_error {
@@ -462,21 +584,50 @@ where
     }
 }
 
+/// Match outputs for every block in `window` (read-only), preserving order.
+///
+/// Native+parallel: the blocks are matched concurrently with `par_iter`
+/// (outer parallelism that saturates cores even for sparse blocks). The first
+/// error in height order is returned. WASM/no-parallel: sequential fallback.
+fn match_window_outputs<S>(
+    scanner: &S,
+    window: &[BlockData],
+) -> Result<Vec<HashMap<OutPoint, OwnedOutput>>>
+where
+    S: SpScanner + MaybeSync + ?Sized,
+{
+    #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+    {
+        window
+            .par_iter()
+            .map(|blockdata| scanner.match_block_outputs(blockdata))
+            .collect()
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+    {
+        window
+            .iter()
+            .map(|blockdata| scanner.match_block_outputs(blockdata))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::Error;
     use bitcoin::hashes::Hash;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockScanner {
-        saves: Cell<usize>,
+        saves: AtomicUsize,
     }
 
     impl MockScanner {
         fn new() -> Self {
             Self {
-                saves: Cell::new(0),
+                saves: AtomicUsize::new(0),
             }
         }
     }
@@ -495,6 +646,21 @@ mod tests {
         fn process_block(
             &mut self,
             _blockdata: BlockData,
+        ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)> {
+            panic!("not used");
+        }
+
+        fn match_block_outputs(
+            &self,
+            _blockdata: &BlockData,
+        ) -> Result<HashMap<OutPoint, OwnedOutput>> {
+            Ok(HashMap::new())
+        }
+
+        fn commit_block(
+            &mut self,
+            _blockdata: BlockData,
+            _outputs: HashMap<OutPoint, OwnedOutput>,
         ) -> Result<(HashMap<OutPoint, OwnedOutput>, HashSet<OutPoint>)> {
             panic!("not used");
         }
@@ -530,7 +696,7 @@ mod tests {
         }
 
         fn save_state(&mut self) -> Result<()> {
-            self.saves.set(self.saves.get() + 1);
+            self.saves.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
@@ -610,7 +776,7 @@ mod tests {
             Height::from_consensus(1).expect("valid height"),
             Height::from_consensus(3).expect("valid height"),
             blocks.into_iter(),
-            |_, blockdata, save_to_storage| {
+            |_, blockdata, _matched_outputs, save_to_storage| {
                 seen.borrow_mut()
                     .push((blockdata.blkheight.to_consensus_u32(), save_to_storage));
                 Ok(())
@@ -620,7 +786,7 @@ mod tests {
 
         assert_eq!(seen.into_inner(), vec![(1, false), (2, false), (3, true)]);
         assert_eq!(err.to_string(), "sighash: boom");
-        assert_eq!(scanner.saves.get(), 0);
+        assert_eq!(scanner.saves.load(Ordering::Relaxed), 0);
     }
 }
 
