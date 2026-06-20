@@ -11,6 +11,7 @@ pub enum Error {
     Secp256k1Error(crate::core::secp256k1::Error),
     OutOfRangeError(crate::core::secp256k1::scalar::OutOfRangeError),
     IOError(std::io::Error),
+    MalformedTweak,
 }
 
 impl fmt::Display for Error {
@@ -25,6 +26,7 @@ impl fmt::Display for Error {
             Error::Secp256k1Error(e) => e.fmt(f),
             Error::OutOfRangeError(e) => e.fmt(f),
             Error::IOError(e) => e.fmt(f),
+            Error::MalformedTweak => write!(f, "malformed tweak: not a valid secp256k1 point"),
         }
     }
 }
@@ -58,5 +60,11 @@ impl From<crate::core::secp256k1::scalar::OutOfRangeError> for Error {
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::IOError(e)
+    }
+}
+
+impl From<bwk_spscan_sys::MalformedPubkey> for Error {
+    fn from(_: bwk_spscan_sys::MalformedPubkey) -> Self {
+        Error::MalformedTweak
     }
 }

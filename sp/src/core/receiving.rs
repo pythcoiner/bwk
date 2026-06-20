@@ -468,16 +468,15 @@ impl Receiver {
     /// recipient scanning.
     pub fn candidate_output_spks(
         &self,
-        tweak: &PublicKey,
+        tweak: &[u8; 33],
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
     ) -> Result<Vec<[u8; 34]>, Error> {
-        // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
-        // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
-        let tweak = tweak.serialize();
+        // The tweak is handed raw to the byte-FFI kernel, which validates it; a
+        // malformed tweak surfaces as a `MalformedPubkey` -> `Error::MalformedTweak`.
         let scan_key = scan_key.secret_bytes();
         let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
-        let xonly = bwk_spscan_sys::scan_spend_points(&scan_key, &tweak, &spend_points);
+        let xonly = bwk_spscan_sys::scan_spend_points(&scan_key, tweak, &spend_points)?;
         Ok(xonly
             .into_iter()
             .map(|xonly_bytes| {
@@ -491,39 +490,36 @@ impl Receiver {
     }
 
     /// The candidate output spks for a batch of tweaks, derived in a single
-    /// native call. Returns one inner vector per tweak (in the same order as
-    /// `tweaks`), each holding one 34-byte p2tr spk (`0x51 0x20 || xonly`) per
-    /// spend point. This is the byte-identical batched equivalent of calling
-    /// [`candidate_output_spks`](Receiver::candidate_output_spks) once per tweak;
-    /// the native call phases the work so per-chunk field inversions are batched.
+    /// native call. Returns one flat vector of 34-byte p2tr spks
+    /// (`0x51 0x20 || xonly`), row-major by tweak: the spk for tweak `t`, spend
+    /// point `s` of `n_spend = spend_points.len()` is at index `t * n_spend + s`
+    /// (tweaks in `tweaks` order, spend points in `spend_points` order). This is
+    /// the byte-identical batched equivalent of calling
+    /// [`candidate_output_spks`](Receiver::candidate_output_spks) once per tweak
+    /// and concatenating; the native call phases the work so per-chunk field
+    /// inversions are batched.
     ///
     /// It runs in variable time over the scan key and must only be used for
     /// recipient scanning.
     pub fn candidate_output_spks_batch(
         &self,
-        tweaks: &[PublicKey],
+        tweaks: &[[u8; 33]],
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
-    ) -> Result<Vec<Vec<[u8; 34]>>, Error> {
-        // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
-        // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
-        let tweaks: Vec<[u8; 33]> = tweaks.iter().map(|t| t.serialize()).collect();
+    ) -> Result<Vec<[u8; 34]>, Error> {
+        // Tweaks are handed raw to the byte-FFI kernel, which validates them; a
+        // malformed tweak surfaces as a `MalformedPubkey` -> `Error::MalformedTweak`.
         let scan_key = scan_key.secret_bytes();
         let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
-        let per_tweak = bwk_spscan_sys::scan_spend_points_batch(&scan_key, &tweaks, &spend_points);
-        Ok(per_tweak
+        let xonly = bwk_spscan_sys::scan_spend_points_batch(&scan_key, tweaks, &spend_points)?;
+        Ok(xonly
             .into_iter()
-            .map(|xonly| {
-                xonly
-                    .into_iter()
-                    .map(|xonly_bytes| {
-                        let mut spk = [0u8; 34];
-                        // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
-                        spk[..2].copy_from_slice(&[0x51, 0x20]);
-                        spk[2..].copy_from_slice(&xonly_bytes);
-                        spk
-                    })
-                    .collect()
+            .map(|xonly_bytes| {
+                let mut spk = [0u8; 34];
+                // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
+                spk[..2].copy_from_slice(&[0x51, 0x20]);
+                spk[2..].copy_from_slice(&xonly_bytes);
+                spk
             })
             .collect())
     }
@@ -587,26 +583,30 @@ mod tests {
         receiver.add_label(Label::new(scan_key, 1)).unwrap();
         receiver.add_label(Label::new(scan_key, 2)).unwrap();
         let spend_points = receiver.candidate_spend_points().unwrap();
-        assert!(spend_points.len() > 1);
+        let n_spend = spend_points.len();
+        assert!(n_spend > 1);
 
         // Several sizes, exercising the K-lane lockstep tail (counts that are not
         // a multiple of the lane count) and crossing the native tweak-chunk (32)
         // and candidate sub-chunk (64) boundaries.
         for n_tweaks in [1usize, 5, 6, 7, 13, 33, 64, 70, 100] {
-            let tweaks: Vec<PublicKey> = (0..n_tweaks)
-                .map(|i| PublicKey::from_secret_key(&secp, &key("tweak", i)))
+            let tweaks: Vec<[u8; 33]> = (0..n_tweaks)
+                .map(|i| PublicKey::from_secret_key(&secp, &key("tweak", i)).serialize())
                 .collect();
 
             let batched = receiver
                 .candidate_output_spks_batch(&tweaks, &scan_key, &spend_points)
                 .unwrap();
-            assert_eq!(batched.len(), n_tweaks);
+            assert_eq!(batched.len(), n_tweaks * n_spend);
 
             for (t, tweak) in tweaks.iter().enumerate() {
                 let per_tweak = receiver
                     .candidate_output_spks(tweak, &scan_key, &spend_points)
                     .unwrap();
-                assert_eq!(batched[t], per_tweak);
+                assert_eq!(
+                    &batched[t * n_spend..(t + 1) * n_spend],
+                    per_tweak.as_slice()
+                );
             }
         }
     }

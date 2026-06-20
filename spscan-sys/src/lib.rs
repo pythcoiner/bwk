@@ -11,12 +11,28 @@
 //! the default illegal/error callbacks are provided here in Rust, exactly as the
 //! upstream secp256k1-sys does.
 //!
-//! No async, fail-loud: a malformed pubkey reaching the kernel is a bug, so the
-//! safe API panics rather than swallowing it.
+//! No async, no pre-validation: the safe API hands raw tweak/spend bytes
+//! straight to the C kernel (which validates each point via `ec_pubkey_parse`)
+//! and surfaces a malformed point as a [`MalformedPubkey`] `Err` rather than
+//! panicking, so a bad oracle tweak fails gracefully on a worker thread.
 
 use std::alloc;
 use std::ffi::{c_char, c_int, c_uchar, c_uint, c_void};
+use std::fmt;
 use std::ptr::NonNull;
+
+/// A tweak or spend point handed to the scan kernel was not a valid compressed
+/// secp256k1 point (the C `ec_pubkey_parse` rejected it).
+#[derive(Debug)]
+pub struct MalformedPubkey;
+
+impl fmt::Display for MalformedPubkey {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("malformed secp256k1 pubkey reached the SP-scan kernel")
+    }
+}
+
+impl std::error::Error for MalformedPubkey {}
 
 // Flags value matching SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY (the
 // fork's START_SIGN | START_VERIFY). Sufficient for all functionality.
@@ -165,14 +181,15 @@ impl Drop for Ctx {
 /// Per-tweak light-client scan: returns one x-only candidate (32 bytes) per spend
 /// point, in spend-point order, for the single `tweak`.
 ///
-/// Panics on a malformed pubkey or kernel failure (a bug at this layer).
+/// Returns `Err` on a malformed pubkey: `tweak`/`spend_points` are handed raw to
+/// the C kernel, which rejects a non-curve-point.
 pub fn scan_spend_points(
     scan_key: &[u8; 32],
     tweak: &[u8; 33],
     spend_points: &[[u8; 33]],
-) -> Vec<[u8; 32]> {
+) -> Result<Vec<[u8; 32]>, MalformedPubkey> {
     if spend_points.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let ctx = Ctx::new();
     let n_spend = spend_points.len();
@@ -192,27 +209,27 @@ pub fn scan_spend_points(
             n_spend,
         )
     };
-    assert_eq!(
-        ret, 1,
-        "bwkspscan_scan_spend_points failed (malformed pubkey?)"
-    );
+    if ret != 1 {
+        return Err(MalformedPubkey);
+    }
 
-    pack_xonly(&out, n_out)
+    Ok(pack_xonly(&out, n_out))
 }
 
 /// Batched light-client scan: returns the x-only candidates for every
-/// (tweak, spend point) pair, grouped by tweak (outer vec = one per tweak, in
-/// `tweaks` order; inner = one per spend point, in `spend_points` order).
+/// (tweak, spend point) pair as one flat buffer, row-major by tweak (candidate
+/// for tweak `t`, spend point `s` of `n_spend` is at index `t * n_spend + s`;
+/// tweaks in `tweaks` order, spend points in `spend_points` order).
 ///
-/// Byte-identical to calling [`scan_spend_points`] once per tweak. Panics on a
-/// malformed pubkey or kernel failure.
+/// Byte-identical to calling [`scan_spend_points`] once per tweak and
+/// concatenating. Returns `Err` on a malformed pubkey.
 pub fn scan_spend_points_batch(
     scan_key: &[u8; 32],
     tweaks: &[[u8; 33]],
     spend_points: &[[u8; 33]],
-) -> Vec<Vec<[u8; 32]>> {
+) -> Result<Vec<[u8; 32]>, MalformedPubkey> {
     if tweaks.is_empty() || spend_points.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let ctx = Ctx::new();
     let n_tweaks = tweaks.len();
@@ -235,14 +252,12 @@ pub fn scan_spend_points_batch(
             n_spend,
         )
     };
-    assert_eq!(
-        ret, 1,
-        "bwkspscan_scan_spend_points_batch failed (malformed pubkey?)"
-    );
-    assert_eq!(n_out, total, "batch wrote unexpected candidate count");
+    if ret != 1 {
+        return Err(MalformedPubkey);
+    }
+    debug_assert_eq!(n_out, total, "batch wrote unexpected candidate count");
 
-    let flat = pack_xonly(&out, n_out);
-    flat.chunks(n_spend).map(|c| c.to_vec()).collect()
+    Ok(pack_xonly(&out, n_out))
 }
 
 /// Slice the flat byte buffer into `n` 32-byte x-only candidates.

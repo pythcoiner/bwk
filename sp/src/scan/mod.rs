@@ -122,7 +122,7 @@ pub(crate) fn script_to_secret_map(
 /// match the caller recovers the shared secrets via [`script_to_secret_map`].
 pub(crate) fn candidate_spks(
     sp_receiver: &SpReceiver,
-    tweaks: &[PublicKey],
+    tweaks: &[[u8; 33]],
 ) -> Result<Vec<[u8; 34]>, receiver::error::Error> {
     let scan_key = sp_receiver.get_scan_key();
     let spend_points = sp_receiver.receiver.candidate_spend_points()?;
@@ -131,7 +131,7 @@ pub(crate) fn candidate_spks(
     let __t = std::time::Instant::now();
     // One batched native call per chunk of tweaks. Sequential within the
     // block; the scan parallelizes across blocks in the match window.
-    let spks: Result<Vec<Vec<Vec<[u8; 34]>>>, receiver::error::Error> = tweaks
+    let spks: Result<Vec<Vec<[u8; 34]>>, receiver::error::Error> = tweaks
         .chunks(candidate_tweak_chunk())
         .map(|chunk| {
             sp_receiver
@@ -143,7 +143,7 @@ pub(crate) fn candidate_spks(
     #[cfg(feature = "scan-profile")]
     profiling::add(&profiling::CANDIDATES_NS, __t.elapsed());
 
-    Ok(spks?.into_iter().flatten().flatten().collect())
+    Ok(spks?.into_iter().flatten().collect())
 }
 
 /// Fetch tweaks + new-utxo filter for every height in `range`, fanning out over
@@ -556,12 +556,7 @@ fn candidate_match(
     if blockdata.tweaks.is_empty() {
         return Ok(false);
     }
-    let tweaks: Vec<bitcoin::secp256k1::PublicKey> = blockdata
-        .tweaks
-        .iter()
-        .map(|t| bitcoin::secp256k1::PublicKey::from_slice(t))
-        .collect::<Result<_, _>>()?;
-    let candidate_spks = candidate_spks(sp_receiver, &tweaks)?;
+    let candidate_spks = candidate_spks(sp_receiver, &blockdata.tweaks)?;
     let candidate_spks: Vec<&[u8; 34]> = candidate_spks.iter().collect();
 
     #[cfg(feature = "scan-profile")]
@@ -1313,5 +1308,33 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             .lock()
             .expect("poisoned")
             .last_scanned_height()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A malformed (non-curve-point) tweak must surface as an `Err`, never a
+    // panic on the worker thread. The byte-FFI kernel rejects the point and the
+    // binding returns `MalformedPubkey`, mapped to `Error::MalformedTweak`. This
+    // pins the panic->Result conversion: integration scans only ever feed valid
+    // tweaks, so this graceful-failure path has no other coverage.
+    #[test]
+    fn candidate_spks_rejects_malformed_tweak() {
+        let sp_receiver = SpReceiver::default();
+        // Invalid compressed-point prefix (must be 0x02/0x03), so the C
+        // `ec_pubkey_parse` rejects it outright.
+        let bad = [0x01u8; 33];
+        let err = candidate_spks(&sp_receiver, &[bad]);
+        assert!(
+            matches!(
+                err,
+                Err(receiver::error::Error::SilentPayments(
+                    crate::core::error::Error::MalformedTweak
+                ))
+            ),
+            "expected MalformedTweak Err, got {err:?}"
+        );
     }
 }

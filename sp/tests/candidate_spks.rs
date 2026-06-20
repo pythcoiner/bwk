@@ -31,9 +31,10 @@ fn candidate_spks_match_get_spks_from_shared_secret() {
 
     for _ in 0..200 {
         let tweak = PublicKey::from_secret_key(&secp, &SecretKey::new(&mut rng));
+        let tweak_bytes = tweak.serialize();
 
         let fast: HashSet<[u8; 34]> = receiver
-            .candidate_output_spks(&tweak, &scan_key, &spend_points)
+            .candidate_output_spks(&tweak_bytes, &scan_key, &spend_points)
             .unwrap()
             .into_iter()
             .collect();

@@ -35,8 +35,10 @@ fn main() {
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(200_000);
-    let tweaks: Vec<PublicKey> = (0..n)
-        .map(|i| PublicKey::from_secret_key(&secp, &key("tweak", i)))
+    // Serialize the tweaks once, up front, so the timed loops measure the EC
+    // kernel rather than per-round point serialization.
+    let tweaks: Vec<[u8; 33]> = (0..n)
+        .map(|i| PublicKey::from_secret_key(&secp, &key("tweak", i)).serialize())
         .collect();
 
     println!("tweaks={n} spend_points={}", spend_points.len());
@@ -49,7 +51,7 @@ fn main() {
         let b = receiver
             .candidate_output_spks_batch(&tweaks[..1], &scan_key, &spend_points)
             .unwrap();
-        assert_eq!(a, b[0], "per-tweak vs batch mismatch");
+        assert_eq!(a, b, "per-tweak vs batch mismatch");
     }
 
     let mut acc = 0u64;
@@ -69,7 +71,7 @@ fn main() {
         let rb = receiver
             .candidate_output_spks_batch(&tweaks, &scan_key, &spend_points)
             .unwrap();
-        acc = acc.wrapping_add(rb[0][0][2] as u64);
+        acc = acc.wrapping_add(rb[0][2] as u64);
         let batch_ns = t.elapsed().as_nanos() as f64 / n as f64;
 
         best_per = best_per.min(per_ns);

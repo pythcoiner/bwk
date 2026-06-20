@@ -169,14 +169,13 @@ fn vectors_1_tweak_1_spend() {
     let tweaks = tweaks();
     let spends = spends();
 
-    let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[0], &spends[..1]);
+    let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[0], &spends[..1]).unwrap();
     assert_eq!(per.len(), 1);
     assert_eq!(per[0], expected(0, 0));
 
-    let bat = bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..1], &spends[..1]);
+    let bat = bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..1], &spends[..1]).unwrap();
     assert_eq!(bat.len(), 1);
-    assert_eq!(bat[0].len(), 1);
-    assert_eq!(bat[0][0], expected(0, 0));
+    assert_eq!(bat[0], expected(0, 0));
 }
 
 #[test]
@@ -189,21 +188,25 @@ fn vectors_5_tweaks_2_spends() {
 
     // Per-tweak path == vectors.
     for t in 0..n_tweaks {
-        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]);
+        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
         assert_eq!(per.len(), n_spend);
         for s in 0..n_spend {
             assert_eq!(per[s], expected(t, s), "per-tweak mismatch at t={t} s={s}");
         }
     }
 
-    // Batch path == vectors, and grouped per tweak.
+    // Batch path == vectors; flat, row-major by tweak.
     let bat =
-        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend]);
-    assert_eq!(bat.len(), n_tweaks);
+        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend])
+            .unwrap();
+    assert_eq!(bat.len(), n_tweaks * n_spend);
     for t in 0..n_tweaks {
-        assert_eq!(bat[t].len(), n_spend);
         for s in 0..n_spend {
-            assert_eq!(bat[t][s], expected(t, s), "batch mismatch at t={t} s={s}");
+            assert_eq!(
+                bat[t * n_spend + s],
+                expected(t, s),
+                "batch mismatch at t={t} s={s}"
+            );
         }
     }
 }
@@ -217,21 +220,21 @@ fn vectors_33_tweaks_2_spends() {
     let n_spend = 2;
 
     let bat =
-        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend]);
-    assert_eq!(bat.len(), n_tweaks);
+        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend])
+            .unwrap();
+    assert_eq!(bat.len(), n_tweaks * n_spend);
 
     let mut per_all: Vec<Vec<[u8; 32]>> = Vec::with_capacity(n_tweaks);
     for t in 0..n_tweaks {
-        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]);
+        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
         per_all.push(per);
     }
 
     for t in 0..n_tweaks {
-        assert_eq!(bat[t].len(), n_spend);
         assert_eq!(per_all[t].len(), n_spend);
         for s in 0..n_spend {
             let want = expected(t, s);
-            assert_eq!(bat[t][s], want, "batch mismatch at t={t} s={s}");
+            assert_eq!(bat[t * n_spend + s], want, "batch mismatch at t={t} s={s}");
             assert_eq!(per_all[t][s], want, "per-tweak mismatch at t={t} s={s}");
         }
     }
