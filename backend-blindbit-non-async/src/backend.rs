@@ -14,7 +14,38 @@ use rayon::{
 use crate::client::{BlindbitClient, HttpClient};
 use spdk_core::{BlockData, ChainBackend, SpentIndexData, UtxoData};
 
-const CONCURRENT_FILTER_REQUESTS: usize = 200;
+/// Number of blocks fetched concurrently. Enough to stay ahead of the
+/// single-threaded matcher even on a high-latency link (~3 requests/block), while
+/// keeping the thread/connection count modest for mobile.
+const CONCURRENT_FILTER_REQUESTS: usize = 64;
+
+/// Bound on the channel of fetched-but-unprocessed blocks. Fetching outruns the
+/// matcher, so without a bound the whole range is buffered in RAM (~6 GB for
+/// mainnet); a bounded channel applies backpressure (fetch workers block on send
+/// when full), capping memory to ~this many blocks regardless of range. 64 blocks
+/// is ~0.5s of matcher lookahead, so the matcher never starves.
+const BLOCK_CHANNEL_CAPACITY: usize = 64;
+
+/// Fetch concurrency, overridable via `BWK_SP_FETCH_CONCURRENCY` for tuning a
+/// given link/oracle (more helps only when fetch is latency-bound, not when the
+/// network bandwidth or the oracle is the ceiling). Defaults to the const above.
+fn fetch_concurrency() -> usize {
+    std::env::var("BWK_SP_FETCH_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(CONCURRENT_FILTER_REQUESTS)
+}
+
+/// Fetch lookahead buffer (blocks), overridable via `BWK_SP_FETCH_CHANNEL_CAP`.
+/// Larger smooths bursty fetch but raises peak RAM; keep modest on mobile.
+fn fetch_channel_cap() -> usize {
+    std::env::var("BWK_SP_FETCH_CHANNEL_CAP")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(BLOCK_CHANNEL_CAPACITY)
+}
 
 pub struct BlindbitBackend<H: HttpClient> {
     client: BlindbitClient<H>,
@@ -74,9 +105,12 @@ impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
 
         let client = Arc::new(self.client.clone());
 
-        let (sender, receiver) = mpsc::channel();
+        // Bounded channel: applies backpressure so fetch workers block on send when
+        // the matcher is behind, capping buffered blocks (and thus RAM) regardless
+        // of range. See BLOCK_CHANNEL_CAPACITY.
+        let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
 
-        let pool = ThreadPool::new(CONCURRENT_FILTER_REQUESTS);
+        let pool = ThreadPool::new(fetch_concurrency());
 
         for height in range {
             let client = client.clone();
@@ -97,10 +131,11 @@ impl<H: HttpClient + Clone + 'static> BlindbitBackend<H> {
     ) -> spdk_core::BlockDataIterator {
         let client = Arc::new(self.client.clone());
 
-        let (sender, receiver) = mpsc::channel();
+        // Bounded channel for backpressure; see BLOCK_CHANNEL_CAPACITY.
+        let (sender, receiver) = mpsc::sync_channel(fetch_channel_cap());
 
         let pool = ThreadPoolBuilder::new()
-            .num_threads(CONCURRENT_FILTER_REQUESTS)
+            .num_threads(fetch_concurrency())
             .build()
             .unwrap();
 
@@ -153,7 +188,7 @@ fn get_block_data_for_height<H>(
     height: u32,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
-    sender: mpsc::Sender<spdk_core::error::Result<BlockData>>,
+    sender: mpsc::SyncSender<spdk_core::error::Result<BlockData>>,
     client: Arc<BlindbitClient<H>>,
 ) where
     H: HttpClient,

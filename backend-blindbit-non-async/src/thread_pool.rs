@@ -13,6 +13,13 @@ pub struct ThreadPool {
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
 
+/// Per-worker stack size. Workers fetch over HTTP(S) and parse tweaks/filters; the
+/// SP work is shallow, so the floor is the rustls/webpki TLS handshake on an HTTPS
+/// oracle (cert-chain verification), comfortable in ~256 KiB and tight below
+/// ~128 KiB. 256 KiB is 32x under the ~8 MiB glibc default — a big cut to the
+/// per-worker virtual reserve on 32-bit/mobile targets — while staying TLS-safe.
+const WORKER_STACK_SIZE: usize = 256 * 1024;
+
 impl ThreadPool {
     pub fn new(size: usize) -> Self {
         let (tx, rx) = mpsc::channel::<Task>();
@@ -23,13 +30,17 @@ impl ThreadPool {
         for _ in 0..size {
             let rx = Arc::clone(&rx);
             #[allow(clippy::while_let_loop)]
-            workers.push(thread::spawn(move || loop {
-                let task: Task = match rx.lock().expect("poisoned").recv() {
-                    Ok(task) => task,
-                    Err(_) => break,
-                };
-                task();
-            }));
+            let worker = thread::Builder::new()
+                .stack_size(WORKER_STACK_SIZE)
+                .spawn(move || loop {
+                    let task: Task = match rx.lock().expect("poisoned").recv() {
+                        Ok(task) => task,
+                        Err(_) => break,
+                    };
+                    task();
+                })
+                .expect("failed to spawn fetch worker");
+            workers.push(worker);
         }
         ThreadPool {
             workers,
