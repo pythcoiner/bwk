@@ -71,9 +71,8 @@ fn test_reorg_detection_block_hash_mismatch() {
 /// 3. After rescan, the coin should not be found (was in orphaned block)
 #[test]
 fn test_reorg_removes_orphaned_coins() {
-    use bwk_sign::bip39;
-    use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::SpClient;
+    use bwk_sign::{bip39, HotSigner};
+    use bwk_sp::receiver::SpReceiver;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
 
@@ -95,7 +94,8 @@ fn test_reorg_removes_orphaned_coins() {
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
     let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let sp_receiver =
+        SpReceiver::new_from_mnemonic(mnemonic.clone(), network).expect("sp_receiver");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
@@ -116,7 +116,7 @@ fn test_reorg_removes_orphaned_coins() {
         vout: index as u32,
     };
 
-    let sp_address = sp_client.get_receiving_address();
+    let sp_address = sp_receiver.get_receiving_address();
     let recipient_pubkey =
         generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
     let sp_tx = swap_to_sp(
@@ -195,9 +195,8 @@ fn test_reorg_removes_orphaned_coins() {
 /// 4. After rescan, coin should be found again
 #[test]
 fn test_reorg_coin_reappears_in_new_chain() {
-    use bwk_sign::bip39;
-    use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::SpClient;
+    use bwk_sign::{bip39, HotSigner};
+    use bwk_sp::receiver::SpReceiver;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
     use serde_json::Value;
 
@@ -219,7 +218,8 @@ fn test_reorg_coin_reappears_in_new_chain() {
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
     let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
+    let sp_receiver =
+        SpReceiver::new_from_mnemonic(mnemonic.clone(), network).expect("sp_receiver");
 
     let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
@@ -240,7 +240,7 @@ fn test_reorg_coin_reappears_in_new_chain() {
         vout: index as u32,
     };
 
-    let sp_address = sp_client.get_receiving_address();
+    let sp_address = sp_receiver.get_receiving_address();
     let recipient_pubkey =
         generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
     let sp_tx = swap_to_sp(
@@ -364,168 +364,4 @@ fn test_reorg_deep_reorganization() {
         .unwrap()
         .to_consensus_u32();
     assert_eq!(backend_height, 119, "Backend should see new chain at 119");
-}
-
-/// Tests rescanning after a reorg that orphans a spending tx.
-///
-/// This test verifies:
-/// 1. Create SP output and detect it
-/// 2. Spend the output and confirm the spend
-/// 3. Force reorg that orphans only the spending tx (not original output)
-/// 4. Rescan the replacement chain without failing
-#[test]
-fn test_reorg_orphaned_spend_rescan_completes() {
-    use bwk_sign::bip39;
-    use bwk_sign::HotSigner;
-    use bwk_sp::spdk_core::{FeeRate, Recipient, RecipientAddress, SpClient};
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
-    use serde_json::Value;
-
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let network = bitcoin::Network::Regtest;
-
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate initial blocks
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
-
-    // 4. Setup SP client and signer
-    let mnemonic_str = test_mnemonic();
-    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
-    let sp_client = SpClient::new_from_mnemonic(mnemonic.clone(), network).expect("sp_client");
-
-    let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str).expect("signer");
-    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
-
-    // 5. Fund taproot address
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&blindbit_url, 103);
-
-    // 6. Create SP transaction (funding our wallet)
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
-    let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
-        .into_iter()
-        .next()
-        .expect("txout");
-    let outpoint = OutPoint {
-        txid: fund_txid,
-        vout: index as u32,
-    };
-
-    let sp_address = sp_client.get_receiving_address();
-    let recipient_pubkey =
-        generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp).expect("pk");
-    let sp_tx = swap_to_sp(
-        sk,
-        outpoint,
-        txout,
-        recipient_pubkey,
-        bitcoin::Amount::from_sat(1000),
-        &secp,
-    )
-    .expect("sp tx");
-
-    // 7. Broadcast and mine SP funding tx
-    let sp_txid = sp_tx.compute_txid();
-    bitcoind.send_raw_transaction(&sp_tx).expect("broadcast");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("height") as u32;
-    wait_for_sync_and_index(&blindbit_url, sp_height);
-
-    // 8. Scan to find the SP output
-    let mut account = test_account_with_mnemonic("reorg-spent", mnemonic_str, &blindbit_url);
-    account.scan_blocks(Some(1), Some(sp_height)).expect("scan");
-
-    let sp_outpoint = OutPoint {
-        txid: sp_txid,
-        vout: 0,
-    };
-    assert!(
-        account.coins().contains_key(&sp_outpoint),
-        "Should find SP output"
-    );
-
-    // 9. Create and broadcast a spend transaction
-    let utxos: Vec<_> = account
-        .coins()
-        .values()
-        .map(|coin| (*coin.outpoint(), coin.owned_output().clone()))
-        .collect();
-    assert!(!utxos.is_empty(), "Should have UTXOs to spend");
-
-    let fee_rate = FeeRate::from_sat_per_vb(1.0);
-    let recipient = Recipient {
-        address: RecipientAddress::SpAddress(sp_address),
-        amount: bitcoin::Amount::from_sat(100_000),
-    };
-    let unsigned = account
-        .sp_client()
-        .create_new_transaction(utxos, vec![recipient], fee_rate, network)
-        .expect("create tx");
-    let finalized = SpClient::finalize_transaction(unsigned).expect("finalize");
-
-    let mut aux_rand = [0u8; 32];
-    getrandom::getrandom(&mut aux_rand).expect("random");
-    let signed = account
-        .sp_client()
-        .sign_transaction(finalized, &aux_rand)
-        .expect("sign");
-
-    let spend_txid = signed.compute_txid();
-    bitcoind
-        .send_raw_transaction(&signed)
-        .expect("broadcast spend");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let spend_height = bwk_test::get_tx_height(bitcoind, spend_txid).expect("spend height") as u32;
-    wait_for_sync_and_index(&blindbit_url, spend_height);
-
-    // 10. Scan to confirm spent status
-    let mut account2 = test_account_with_mnemonic("reorg-spent-check", mnemonic_str, &blindbit_url);
-    account2
-        .scan_blocks(Some(sp_height), Some(spend_height))
-        .expect("scan for spend");
-
-    // 11. Force reorg that orphans the spend tx block
-    let spend_block_hash: String = bitcoind
-        .call("getblockhash", &[spend_height.into()])
-        .unwrap();
-    let _: Value = bitcoind
-        .call("invalidateblock", &[spend_block_hash.clone().into()])
-        .unwrap();
-
-    // 12. Verify the chain height decreased
-    let height_after_invalidate: u32 = bitcoind.call("getblockcount", &[]).unwrap();
-    assert!(
-        height_after_invalidate < spend_height,
-        "Height should decrease after invalidating spend block"
-    );
-
-    // 13. Mine new chain (spend tx goes back to mempool and may get re-mined)
-    bwk_test::generate_blocks(bitcoind, 3);
-    let new_height: u32 = bitcoind.call("getblockcount", &[]).unwrap();
-    wait_for_sync_and_index(&blindbit_url, new_height);
-
-    // 14. Verify the new chain is different (block hash changed at spend_height)
-    let new_block_hash: String = bitcoind
-        .call("getblockhash", &[spend_height.into()])
-        .unwrap();
-    assert_ne!(
-        spend_block_hash, new_block_hash,
-        "Block hash should change after reorg"
-    );
-
-    // 15. Rescan after reorg.
-    let mut account3 =
-        test_account_with_mnemonic("reorg-spent-rescan", mnemonic_str, &blindbit_url);
-    account3
-        .scan_blocks(Some(1), Some(new_height))
-        .expect("rescan after reorg");
 }

@@ -1,8 +1,10 @@
 use std::{fs::File, io::Read, str::FromStr};
 
 use bitcoin_hashes::Hash;
-use bwk_sp::silentpayments::secp256k1::{Message, Scalar, SecretKey, XOnlyPublicKey};
-use bwk_sp::silentpayments::SilentPaymentAddress;
+use bwk_sp::core::{
+    secp256k1::{Message, Scalar, SecretKey, XOnlyPublicKey},
+    utils::common::SilentPaymentAddress,
+};
 use serde_json::from_str;
 
 use super::structs::{OutputWithSignature, TestData};
@@ -73,8 +75,8 @@ pub fn decode_recipients(recipients: &[String]) -> Vec<SilentPaymentAddress> {
 pub fn verify_and_calculate_signatures(
     key_tweaks: Vec<Scalar>,
     b_spend: SecretKey,
-) -> Result<Vec<OutputWithSignature>, bwk_sp::silentpayments::secp256k1::Error> {
-    let secp = bwk_sp::silentpayments::secp256k1::Secp256k1::new();
+) -> Result<Vec<OutputWithSignature>, bwk_sp::core::secp256k1::Error> {
+    let secp = bwk_sp::core::secp256k1::Secp256k1::new();
 
     let msg = Message::from_digest(bitcoin_hashes::sha256::Hash::hash(b"message").to_byte_array());
     let aux = bitcoin_hashes::sha256::Hash::hash(b"random auxiliary data").to_byte_array();

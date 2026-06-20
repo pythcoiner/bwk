@@ -7,23 +7,20 @@
 //! After creating a [`Receiver`] object, you can call [`scan_transaction`](Receiver::scan_transaction),
 //! to scan a specific transaction for outputs belonging to this receiver.
 //! For this, you need to have calculated the `ecdh_shared_secret` beforehand.
-//! To do so, you can use [`calculate_ecdh_shared_secret`](`crate::silentpayments::utils::receiving::calculate_ecdh_shared_secret`) from the `utils` module.
+//! To do so, you can use [`calculate_ecdh_shared_secret`](`crate::core::receiving::calculate_ecdh_shared_secret`) from the `utils` module.
 //!
-//! For a concrete example, have a look at the [test vectors](https://github.com/cygnet3/rust-silentpayments/blob/master/tests/vector_tests.rs).
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-};
+//! For a concrete example, have a look at the [test vectors](https://github.com/cygnet3/rust-core/blob/master/tests/vector_tests.rs).
+use std::{collections::HashMap, fmt};
 
-use crate::silentpayments::secp256k1::{
-    Parity, PublicKey, Scalar, Secp256k1, SecretKey, XOnlyPublicKey,
-};
-use crate::silentpayments::{
+use crate::core::{
+    error::Error,
+    secp256k1::{
+        ecdh::shared_secret_point, Parity, PublicKey, Scalar, Secp256k1, SecretKey, XOnlyPublicKey,
+    },
     utils::{
-        common::{calculate_P_n, calculate_t_n},
+        common::{calculate_P_n, calculate_t_n, Network, SilentPaymentAddress},
         hash::LabelHash,
     },
-    Error, Network, Result, SilentPaymentAddress,
 };
 use bimap::BiMap;
 use serde::{
@@ -43,10 +40,6 @@ impl Label {
         Label {
             s: LabelHash::from_b_scan_and_m(b_scan, m).to_scalar(),
         }
-    }
-
-    pub fn into_inner(self) -> Scalar {
-        self.s
     }
 
     pub fn as_inner(&self) -> &Scalar {
@@ -80,7 +73,7 @@ impl From<Scalar> for Label {
 impl TryFrom<String> for Label {
     type Error = Error;
 
-    fn try_from(s: String) -> Result<Label> {
+    fn try_from(s: String) -> Result<Label, Self::Error> {
         Label::try_from(&s[..])
     }
 }
@@ -88,7 +81,7 @@ impl TryFrom<String> for Label {
 impl TryFrom<&str> for Label {
     type Error = Error;
 
-    fn try_from(s: &str) -> Result<Label> {
+    fn try_from(s: &str) -> Result<Label, Self::Error> {
         // Is it valid hex?
         let bytes = hex::decode(s)?;
         // Is it 32B long?
@@ -107,7 +100,7 @@ impl From<Label> for Scalar {
 }
 
 impl Serialize for Label {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -116,7 +109,7 @@ impl Serialize for Label {
 }
 
 impl<'de> Deserialize<'de> for Label {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -278,7 +271,7 @@ impl Receiver {
         spend_pubkey: PublicKey,
         change_label: Label,
         network: Network,
-    ) -> Result<Self> {
+    ) -> Result<Self, Error> {
         let labels: BiMap<Label, PublicKey> = BiMap::new();
 
         // Check version, we just refuse anything other than 0 for now
@@ -305,7 +298,7 @@ impl Receiver {
 
     /// Takes a [Label] and adds it to the list of labels that this recipient uses.
     /// Returns a bool on success, [true] if the label was new, [false] if it already existed in our list.
-    pub fn add_label(&mut self, label: Label) -> Result<bool> {
+    pub fn add_label(&mut self, label: Label) -> Result<bool, Error> {
         let secp = Secp256k1::signing_only();
 
         let m = SecretKey::from_slice(&label.as_inner().to_be_bytes())?;
@@ -317,37 +310,6 @@ impl Receiver {
         let old = self.labels.insert(label, mG);
 
         Ok(!old.did_overwrite())
-    }
-
-    /// List all currently known labels used by this recipient.
-    pub fn list_labels(&self) -> HashSet<Label> {
-        self.labels.left_values().cloned().collect()
-    }
-
-    /// Get the bech32m-encoded silent payment address for a specific label.
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - A reference to a [Label].
-    ///
-    /// # Returns
-    ///
-    /// If successful, the function returns a [Result] wrapping a [SilentPaymentAddress] struct.
-    ///
-    /// # Errors
-    ///
-    /// This function will return an error if:
-    ///
-    /// * If the label is not known for this recipient.
-    /// * If key addition results in an invalid key.
-    pub fn get_receiving_address_for_label(&self, label: &Label) -> Result<SilentPaymentAddress> {
-        match self.labels.get_by_left(label) {
-            Some(mG) => {
-                let B_m = mG.combine(&self.spend_pubkey)?;
-                Ok(self.get_silent_payment_address(B_m))
-            }
-            None => Err(Error::InvalidLabel("Label not known".to_owned())),
-        }
     }
 
     /// Get the silent payment change address for this Receiver. This is the
@@ -392,8 +354,8 @@ impl Receiver {
         &self,
         ecdh_shared_secret: &PublicKey,
         pubkeys_to_check: Vec<XOnlyPublicKey>,
-    ) -> Result<HashMap<Option<Label>, HashMap<XOnlyPublicKey, Scalar>>> {
-        let secp = crate::silentpayments::secp256k1::Secp256k1::new();
+    ) -> Result<HashMap<Option<Label>, HashMap<XOnlyPublicKey, Scalar>>, Error> {
+        let secp = crate::core::secp256k1::Secp256k1::new();
 
         let mut found: HashMap<Option<Label>, HashMap<XOnlyPublicKey, Scalar>> = HashMap::new();
         let mut n_found: u32 = 0;
@@ -451,7 +413,7 @@ impl Receiver {
     pub fn get_spks_from_shared_secret(
         &self,
         ecdh_shared_secret: &PublicKey,
-    ) -> Result<HashMap<Option<Label>, [u8; 34]>> {
+    ) -> Result<HashMap<Option<Label>, [u8; 34]>, Error> {
         let t_0: SecretKey = calculate_t_n(ecdh_shared_secret, 0)?;
         let P_0: PublicKey = calculate_P_n(&self.spend_pubkey, t_0.into())?;
         let output_key_bytes = P_0.x_only_public_key().0.serialize();
@@ -484,7 +446,7 @@ impl Receiver {
     /// `label_point + spend_pubkey` per registered label. These are constant
     /// across tweaks, so a scanner computes them once and reuses them for every
     /// tweak. The order matches [`get_spks_from_shared_secret`]'s output values.
-    pub fn candidate_spend_points(&self) -> Result<Vec<PublicKey>> {
+    pub fn candidate_spend_points(&self) -> Result<Vec<PublicKey>, Error> {
         let mut points = Vec::with_capacity(1 + self.labels.len());
         points.push(self.spend_pubkey);
         for (_, mG) in &self.labels {
@@ -509,7 +471,7 @@ impl Receiver {
         tweak: &PublicKey,
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
-    ) -> Result<Vec<[u8; 34]>> {
+    ) -> Result<Vec<[u8; 34]>, Error> {
         // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
         // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
         let tweak = tweak.serialize();
@@ -542,7 +504,7 @@ impl Receiver {
         tweaks: &[PublicKey],
         scan_key: &SecretKey,
         spend_points: &[PublicKey],
-    ) -> Result<Vec<Vec<[u8; 34]>>> {
+    ) -> Result<Vec<Vec<[u8; 34]>>, Error> {
         // Inputs are always valid (serialized from valid PublicKeys/SecretKey),
         // so the byte-FFI kernel cannot trip its malformed-pubkey panic.
         let tweaks: Vec<[u8; 33]> = tweaks.iter().map(|t| t.serialize()).collect();
@@ -599,8 +561,11 @@ mod tests {
     // exactly the same spks as calling the per-tweak primitive once per tweak.
     #[test]
     fn candidate_output_spks_batch_matches_per_tweak() {
-        use crate::silentpayments::secp256k1::{PublicKey, Secp256k1, SecretKey};
-        use crate::silentpayments::{receiving::Receiver, Network};
+        use crate::core::{
+            receiving::Receiver,
+            secp256k1::{PublicKey, Secp256k1, SecretKey},
+            utils::common::Network,
+        };
         use bitcoin_hashes::{sha256, Hash};
 
         let secp = Secp256k1::new();
@@ -658,4 +623,27 @@ mod tests {
         let s: String = "deadbeef".to_owned();
         Label::try_from(s).unwrap_err();
     }
+}
+
+/// Calculate the shared secret of a transaction.
+///
+/// # Arguments
+///
+/// * `tweak_data` - The tweak data from the block index.
+/// * `b_scan` - The scan private key used by the wallet.
+///
+/// # Returns
+///
+/// This function returns the shared secret of this transaction. This shared secret can be used to scan the transaction of outputs that are for the current user. See [`Receiver::scan_transaction`].
+pub fn calculate_ecdh_shared_secret(tweak_data: &PublicKey, b_scan: &SecretKey) -> PublicKey {
+    let mut ss_bytes = [0u8; 65];
+    ss_bytes[0] = 0x04;
+
+    // Constant-time ECDH multiply (mainline secp256k1). The output point is
+    // byte-identical to the fork's vartime multiply; only timing differs. The
+    // hot candidate-spk scan path uses bwk-spscan-sys (own vartime kernel); this
+    // recovery path runs only on a filter match, so const time is fine here.
+    ss_bytes[1..].copy_from_slice(&shared_secret_point(tweak_data, b_scan));
+
+    PublicKey::from_slice(&ss_bytes).expect("guaranteed to be a point on the curve")
 }

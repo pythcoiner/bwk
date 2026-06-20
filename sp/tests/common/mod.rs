@@ -5,18 +5,101 @@
 //! - Temporary directory helpers for persistence tests
 //! - Blindbitd helpers for integration tests (Phase 10.4)
 
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::{thread, time::Duration};
+use std::{
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
 
-use bitcoin::absolute::Height;
-use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey};
+use bitcoin::{
+    absolute::Height, hashes::Hash, Amount, OutPoint, ScriptBuf, TxOut, Txid, XOnlyPublicKey,
+};
 
 use blindbitd::BlindbitD;
 use bwk_utils::test::corepc_node;
 
-use bwk_sp::spdk_core::{OutputSpendStatus, OwnedOutput};
-use bwk_sp::Config;
+use bwk_sp::{
+    account::config::Config,
+    receiver::{OutputSpendStatus, OwnedOutput},
+};
+
+/// Aborts the process with a full thread dump if not disarmed within `timeout`.
+///
+/// Turns a silent CI hang (a scan that never returns) into a fast, diagnosable
+/// failure: on timeout it dumps every thread's backtrace via gdb, then aborts so
+/// the job fails in minutes with the stuck frame in the log instead of stalling
+/// for hours. Drop the returned guard (returning from the test does) to disarm.
+#[must_use]
+pub fn abort_after(label: &'static str, timeout: Duration) -> WatchdogGuard {
+    let armed = Arc::new(AtomicBool::new(true));
+    let watch = armed.clone();
+    let handle = thread::Builder::new()
+        .name("watchdog".into())
+        .spawn(move || {
+            let start = Instant::now();
+            while watch.load(Ordering::Relaxed) {
+                if start.elapsed() >= timeout {
+                    eprintln!(
+                        "\nWATCHDOG: {label} exceeded {timeout:?}; dumping threads and aborting"
+                    );
+                    dump_threads();
+                    std::process::abort();
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+        .expect("spawn watchdog");
+    WatchdogGuard {
+        armed,
+        _handle: handle,
+    }
+}
+
+pub struct WatchdogGuard {
+    armed: Arc<AtomicBool>,
+    _handle: JoinHandle<()>,
+}
+
+impl Drop for WatchdogGuard {
+    fn drop(&mut self) {
+        self.armed.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Dump every thread's backtrace by attaching gdb to our own pid. Best-effort:
+/// prints a note and continues if gdb is unavailable or cannot attach.
+fn dump_threads() {
+    // Let the gdb child ptrace us regardless of the yama ptrace_scope setting.
+    const PR_SET_PTRACER_ANY: libc::c_ulong = libc::c_ulong::MAX;
+    unsafe {
+        libc::prctl(libc::PR_SET_PTRACER, PR_SET_PTRACER_ANY);
+    }
+    let pid = std::process::id().to_string();
+    match Command::new("gdb")
+        .args([
+            "-p",
+            &pid,
+            "-batch",
+            "-ex",
+            "set pagination off",
+            "-ex",
+            "thread apply all bt",
+        ])
+        .output()
+    {
+        Ok(out) => {
+            eprintln!("{}", String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                eprintln!("gdb stderr: {}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        Err(e) => eprintln!("WATCHDOG: gdb thread dump unavailable: {e}"),
+    }
+}
 
 // MockBackendError
 
@@ -246,7 +329,7 @@ pub fn test_config(temp_dir: &std::path::Path) -> Config {
 
 /// Creates a test Account with BlindbitD backend (no persistence).
 #[allow(dead_code)]
-pub fn test_account(url: &str) -> bwk_sp::Account {
+pub fn test_account(url: &str) -> bwk_sp::account::Account {
     let config = Config::new(
         "test".to_string(),
         bitcoin::Network::Regtest,
@@ -255,18 +338,22 @@ pub fn test_account(url: &str) -> bwk_sp::Account {
         std::path::PathBuf::from("/unused"),
     )
     .enable_persist(false);
-    bwk_sp::Account::new(config).expect("create test account")
+    bwk_sp::account::Account::new(config).expect("create test account")
 }
 
 /// Creates a test Account with custom name (no persistence).
 #[allow(dead_code)]
-pub fn test_account_named(name: &str, url: &str) -> bwk_sp::Account {
+pub fn test_account_named(name: &str, url: &str) -> bwk_sp::account::Account {
     test_account_with_mnemonic(name, test_mnemonic(), url)
 }
 
 /// Creates a test Account with custom name and mnemonic (no persistence).
 #[allow(dead_code)]
-pub fn test_account_with_mnemonic(name: &str, mnemonic: &str, url: &str) -> bwk_sp::Account {
+pub fn test_account_with_mnemonic(
+    name: &str,
+    mnemonic: &str,
+    url: &str,
+) -> bwk_sp::account::Account {
     let config = Config::new(
         name.to_string(),
         bitcoin::Network::Regtest,
@@ -275,19 +362,22 @@ pub fn test_account_with_mnemonic(name: &str, mnemonic: &str, url: &str) -> bwk_
         std::path::PathBuf::from("/unused"),
     )
     .enable_persist(false);
-    bwk_sp::Account::new(config).expect("create test account")
+    bwk_sp::account::Account::new(config).expect("create test account")
 }
 
 /// Creates a test Account with persistence enabled.
 /// Returns (Account, Config, TempDir) - keep TempDir alive for persistence to work.
 #[allow(dead_code)]
-pub fn test_account_persistent(url: &str) -> (bwk_sp::Account, Config, TempDir) {
+pub fn test_account_persistent(url: &str) -> (bwk_sp::account::Account, Config, TempDir) {
     test_account_persistent_named("test", url)
 }
 
 /// Creates a test Account with persistence enabled and custom name.
 #[allow(dead_code)]
-pub fn test_account_persistent_named(name: &str, url: &str) -> (bwk_sp::Account, Config, TempDir) {
+pub fn test_account_persistent_named(
+    name: &str,
+    url: &str,
+) -> (bwk_sp::account::Account, Config, TempDir) {
     let dir = TempDir::new().unwrap();
     let config = Config::new(
         name.to_string(),
@@ -297,7 +387,7 @@ pub fn test_account_persistent_named(name: &str, url: &str) -> (bwk_sp::Account,
         dir.path().to_path_buf(),
     )
     .enable_persist(true);
-    let account = bwk_sp::Account::new(config.clone()).expect("create test account");
+    let account = bwk_sp::account::Account::new(config.clone()).expect("create test account");
     (account, config, dir)
 }
 
@@ -442,7 +532,7 @@ pub fn generate_recipient_pubkey(
     sk: bitcoin::secp256k1::SecretKey,
     outpoint: OutPoint,
     txout: &TxOut,
-    sp_addr: bwk_sp::spdk_core::silentpayments::SilentPaymentAddress,
+    sp_addr: bwk_sp::core::utils::common::SilentPaymentAddress,
     secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
 ) -> Option<XOnlyPublicKey> {
     use bitcoin::key::TapTweak;
@@ -464,21 +554,14 @@ pub fn generate_recipient_pubkey(
     let input_keys = vec![(sp_sk, true /* is taproot */)];
     let outpoints = vec![(outpoint.txid.to_string(), outpoint.vout)];
     let partial_secret =
-        bwk_sp::spdk_core::silentpayments::utils::sending::calculate_partial_secret(
-            &input_keys,
-            &outpoints,
-        )
-        .ok()?;
+        bwk_sp::core::sending::calculate_partial_secret(&input_keys, &outpoints).ok()?;
 
     // generate recipient pubkey
-    bwk_sp::spdk_core::silentpayments::sending::generate_recipient_pubkeys(
-        vec![sp_addr],
-        partial_secret,
-    )
-    .ok()?
-    .into_iter()
-    .next()
-    .and_then(|(_addr, k)| k.into_iter().next())
+    bwk_sp::core::sending::generate_recipient_pubkeys(vec![sp_addr], partial_secret)
+        .ok()?
+        .into_iter()
+        .next()
+        .and_then(|(_addr, k)| k.into_iter().next())
 }
 
 /// Build and sign a transaction that sends to a Silent Payment output.
@@ -507,8 +590,9 @@ pub fn swap_to_sp(
     fees: bitcoin::Amount,
     secp: &bitcoin::secp256k1::Secp256k1<bitcoin::secp256k1::All>,
 ) -> Option<bitcoin::Transaction> {
-    use bitcoin::key::TapTweak;
-    use bitcoin::{absolute, sighash, transaction::Version, Sequence, TxIn, Witness};
+    use bitcoin::{
+        absolute, key::TapTweak, sighash, transaction::Version, Sequence, TxIn, Witness,
+    };
 
     // craft tx
     let script = ScriptBuf::new_p2tr_tweaked(recipient_pubkey.dangerous_assume_tweaked());
@@ -609,12 +693,12 @@ impl TestEnv {
     }
 
     /// Create SP account with default mnemonic (no persistence).
-    pub fn sp_account(&self, name: &str) -> bwk_sp::Account {
+    pub fn sp_account(&self, name: &str) -> bwk_sp::account::Account {
         test_account_named(name, &self.bbd.url())
     }
 
     /// Create SP account with custom mnemonic (no persistence).
-    pub fn sp_account_with_mnemonic(&self, name: &str, mnemonic: &str) -> bwk_sp::Account {
+    pub fn sp_account_with_mnemonic(&self, name: &str, mnemonic: &str) -> bwk_sp::account::Account {
         test_account_with_mnemonic(name, mnemonic, &self.bbd.url())
     }
 
@@ -635,7 +719,7 @@ impl TestEnv {
     ///
     /// Creates a taproot signer from the SP mnemonic, sends BTC to it via
     /// bitcoind, then creates a swap_to_sp transaction to the SP address.
-    pub fn fund_sp(&mut self, account: &mut bwk_sp::Account, btc: f64) {
+    pub fn fund_sp(&mut self, account: &mut bwk_sp::account::Account, btc: f64) {
         let mnemonic = test_mnemonic();
         let network = bitcoin::Network::Regtest;
         let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -698,7 +782,7 @@ impl TestEnv {
     /// Add a taproot sub-account to an SP account so it can sign BIP32
     /// taproot inputs via `sign_and_finalize()`.
     #[allow(dead_code)]
-    pub fn add_taproot_sub_account(&self, account: &mut bwk_sp::Account) {
+    pub fn add_taproot_sub_account(&self, account: &mut bwk_sp::account::Account) {
         let signer =
             HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();
@@ -724,7 +808,7 @@ impl TestEnv {
     /// Add a segwit (P2WPKH) sub-account to an SP account so it can sign
     /// BIP32 segwit inputs via `sign_and_finalize()`.
     #[allow(dead_code)]
-    pub fn add_segwit_sub_account(&self, account: &mut bwk_sp::Account) {
+    pub fn add_segwit_sub_account(&self, account: &mut bwk_sp::account::Account) {
         let signer =
             HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();

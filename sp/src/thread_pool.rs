@@ -4,10 +4,6 @@ use std::{
 };
 
 pub struct ThreadPool {
-    // JoinHandles kept to prevent threads from being detached immediately.
-    // Not read directly - threads complete naturally when sender is dropped.
-    #[allow(dead_code)]
-    workers: Vec<thread::JoinHandle<()>>,
     sender: Option<mpsc::Sender<Box<dyn FnOnce() + Send + 'static>>>,
 }
 
@@ -25,12 +21,10 @@ impl ThreadPool {
         let (tx, rx) = mpsc::channel::<Task>();
         let rx = Arc::new(Mutex::new(rx));
 
-        let mut workers = Vec::with_capacity(size);
-
         for _ in 0..size {
             let rx = Arc::clone(&rx);
             #[allow(clippy::while_let_loop)]
-            let worker = thread::Builder::new()
+            thread::Builder::new()
                 .stack_size(WORKER_STACK_SIZE)
                 .spawn(move || loop {
                     let task: Task = match rx.lock().expect("poisoned").recv() {
@@ -40,12 +34,8 @@ impl ThreadPool {
                     task();
                 })
                 .expect("failed to spawn fetch worker");
-            workers.push(worker);
         }
-        ThreadPool {
-            workers,
-            sender: Some(tx),
-        }
+        ThreadPool { sender: Some(tx) }
     }
 
     pub fn execute<F>(&self, f: F)
@@ -71,8 +61,10 @@ impl Drop for ThreadPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn test_results_stream_incrementally() {

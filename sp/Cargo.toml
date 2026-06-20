@@ -9,15 +9,12 @@ path = "src/bin/kernel_bench.rs"
 required-features = ["bench"]
 
 [features]
-default = ["parallel", "mnemonic", "blindbit"]
+default = ["parallel", "mnemonic"]
 # Enable CPU parallelization with scoped threads (native only, recommended).
 parallel = []
 # Enable usage of bip39 mnemonics.
 mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
-# Blindbit HTTP transport (BlindbitBackend, UreqClient, InfoResponse).
-# Pulls `mnemonic`: the concrete Account is seeded from a mnemonic.
-blindbit = ["dep:ureq", "mnemonic"]
 # Per-phase scan timing hooks (bench instrumentation only).
 scan-profile = []
 # Builds the sp_sync_bench binary driving the real Account scan (headline timing only).
@@ -41,7 +38,6 @@ bitcoin_hashes = { workspace = true }
 # Silent Payments support
 bech32 = { workspace = true }
 bimap = { workspace = true }
-bdk_coin_select = { workspace = true }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -58,18 +54,18 @@ getrandom = { workspace = true }
 # Bip39 mnemonics (optional, mnemonic feature)
 bip39 = { workspace = true, optional = true }
 
-# Blindbit HTTP transport (optional, blindbit feature).
-# HTTPS via native-tls, which maps to the platform TLS (system openssl on Linux,
-# SChannel on Windows, Secure Transport on Apple). Provider is selected explicitly
-# in blindbit/client/ureq_impl.rs (ureq defaults to rustls, which we don't compile).
-ureq = { workspace = true, optional = true, features = ["gzip", "native-tls"] }
+# Blindbit HTTP transport. HTTPS via native-tls, which maps to the platform TLS
+# (system openssl on Linux, SChannel on Windows, Secure Transport on Apple).
+# Provider is selected explicitly in blindbit/mod.rs (ureq defaults to rustls,
+# which we don't compile).
+ureq = { workspace = true, features = ["gzip", "native-tls"] }
 
 # Plotting (sp_sync_bench plot subcommand, behind the `instrumentation` feature)
 
 # Vendor a static openssl only on Android, where native-tls's openssl backend
 # looks for certs at the build-host paths.
 [target.'cfg(target_os = "android")'.dependencies]
-ureq = { workspace = true, optional = true, features = ["gzip", "native-tls", "vendored"] }
+ureq = { workspace = true, features = ["gzip", "native-tls", "vendored"] }
 
 [dev-dependencies]
 blindbitd = { workspace = true }
@@ -77,3 +73,4 @@ bwk = { workspace = true, features = ["sp", "test"] }
 bwk-utils = { workspace = true, features = ["test"] }
 bwk-sign = { workspace = true, features = ["test"] }
 bip39 = { workspace = true }
+libc = { workspace = true }

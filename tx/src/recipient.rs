@@ -29,7 +29,7 @@ pub struct FinalizationContext<'a> {
 }
 
 /// Trait for computing SP partial secret from inputs.
-/// Implemented by SpClient/Account in bwk-sp.
+/// Implemented by SpReceiver/Account in bwk-sp.
 pub trait SpPartialSecretProvider {
     /// Compute the partial secret needed for SP output derivation.
     /// This combines the spend key with tweaks from all selected inputs.

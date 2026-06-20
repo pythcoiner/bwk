@@ -3,8 +3,10 @@
 //! The `Config` struct holds all settings needed to create and operate
 //! a silent payment wallet account.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use bitcoin::{bip32::ChildNumber, Network};
 use bwk::miniscript::{Descriptor, DescriptorPublicKey};

@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use bwk_sp::silentpayments::SilentPaymentAddress;
+use bwk_sp::core::utils::common::SilentPaymentAddress;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

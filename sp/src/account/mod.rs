@@ -1,42 +1,59 @@
 //! Main Account orchestrator for Silent Payment wallets.
 //!
 //! The `Account` struct ties together all components of a Silent Payment wallet:
-//! - SpClient for key management and address derivation
+//! - SpReceiver for key management and address derivation
 //! - Blindbit oracle access for blockchain data
 //! - Stores for coins, transactions, labels, and scan state
 //! - Background scanning thread for continuous blockchain monitoring
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+pub mod coin_store;
+pub mod config;
+pub mod recipient;
+pub mod tx_store;
+pub mod unified;
 
-use crate::silentpayments::SilentPaymentAddress;
-use bitcoin::absolute::Height;
-use bitcoin::hashes::Hash;
-use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use bitcoin::sighash::{Prevouts, SighashCache};
-use bitcoin::taproot::Signature;
-use bitcoin::{Amount, BlockHash, Network, OutPoint, TapSighashType, Txid};
-use bwk::label_store::LabelStore;
-use miniscript::psbt::PsbtExt;
-
-use crate::blindbit::{self, InfoResponse};
-use crate::scan::{scan_blocks as scan_sp_blocks, ScanStores};
-use crate::spdk_core::{bip39, OwnedOutput, SpClient};
-
-use bwk::persist::{ConfigStore, NoopConfigStore};
-
-use crate::{
-    coin_store::{KeyedBip32Source, MergedCoinSource, SpCoinSource},
-    recipient::{SpChangeRecipientProvider, SpSecretProvider},
-    CoinState, Config, LabelKey, ScanState, SpCoinEntry, SpCoinStore, SpTxEntry, SpTxStore,
+#[cfg(feature = "mnemonic")]
+use {
+    crate::{
+        account::{
+            coin_store::{
+                CoinState, KeyedBip32Source, MergedCoinSource, SpCoinEntry, SpCoinSource,
+                SpCoinStore,
+            },
+            config::Config,
+            recipient::{SpChangeRecipientProvider, SpSecretProvider},
+            tx_store::{SpTxEntry, SpTxStore},
+        },
+        blindbit::{self, InfoResponse},
+        core::utils::common::SilentPaymentAddress,
+        receiver::{bip39, OwnedOutput, SpReceiver},
+        scan::state::ScanState,
+        LabelKey,
+    },
+    bitcoin::{
+        absolute::Height,
+        hashes::Hash,
+        secp256k1::{Keypair, Message, Secp256k1, SecretKey},
+        sighash::{Prevouts, SighashCache},
+        taproot::Signature,
+        Amount, BlockHash, Network, OutPoint, TapSighashType, Txid,
+    },
+    bwk::{
+        label_store::LabelStore,
+        persist::{ConfigStore, NoopConfigStore},
+    },
+    miniscript::psbt::PsbtExt,
+    std::{
+        collections::{BTreeMap, HashMap, HashSet},
+        str::FromStr,
+        sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
+        thread::JoinHandle,
+    },
 };
 
 // Type Aliases
 
+#[cfg(feature = "mnemonic")]
 /// Type alias for the tuple of stores returned by create_or_load_stores.
 type Stores = (
     Arc<Mutex<SpCoinStore>>,
@@ -47,6 +64,7 @@ type Stores = (
 
 // AccountError
 
+#[cfg(feature = "mnemonic")]
 /// Errors that can occur in Account operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
@@ -86,10 +104,12 @@ impl From<bwk::OpenError> for AccountError {
 }
 
 // Re-use unified Notification from bwk
+#[cfg(feature = "mnemonic")]
 pub use bwk::{Notification, SpNotification};
 
 // ScanMode
 
+#[cfg(feature = "mnemonic")]
 /// Scan mode for the scanner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanMode {
@@ -104,6 +124,7 @@ pub enum ScanMode {
 
 // PaymentType
 
+#[cfg(feature = "mnemonic")]
 /// Type of payment (for UI display).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaymentType {
@@ -115,6 +136,7 @@ pub enum PaymentType {
 
 // Payment
 
+#[cfg(feature = "mnemonic")]
 /// A payment record for UI display.
 #[derive(Debug, Clone)]
 pub struct Payment {
@@ -132,6 +154,7 @@ pub struct Payment {
 
 // Account
 
+#[cfg(feature = "mnemonic")]
 /// Main orchestrator for a Silent Payment wallet account. Generic
 /// over any [`crate::profile::SpStorageProfile`]; defaults to
 /// [`crate::profile::SpRamProfile<DefaultBackend>`].
@@ -140,35 +163,36 @@ pub struct Account<
         crate::profile::DefaultBackend,
     >,
 > {
-    client: SpClient,
-    agent: Arc<ureq::Agent>,
-    coin_store: Arc<Mutex<SpCoinStore<P>>>,
+    pub(crate) sp_receiver: SpReceiver,
+    pub(crate) agent: Arc<ureq::Agent>,
+    pub(crate) coin_store: Arc<Mutex<SpCoinStore<P>>>,
     label_store: Arc<Mutex<LabelStore>>,
-    tx_store: Arc<Mutex<SpTxStore<P>>>,
-    scan_state: Arc<Mutex<ScanState>>,
-    config: Config,
+    pub(crate) tx_store: Arc<Mutex<SpTxStore<P>>>,
+    pub(crate) scan_state: Arc<Mutex<ScanState>>,
+    pub(crate) config: Config,
     /// Persistence sink for `config`. [`NoopConfigStore`] by default.
     /// Consumers wire whatever shape suits them — a
     /// [`bwk::persist::FileConfigStore`] for file-backed persistence, a
     /// [`bwk::persist::CallbackConfigStore`] to bridge save/load through
     /// host-supplied closures, or any other [`ConfigStore`] impl.
     config_store: Arc<dyn ConfigStore<Config>>,
-    sender: mpsc::Sender<Notification>,
+    pub(crate) sender: mpsc::Sender<Notification>,
     receiver: Option<mpsc::Receiver<Notification>>,
-    scanner_handle: Option<JoinHandle<()>>,
-    scanner_stop: Arc<AtomicBool>,
+    pub(crate) scanner_handle: Option<JoinHandle<()>>,
+    pub(crate) scanner_stop: Arc<AtomicBool>,
     // Sub-accounts use the default bwk RAM profile — independent of sp's P.
     sub_accounts: Vec<bwk::Account>,
 }
 
 // Constructors are tied to the default SpRamProfile because they open
 // concrete on-disk RamStore instances.
+#[cfg(feature = "mnemonic")]
 impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     // Constructors
 
     /// Create a new Account from configuration.
     ///
-    /// Validates the config, creates the SpClient, initializes or loads stores,
+    /// Validates the config, creates the SpReceiver, initializes or loads stores,
     /// and prepares the notification channel.
     ///
     /// # Errors
@@ -198,8 +222,8 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             return Err(AccountError::Config("blindbit_url is required".to_string()));
         }
 
-        // Create SpClient
-        let client = Self::create_sp_client(&config)?;
+        // Create SpReceiver
+        let sp_receiver = Self::create_sp_receiver(&config)?;
 
         let agent = Arc::new(blindbit::agent());
 
@@ -239,7 +263,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Account {
-            client,
+            sp_receiver,
             agent,
             coin_store,
             label_store,
@@ -291,13 +315,13 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         Self::new(config)
     }
 
-    /// Create SpClient from config.
-    fn create_sp_client(config: &Config) -> Result<SpClient, AccountError> {
+    /// Create SpReceiver from config.
+    fn create_sp_receiver(config: &Config) -> Result<SpReceiver, AccountError> {
         if let Some(ref mnemonic) = config.mnemonic {
             let mnemonic = bip39::Mnemonic::parse(mnemonic)
                 .map_err(|e| AccountError::Config(format!("invalid mnemonic: {e}")))?;
-            SpClient::new_from_mnemonic(mnemonic, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {e}")))
+            SpReceiver::new_from_mnemonic(mnemonic, config.network)
+                .map_err(|e| AccountError::Config(format!("failed to create SpReceiver: {e}")))
         } else if let Some(ref scan_sk_hex) = config.scan_sk {
             // Create from raw keys
             let scan_sk_bytes = hex::decode(scan_sk_hex)
@@ -313,12 +337,12 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                     // Secret key
                     let sk = bitcoin::secp256k1::SecretKey::from_slice(&spend_key_bytes)
                         .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
-                    crate::spdk_core::SpendKey::Secret(sk)
+                    crate::receiver::SpendKey::Secret(sk)
                 } else if spend_key_bytes.len() == 33 {
                     // Public key
                     let pk = bitcoin::secp256k1::PublicKey::from_slice(&spend_key_bytes)
                         .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
-                    crate::spdk_core::SpendKey::Public(pk)
+                    crate::receiver::SpendKey::Public(pk)
                 } else {
                     return Err(AccountError::Config(
                         "spend_key must be 32 or 33 bytes".to_string(),
@@ -330,8 +354,8 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
                 ));
             };
 
-            SpClient::new(scan_sk, spend_key, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpClient: {e}")))
+            SpReceiver::new(scan_sk, spend_key, config.network)
+                .map_err(|e| AccountError::Config(format!("failed to create SpReceiver: {e}")))
         } else {
             Err(AccountError::Config(
                 "either mnemonic or scan_sk must be provided".to_string(),
@@ -359,10 +383,11 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         )?;
 
         let coin_store =
-            SpCoinStore::load_from_backend(backend.clone(), crate::coin_store::STORE_KEY)?;
+            SpCoinStore::load_from_backend(backend.clone(), crate::account::coin_store::STORE_KEY)?;
         let label_store =
             LabelStore::load_from_backend(backend.clone(), bwk::persist::LABELS_STORE_KEY)?;
-        let tx_store = SpTxStore::load_from_backend(backend.clone(), crate::tx_store::STORE_KEY)?;
+        let tx_store =
+            SpTxStore::load_from_backend(backend.clone(), crate::account::tx_store::STORE_KEY)?;
         let scan_state = ScanState::load_from_backend(birthday, backend)?;
 
         Ok((
@@ -375,6 +400,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
 }
 
 // Generic accessors and operations — available for any `P: SpStorageProfile`.
+#[cfg(feature = "mnemonic")]
 impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Returns the account name.
     pub fn name(&self) -> &str {
@@ -393,12 +419,12 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
     /// Returns the Silent Payment address for this account.
     pub fn sp_address(&self) -> SilentPaymentAddress {
-        self.client.get_receiving_address()
+        self.sp_receiver.get_receiving_address()
     }
 
-    /// Returns a reference to the SpClient for advanced operations.
-    pub fn sp_client(&self) -> &SpClient {
-        &self.client
+    /// Returns a reference to the SpReceiver for advanced operations.
+    pub fn sp_receiver(&self) -> &SpReceiver {
+        &self.sp_receiver
     }
 
     /// Takes the notification receiver (can only be called once).
@@ -447,7 +473,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         struct TxData {
             txid: Txid,
             txid_str: String,
-            direction: crate::TxDirection,
+            direction: crate::account::tx_store::TxDirection,
             amount: u64,
             label: Option<String>,
             height: Option<u32>,
@@ -542,9 +568,9 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         for td in tx_data {
             // Determine payment type from transaction direction
             let payment_type = match td.direction {
-                crate::TxDirection::Incoming => PaymentType::Receive,
-                crate::TxDirection::Outgoing => PaymentType::Send,
-                crate::TxDirection::Internal => PaymentType::Send, // Treat internal as send
+                crate::account::tx_store::TxDirection::Incoming => PaymentType::Receive,
+                crate::account::tx_store::TxDirection::Outgoing => PaymentType::Send,
+                crate::account::tx_store::TxDirection::Internal => PaymentType::Send, // Treat internal as send
             };
 
             // Get label: prefer tx_entry label, fallback to label_store
@@ -638,328 +664,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         }
     }
 
-    /// Start a scan with the specified mode.
-    ///
-    /// # Arguments
-    /// * `mode` - The scanning mode (OneShot or Continuous)
-    ///
-    /// # Modes
-    /// - `OneShot`: Synchronous scan from last position to current chain tip, then returns.
-    ///   If already at tip, returns immediately without scanning.
-    /// - `Continuous`: Spawns a background thread that scans to tip, then watches for new blocks.
-    ///   Returns immediately after spawning. Use `stop_scan()` to stop.
-    ///
-    /// # Errors
-    /// - `AccountError::ScannerAlreadyRunning` if continuous scan is already active
-    /// - `AccountError::Scan` if scan fails
-    pub fn start_scan(&mut self, mode: ScanMode) -> Result<(), AccountError> {
-        match mode {
-            ScanMode::OneShot => self.scan_oneshot(),
-            ScanMode::Continuous => self.start_continuous_scan(),
-        }
-    }
-
-    /// Internal: Execute one-shot scan to current chain tip.
-    fn scan_oneshot(&mut self) -> Result<(), AccountError> {
-        // Clear any stale cancel signal from a previous run before we hand
-        // the flag down to the scanner. Without this, a caller that flipped
-        // the flag via `cancel_flag()` for a prior scan would cause the next
-        // OneShot to bail at the first block (spdk-core's `process_blocks`
-        // returns Ok early when `should_interrupt()` is true).
-        self.scanner_stop.store(false, Ordering::Relaxed);
-
-        let start_height = self.scan_state.lock().expect("poisoned").next_scan_start();
-        let end_height = self.block_height()?;
-
-        if start_height > end_height {
-            return Ok(()); // Already at tip, nothing to scan
-        }
-
-        let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
-        let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
-
-        let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-
-        let with_cutthrough = blindbit::info(&self.agent, &self.config.blindbit_url)
-            .map(|info| info.tweaks_cut_through_with_dust_filter)
-            .unwrap_or(false);
-
-        let stores = ScanStores {
-            coin_store: self.coin_store.clone(),
-            tx_store: self.tx_store.clone(),
-            scan_state: self.scan_state.clone(),
-            sender: self.sender.clone(),
-        };
-
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanStarted {
-                start: start_height,
-                end: end_height,
-            }));
-
-        scan_sp_blocks(
-            self.agent.clone(),
-            &self.config.blindbit_url,
-            &self.client,
-            &stores,
-            &self.scanner_stop,
-            start,
-            end,
-            dust_limit,
-            with_cutthrough,
-        )
-        .map_err(|e| AccountError::Scan(e.to_string()))?;
-
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanCompleted));
-
-        Ok(())
-    }
-
-    /// Internal: Start continuous scan in background thread.
-    fn start_continuous_scan(&mut self) -> Result<(), AccountError> {
-        if self.scanner_handle.is_some() {
-            return Err(AccountError::ScannerAlreadyRunning);
-        }
-
-        self.scanner_stop.store(false, Ordering::Relaxed);
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::StartingScan));
-
-        let client = self.client.clone();
-        let agent = self.agent.clone();
-        let blindbit_url = self.config.blindbit_url.clone();
-        let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-        let coin_store = self.coin_store.clone();
-        let tx_store = self.tx_store.clone();
-        let scan_state = self.scan_state.clone();
-        let sender = self.sender.clone();
-        let stop = self.scanner_stop.clone();
-
-        let handle = thread::spawn(move || {
-            let mut last_notified_tip: Option<u32> = None;
-            let mut waiting = false;
-
-            let with_cutthrough = blindbit::info(&agent, &blindbit_url)
-                .map(|info| info.tweaks_cut_through_with_dust_filter)
-                .unwrap_or(false);
-
-            let stores = ScanStores {
-                coin_store: coin_store.clone(),
-                tx_store: tx_store.clone(),
-                scan_state: scan_state.clone(),
-                sender: sender.clone(),
-            };
-
-            while !stop.load(Ordering::Relaxed) {
-                let chain_height = match blindbit::block_height(&agent, &blindbit_url) {
-                    Ok(h) => h.to_consensus_u32(),
-                    Err(e) => {
-                        log::warn!("scanner: failed to get block height: {e}");
-                        let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
-                            message: e.to_string(),
-                        }));
-                        break;
-                    }
-                };
-
-                let start_height = scan_state.lock().expect("poisoned").next_scan_start();
-
-                if start_height > chain_height {
-                    if !waiting {
-                        let _ = sender.send(Notification::Sp(SpNotification::WaitingForBlocks {
-                            tip_height: chain_height,
-                        }));
-                        waiting = true;
-                    }
-                    thread::sleep(Duration::from_secs(2));
-                    continue;
-                }
-
-                waiting = false;
-
-                // New blocks detected - notify if we were previously waiting
-                if let Some(prev_tip) = last_notified_tip {
-                    if chain_height > prev_tip {
-                        let _ = sender.send(Notification::Sp(SpNotification::NewBlocksDetected {
-                            from_height: prev_tip,
-                            to_height: chain_height,
-                        }));
-                    }
-                }
-
-                let start = match Height::from_consensus(start_height) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-                let end = match Height::from_consensus(chain_height) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-
-                let _ = sender.send(Notification::Sp(SpNotification::ScanStarted {
-                    start: start.to_consensus_u32(),
-                    end: end.to_consensus_u32(),
-                }));
-
-                match scan_sp_blocks(
-                    agent.clone(),
-                    &blindbit_url,
-                    &client,
-                    &stores,
-                    &stop,
-                    start,
-                    end,
-                    dust_limit,
-                    with_cutthrough,
-                ) {
-                    Ok(()) => {
-                        let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
-                        last_notified_tip = Some(chain_height);
-                    }
-                    Err(e) => {
-                        let _ = sender.send(Notification::Sp(SpNotification::FailScan {
-                            message: e.to_string(),
-                        }));
-                        break;
-                    }
-                }
-
-                // Brief pause before checking for new blocks
-                thread::sleep(Duration::from_millis(500));
-            }
-
-            let _ = sender.send(Notification::Sp(SpNotification::ScanStopped));
-        });
-
-        self.scanner_handle = Some(handle);
-        Ok(())
-    }
-
-    /// Stop the continuous scan.
-    ///
-    /// No-op if not running in continuous mode.
-    pub fn stop_scan(&mut self) {
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::StoppingScan));
-        self.scanner_stop.store(true, Ordering::Relaxed);
-        self.scanner_handle = None;
-    }
-
-    /// Check if a continuous scan is currently running.
-    pub fn is_scanning(&self) -> bool {
-        self.scanner_handle
-            .as_ref()
-            .map(|h| !h.is_finished())
-            .unwrap_or(false)
-    }
-
-    /// Returns a clone of the scanner cancellation flag.
-    ///
-    /// Setting this `AtomicBool` to `true` causes any in-flight OneShot or
-    /// Continuous scan to bail at the next per-block checkpoint inside
-    /// spdk-core's `process_blocks` (which calls `should_interrupt()` before
-    /// every block). The scan call returns `Ok(())` after persisting state
-    /// , i.e. cancellation is graceful, not an error.
-    ///
-    /// `scan_oneshot` resets this flag to `false` at the start of each run,
-    /// so leaving the flag in `true` between runs is harmless.
-    ///
-    /// Intended for consumers that hold an `Account` behind a `Mutex` and
-    /// need to interrupt a scan without first re-acquiring the mutex (which
-    /// the in-flight scan call still holds via `&mut self`).
-    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.scanner_stop.clone()
-    }
-
-    /// Scan a range of blocks for silent payment outputs.
-    pub fn scan_blocks(
-        &mut self,
-        start: Option<u32>,
-        end: Option<u32>,
-    ) -> Result<(), AccountError> {
-        // If both are None, use the new one-shot scan
-        if start.is_none() && end.is_none() {
-            return self.start_scan(ScanMode::OneShot);
-        }
-
-        // Custom range scan (legacy behavior)
-        let start_height =
-            start.unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start());
-        let end_height = match end {
-            Some(h) => h,
-            None => self.block_height()?,
-        };
-
-        if start_height > end_height {
-            return Ok(());
-        }
-
-        let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
-        let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
-
-        let dust_limit = self.config.dust_limit.map(Amount::from_sat);
-
-        let with_cutthrough = blindbit::info(&self.agent, &self.config.blindbit_url)
-            .map(|info| info.tweaks_cut_through_with_dust_filter)
-            .unwrap_or(false);
-
-        let stores = ScanStores {
-            coin_store: self.coin_store.clone(),
-            tx_store: self.tx_store.clone(),
-            scan_state: self.scan_state.clone(),
-            sender: self.sender.clone(),
-        };
-
-        scan_sp_blocks(
-            self.agent.clone(),
-            &self.config.blindbit_url,
-            &self.client,
-            &stores,
-            &self.scanner_stop,
-            start,
-            end,
-            dust_limit,
-            with_cutthrough,
-        )
-        .map_err(|e| AccountError::Scan(e.to_string()))?;
-
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanCompleted));
-        Ok(())
-    }
-
-    /// Start a background scanner thread.
-    pub fn start_scanner(&mut self) -> Result<(), AccountError> {
-        self.start_scan(ScanMode::Continuous)
-    }
-
-    /// Stop the background scanner thread.
-    pub fn stop_scanner(&mut self) {
-        self.stop_scan()
-    }
-
-    /// Check if the scanner is currently running.
-    pub fn scanner_running(&self) -> bool {
-        self.is_scanning()
-    }
-
-    /// Returns the last scanned block height.
-    pub fn last_scanned_height(&self) -> Option<u32> {
-        self.scan_state
-            .lock()
-            .expect("poisoned")
-            .last_scanned_height()
-    } // Sub-accounts
+    // Sub-accounts
 
     /// Add a standard wallet sub-account (segwit, taproot, etc.).
     pub fn add_sub_account(&mut self, account: bwk::Account) {
@@ -1020,10 +725,10 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// All coins from the SP account and every sub-account, keyed by outpoint.
     ///
     /// Spent and being-spent coins are included; filter by
-    /// [`UnifiedCoin::spendable`](crate::UnifiedCoin::spendable) to keep only
+    /// [`UnifiedCoin::spendable`](crate::account::unified::UnifiedCoin::spendable) to keep only
     /// live UTXOs.
-    pub fn all_coins(&self) -> BTreeMap<OutPoint, crate::UnifiedCoin> {
-        use crate::{CoinOrigin, UnifiedCoin};
+    pub fn all_coins(&self) -> BTreeMap<OutPoint, crate::account::unified::UnifiedCoin> {
+        use crate::account::unified::{CoinOrigin, UnifiedCoin};
         let mut out: BTreeMap<OutPoint, UnifiedCoin> = BTreeMap::new();
 
         for (outpoint, entry) in self.coins() {
@@ -1072,8 +777,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         &self,
         request: &bwk_tx::TxRequest,
     ) -> Result<bwk_tx::TxBuilder, bwk_tx::TxRequestError> {
-        use crate::recipient::SpRecipientAddress;
-        use crate::spdk_core::RecipientAddress;
+        use crate::{account::recipient::SpRecipientAddress, receiver::RecipientAddress};
         use bwk_tx::{Amount as BwkAmount, TxRequestError};
 
         let network = self.network();
@@ -1202,8 +906,8 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     }
 
     /// SP spendable summary plus every sub-account's spendable summary, summed.
-    pub fn all_spendable_coins(&self) -> crate::SpendableSummary {
-        use crate::SpendableSummary;
+    pub fn all_spendable_coins(&self) -> crate::account::unified::SpendableSummary {
+        use crate::account::unified::SpendableSummary;
         let sp = self.spendable_coins();
         let mut summary = SpendableSummary {
             confirmed_count: sp.confirmed_coins as u64,
@@ -1226,7 +930,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     ///
     /// Returns true if we have the spend secret key.
     pub fn can_sign(&self) -> bool {
-        self.client.try_get_secret_spend_key().is_ok()
+        self.sp_receiver.try_get_secret_spend_key().is_ok()
     }
 
     /// Returns a [`TxBuilder`] pre-configured with this account's coin source,
@@ -1241,7 +945,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// account.sign_psbt(&mut psbt)?;
     /// ```
     pub fn tx_builder(&self) -> bwk_tx::TxBuilder {
-        let change_addr = self.client.sp_receiver.get_change_address();
+        let change_addr = self.sp_receiver.receiver.get_change_address();
         let change_provider = Box::new(SpChangeRecipientProvider::new(
             change_addr,
             self.config.network,
@@ -1260,7 +964,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
         let sp_provider = Box::new(SpSecretProvider::new(
             self.coin_store.clone(),
-            self.client.clone(),
+            self.sp_receiver.clone(),
             all_xprivs.clone(),
         ));
 
@@ -1334,7 +1038,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// signature stored in `tap_key_sig`.
     fn sign_sp_inputs(&self, psbt: &mut bitcoin::Psbt) -> Result<(), AccountError> {
         let b_spend = self
-            .client
+            .sp_receiver
             .try_get_secret_spend_key()
             .map_err(|e| AccountError::Transaction(e.to_string()))?;
 
@@ -1487,6 +1191,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     }
 }
 
+#[cfg(feature = "mnemonic")]
 /// Provenance of an [`OwnedAddress`].
 ///
 /// SP-derived spks have exactly one funding tx by protocol design
@@ -1502,6 +1207,7 @@ pub enum AddressSource {
     Unknown,
 }
 
+#[cfg(feature = "mnemonic")]
 /// One address the wallet owns, aggregated across sub-accounts
 /// (BIP32) and the SP wallet. `account_name` identifies the
 /// originating keychain — see [`bwk::Account::name`] /
@@ -1517,6 +1223,7 @@ pub struct OwnedAddress {
     pub spending_txids: std::collections::BTreeSet<bitcoin::Txid>,
 }
 
+#[cfg(feature = "mnemonic")]
 impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
     fn drop(&mut self) {
         self.stop_scan();
@@ -1524,6 +1231,7 @@ impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
     }
 }
 
+#[cfg(feature = "mnemonic")]
 /// Get backend info without an Account.
 ///
 /// If the URL already has a scheme, uses it directly. Otherwise tries `http://` then `https://`.
@@ -1551,6 +1259,7 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
     Ok((info, https_url))
 }
 
+#[cfg(feature = "mnemonic")]
 /// Get block height without an Account.
 pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
     let agent = blindbit::agent();
@@ -1559,6 +1268,7 @@ pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
         .map_err(|e| AccountError::Network(e.to_string()))
 }
 
+#[cfg(feature = "mnemonic")]
 /// Build a [`bwk_tx::Coin`] from an SP outpoint + entry, suitable for
 /// `TxBuilder::add_input`. The taproot key-spend satisfaction weight
 /// ([`bwk_tx::TAPROOT_KEYSPEND_SATISFACTION_WU`]) is used because SP outputs
@@ -1584,7 +1294,7 @@ pub fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx:
 
 // Tests
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mnemonic"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -1821,8 +1531,7 @@ mod tests {
 
     fn build_offline_segwit_sub(name: &str) -> bwk::Account {
         use bip39::Mnemonic;
-        use bwk_sign::bwk_descriptor;
-        use bwk_sign::HotSigner;
+        use bwk_sign::{bwk_descriptor, HotSigner};
         use miniscript::bitcoin::bip32::ChildNumber;
 
         let network = bitcoin::Network::Regtest;
@@ -1870,7 +1579,7 @@ mod tests {
             amount: bitcoin::Amount::from_sat(10_000),
             script: spk,
             label: None,
-            spend_status: crate::spdk_core::OutputSpendStatus::Unspent,
+            spend_status: crate::receiver::OutputSpendStatus::Unspent,
         }
     }
 

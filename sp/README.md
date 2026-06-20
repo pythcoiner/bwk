@@ -19,7 +19,7 @@ use bwk_sp::{Account, Config, Notification, ScanMode};
 use bitcoin::Network;
 
 // Create account from SP keys
-let config = Config::new(sp_client, Network::Signet)
+let config = Config::new(sp_receiver, Network::Signet)
     .blindbit_url("https://blindbit.example.com")
     .data_dir(data_path);
 let mut account = Account::new(config)?;

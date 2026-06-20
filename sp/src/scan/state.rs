@@ -192,7 +192,7 @@ impl ScanState {
             None => self.last_scanned_height = Some(height),
             _ => {}
         }
-    } // Queries
+    }
 
     /// Returns the height where the next scan should start.
     ///
@@ -202,7 +202,7 @@ impl ScanState {
         self.last_scanned_height
             .map(|h| h + 1)
             .unwrap_or(self.birthday_height)
-    } // Persistence
+    }
 
     /// Persist the state through the configured backend.
     ///

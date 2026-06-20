@@ -1,5 +1,7 @@
-use crate::silentpayments::secp256k1::{PublicKey, Scalar, SecretKey};
-use crate::silentpayments::Error;
+use crate::core::{
+    error::Error,
+    secp256k1::{PublicKey, Scalar, SecretKey},
+};
 use bitcoin_hashes::{sha256t_hash_newtype, Hash, HashEngine};
 
 sha256t_hash_newtype! {

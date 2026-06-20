@@ -9,11 +9,11 @@
 
 use std::time::Instant;
 
-use bwk_sp::silentpayments::{
-    bitcoin_hashes::{sha256, Hash},
+use bitcoin_hashes::{sha256, Hash};
+use bwk_sp::core::{
     receiving::{Label, Receiver},
     secp256k1::{PublicKey, Secp256k1, SecretKey},
-    Network,
+    utils::common::Network,
 };
 
 fn main() {

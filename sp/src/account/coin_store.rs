@@ -10,8 +10,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::silentpayments::receiving::Label;
-use crate::spdk_core::{OutputSpendStatus, OwnedOutput};
+use crate::{
+    core::receiving::Label,
+    receiver::{OutputSpendStatus, OwnedOutput},
+};
 use bitcoin::{hashes::Hash, Amount, OutPoint, ScriptBuf};
 use bwk::persist::{NoopBackend, PersistError, PersistenceBackend, RamStore, Store};
 use serde::{Deserialize, Serialize};
@@ -364,12 +366,16 @@ pub struct SpAddressEntry {
 
 use std::sync::Mutex;
 
-use bwk_tx::coin::{CoinSpendInfo, CoinStatus};
-use bwk_tx::tx_builder::CoinSource;
-use bwk_tx::Coin;
+use bwk_tx::{
+    coin::{CoinSpendInfo, CoinStatus},
+    tx_builder::CoinSource,
+    Coin,
+};
 
-use bitcoin::bip32::{Fingerprint, Xpriv};
-use bitcoin::secp256k1::{All, Secp256k1};
+use bitcoin::{
+    bip32::{Fingerprint, Xpriv},
+    secp256k1::{All, Secp256k1},
+};
 
 /// Taproot keyspend satisfaction weight in WU (1 Schnorr signature = 66 WU)
 const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
@@ -519,9 +525,7 @@ impl CoinSource for KeyedBip32Source {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::absolute::Height;
-    use bitcoin::hashes::Hash;
-    use bitcoin::Txid;
+    use bitcoin::{absolute::Height, hashes::Hash, Txid};
     use bwk::persist::JsonBackend;
     use std::fs;
 

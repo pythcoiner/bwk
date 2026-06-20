@@ -5,8 +5,10 @@
 
 mod common;
 
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::{
+    sync::{mpsc, Arc, Mutex},
+    thread,
+};
 
 use common::{
     test_config, test_mnemonic, test_outpoint, test_owned_output, test_spent_output, MockBackend,
@@ -14,7 +16,12 @@ use common::{
 };
 
 use bwk::label_store::{LabelKey, LabelStore};
-use bwk_sp::{Account, AccountError, Config, Notification, SpCoinStore, SpNotification, SpTxStore};
+use bwk_sp::{
+    account::{
+        coin_store::SpCoinStore, config::Config, tx_store::SpTxStore, Account, AccountError,
+    },
+    Notification, SpNotification,
+};
 
 // MockBackend Tests
 
@@ -440,10 +447,10 @@ fn test_concurrent_writes_different_stores() {
     let h2 = thread::spawn(move || {
         for i in 0..50 {
             let mut store = tx_store_clone.lock().expect("poisoned");
-            store.insert(bwk_sp::SpTxEntry {
+            store.insert(bwk_sp::account::tx_store::SpTxEntry {
                 txid: test_outpoint().txid,
                 tx: None,
-                direction: bwk_sp::TxDirection::Incoming,
+                direction: bwk_sp::account::tx_store::TxDirection::Incoming,
                 amount: 1000 * (i as u64 + 1),
                 fee: None,
                 label: Some(format!("tx {i}")),
@@ -513,7 +520,7 @@ fn test_notification_debug_clone() {
 /// Test Payment and PaymentType structures.
 #[test]
 fn test_payment_structures() {
-    use bwk_sp::{Payment, PaymentType};
+    use bwk_sp::account::{Payment, PaymentType};
 
     let payment = Payment {
         txid: "abc123".to_string(),

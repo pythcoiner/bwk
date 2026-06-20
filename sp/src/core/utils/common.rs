@@ -1,23 +1,22 @@
 use core::fmt;
 
-use crate::silentpayments::secp256k1::{PublicKey, Scalar, SecretKey, SECP256K1};
-use crate::silentpayments::utils::hash::SharedSecretHash;
-use crate::silentpayments::Error;
-use crate::silentpayments::Result;
+use crate::core::{
+    error::Error,
+    secp256k1::{PublicKey, Scalar, SecretKey, SECP256K1},
+    utils::hash::SharedSecretHash,
+};
 use bech32::{FromBase32, ToBase32};
 use bitcoin_hashes::Hash;
-use serde::ser::Serializer;
-use serde::Deserializer;
-use serde::{Deserialize, Serialize};
+use serde::{ser::Serializer, Deserialize, Deserializer, Serialize};
 
-pub fn calculate_t_n(ecdh_shared_secret: &PublicKey, k: u32) -> Result<SecretKey> {
+pub fn calculate_t_n(ecdh_shared_secret: &PublicKey, k: u32) -> Result<SecretKey, Error> {
     let hash = SharedSecretHash::from_ecdh_and_k(ecdh_shared_secret, k).to_byte_array();
     let sk = SecretKey::from_slice(&hash)?;
 
     Ok(sk)
 }
 
-pub fn calculate_P_n(B_spend: &PublicKey, t_n: Scalar) -> Result<PublicKey> {
+pub fn calculate_P_n(B_spend: &PublicKey, t_n: Scalar) -> Result<PublicKey, Error> {
     // Use the shared global secp context: a fresh `Secp256k1::new()` here is called
     // once per tweak in the scan hot path, and the per-call context allocation
     // (16 threads, millions of tweaks) dominates the EC work it wraps.
@@ -48,9 +47,9 @@ impl From<Network> for &str {
 }
 
 impl TryFrom<&str> for Network {
-    type Error = crate::silentpayments::Error;
+    type Error = crate::core::error::Error;
 
-    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         let res = match value {
             "bitcoin" | "main" => Self::Mainnet, // We also take the core style argument
             "regtest" => Self::Regtest,
@@ -71,7 +70,7 @@ pub struct SilentPaymentAddress {
 }
 
 impl Serialize for SilentPaymentAddress {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
@@ -81,7 +80,7 @@ impl Serialize for SilentPaymentAddress {
 }
 
 impl<'de> Deserialize<'de> for SilentPaymentAddress {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -97,7 +96,7 @@ impl SilentPaymentAddress {
         m_pubkey: PublicKey,
         network: Network,
         version: u8,
-    ) -> Result<Self> {
+    ) -> Result<Self, Error> {
         if version != 0 {
             return Err(Error::GenericError(
                 "Can't have other version than 0 for now".to_owned(),
@@ -134,7 +133,7 @@ impl fmt::Display for SilentPaymentAddress {
 impl TryFrom<&str> for SilentPaymentAddress {
     type Error = Error;
 
-    fn try_from(addr: &str) -> Result<Self> {
+    fn try_from(addr: &str) -> Result<Self, Self::Error> {
         let (hrp, data, _variant) = bech32::decode(addr)?;
 
         if data.len() != 107 {
@@ -167,7 +166,7 @@ impl TryFrom<&str> for SilentPaymentAddress {
 impl TryFrom<String> for SilentPaymentAddress {
     type Error = Error;
 
-    fn try_from(addr: String) -> Result<Self> {
+    fn try_from(addr: String) -> Result<Self, Self::Error> {
         addr.as_str().try_into()
     }
 }

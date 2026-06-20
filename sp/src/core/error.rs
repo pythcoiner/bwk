@@ -8,8 +8,8 @@ pub enum Error {
     InvalidSharedSecret(String),
     InvalidVin(String),
     InvalidNetwork(String),
-    Secp256k1Error(crate::silentpayments::secp256k1::Error),
-    OutOfRangeError(crate::silentpayments::secp256k1::scalar::OutOfRangeError),
+    Secp256k1Error(crate::core::secp256k1::Error),
+    OutOfRangeError(crate::core::secp256k1::scalar::OutOfRangeError),
     IOError(std::io::Error),
 }
 
@@ -43,14 +43,14 @@ impl From<bech32::Error> for Error {
     }
 }
 
-impl From<crate::silentpayments::secp256k1::Error> for Error {
-    fn from(e: crate::silentpayments::secp256k1::Error) -> Self {
+impl From<crate::core::secp256k1::Error> for Error {
+    fn from(e: crate::core::secp256k1::Error) -> Self {
         Error::Secp256k1Error(e)
     }
 }
 
-impl From<crate::silentpayments::secp256k1::scalar::OutOfRangeError> for Error {
-    fn from(e: crate::silentpayments::secp256k1::scalar::OutOfRangeError) -> Self {
+impl From<crate::core::secp256k1::scalar::OutOfRangeError> for Error {
+    fn from(e: crate::core::secp256k1::scalar::OutOfRangeError) -> Self {
         Error::OutOfRangeError(e)
     }
 }

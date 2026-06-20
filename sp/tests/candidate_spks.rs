@@ -3,11 +3,10 @@
 //! `get_spks_from_shared_secret`, for every tweak.
 use std::collections::HashSet;
 
-use bwk_sp::silentpayments::{
-    receiving::{Label, Receiver},
+use bwk_sp::core::{
+    receiving::{calculate_ecdh_shared_secret, Label, Receiver},
     secp256k1::{rand, PublicKey, Secp256k1, SecretKey},
-    utils::receiving::calculate_ecdh_shared_secret,
-    Network,
+    utils::common::Network,
 };
 
 #[test]

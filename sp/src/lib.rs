@@ -4,45 +4,19 @@
 // Experimental, not production-ready.
 
 // Account uses the blindbit transport directly.
-#[cfg(feature = "blindbit")]
-mod account;
-#[cfg(feature = "blindbit")]
+pub mod account;
 pub mod blindbit;
-mod coin_store;
-mod config;
+pub mod core;
 pub mod profile;
-pub mod recipient;
+pub mod receiver;
 pub mod scan;
-mod scan_state;
-pub mod silentpayments;
-pub mod spdk_core;
-mod tx_store;
-mod unified;
+mod thread_pool;
 
-pub use profile::{SpRamProfile, SpStorageProfile};
-
-// Internal types
-#[cfg(feature = "blindbit")]
-pub use account::{
-    backend_block_height, backend_info, sp_coin_entry_to_coin, Account, AccountError, Payment,
-    PaymentType, ScanMode,
-};
-#[cfg(feature = "blindbit")]
-pub use blindbit::InfoResponse;
-pub use bwk;
-pub use bwk::label_store::LabelKey;
-pub use bwk::{Notification, SpNotification};
-pub use coin_store::{CoinState, SpCoinEntry, SpCoinStore};
-pub use config::{Config, ConfigError, SubAccountConfig, CONFIG_FILENAME};
-pub use scan_state::ScanState;
-pub use tx_store::{SpTxEntry, SpTxStore, TxDirection};
-pub use unified::{CoinOrigin, SpendableSummary, UnifiedCoin};
+pub use bwk::{self, label_store::LabelKey, Notification, SpNotification};
 
 // Re-export external types for convenience
 pub use bitcoin;
 pub use bwk_sign;
-pub use bwk_tx;
 pub use bwk_tx::{
-    Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
+    self, Fees, FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
 };
-pub use recipient::{SpRecipient, SpRecipientAddress, SpRecipientError, TxBuilderSpExt};

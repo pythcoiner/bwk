@@ -12,7 +12,7 @@ use bitcoin::{hashes::Hash, OutPoint};
 use bwk_tx::{TxOutputSpec, TxRequest, TxRequestError};
 use common::test_account_named;
 
-fn account() -> bwk_sp::Account {
+fn account() -> bwk_sp::account::Account {
     test_account_named("template-tests", "http://127.0.0.1:1")
 }
 

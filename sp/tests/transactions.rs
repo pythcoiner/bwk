@@ -8,9 +8,8 @@
 mod common;
 
 use bitcoin::Network;
-use bwk_sp::{SpRecipientAddress, TxBuilderSpExt};
-use bwk_tx::transaction::Amount;
-use bwk_tx::Recipient;
+use bwk_sp::account::recipient::{SpRecipientAddress, TxBuilderSpExt};
+use bwk_tx::{transaction::Amount, Recipient};
 
 use common::{test_mnemonic, test_mnemonic_2, TestEnv};
 
