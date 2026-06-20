@@ -163,15 +163,19 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
             let candidate_spks: Vec<&[u8; 34]> = secrets_map.keys().collect();
 
             //get block gcs & check match
+            let __t = std::time::Instant::now();
             let blkfilter = BlockFilter::new(&new_utxo_filter.data);
             let blkhash = new_utxo_filter.block_hash;
 
             let matched_outputs = Self::check_block_outputs(blkfilter, blkhash, candidate_spks)?;
+            crate::scan_profile::add(&crate::scan_profile::OUTPUT_FILTER_NS, __t.elapsed());
 
             //if match: fetch and scan utxos
             if matched_outputs {
                 log::info!("matched outputs on: {}", blkheight);
+                let __t = std::time::Instant::now();
                 let found = self.scan_utxos(blkheight, secrets_map)?;
+                crate::scan_profile::add(&crate::scan_profile::SCAN_UTXOS_NS, __t.elapsed());
 
                 if !found.is_empty() {
                     for (label, utxo, tweak) in found {
@@ -207,6 +211,7 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
         let blkhash = spent_filter.block_hash;
 
         // first get the 8-byte hashes used to construct the input filter
+        let __t = std::time::Instant::now();
         let input_hashes_map = self.get_input_hashes(blkhash)?;
 
         // check against filter
@@ -216,6 +221,7 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
             blkhash,
             input_hashes_map.keys().cloned().collect(),
         )?;
+        crate::scan_profile::add(&crate::scan_profile::INPUT_NS, __t.elapsed());
 
         // if match: download spent data, collect the outpoints that are spent
         if matched_inputs {

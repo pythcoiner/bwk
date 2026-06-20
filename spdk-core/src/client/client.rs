@@ -181,6 +181,7 @@ impl SpClient {
     ) -> Result<HashMap<[u8; 34], PublicKey>> {
         let b_scan = &self.get_scan_key();
 
+        let __t = std::time::Instant::now();
         // Use parallel iteration for CPU-intensive ECDH calculations
         #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
         let shared_secrets: Vec<PublicKey> = {
@@ -197,7 +198,9 @@ impl SpClient {
             .into_iter()
             .map(|tweak| sp_utils::receiving::calculate_ecdh_shared_secret(&tweak, b_scan))
             .collect();
+        crate::scan_profile::add(&crate::scan_profile::ECDH_NS, __t.elapsed());
 
+        let __t = std::time::Instant::now();
         // Use parallel iteration for CPU-intensive SPK derivation
         #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
         let items: Result<Vec<_>> = {
@@ -221,6 +224,7 @@ impl SpClient {
                 Ok((secret, spks.into_values()))
             })
             .collect();
+        crate::scan_profile::add(&crate::scan_profile::SPKS_NS, __t.elapsed());
 
         let mut res = HashMap::new();
         for (secret, spks) in items? {

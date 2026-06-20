@@ -5,6 +5,7 @@ pub mod backend;
 pub mod client;
 pub mod constants;
 pub mod error;
+pub mod scan_profile;
 pub mod scanner;
 pub mod types;
 pub mod updater;
