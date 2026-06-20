@@ -477,6 +477,96 @@ impl Receiver {
         Ok(res)
     }
 
+    /// The precomputed spend points whose `k = 0` outputs are this receiver's
+    /// candidate spks: the unlabeled spend pubkey first, then one
+    /// `label_point + spend_pubkey` per registered label. These are constant
+    /// across tweaks, so a scanner computes them once and reuses them for every
+    /// tweak. The order matches [`get_spks_from_shared_secret`]'s output values.
+    pub fn candidate_spend_points(&self) -> Result<Vec<PublicKey>> {
+        let mut points = Vec::with_capacity(1 + self.labels.len());
+        points.push(self.spend_pubkey);
+        for (_, mG) in &self.labels {
+            points.push(mG.combine(&self.spend_pubkey)?);
+        }
+        Ok(points)
+    }
+
+    /// The candidate output spks for one tweak, derived in a single native call.
+    ///
+    /// This is the fast-path equivalent of taking the values of
+    /// [`get_spks_from_shared_secret`]: given the tweak (combined tweak `T`), the
+    /// scan key, and the receiver's precomputed `spend_points` (from
+    /// [`candidate_spend_points`](Receiver::candidate_spend_points)), it returns
+    /// one 34-byte p2tr spk (`0x51 0x20 || xonly`) per spend point. It does the
+    /// ECDH, derives `t_0`, and computes `t_0 * G` once for the whole batch.
+    ///
+    /// It runs in variable time over the scan key and must only be used for
+    /// recipient scanning.
+    pub fn candidate_output_spks(
+        &self,
+        tweak: &PublicKey,
+        scan_key: &SecretKey,
+        spend_points: &[PublicKey],
+    ) -> Result<Vec<[u8; 34]>> {
+        let secp = Secp256k1::new();
+        let xonly = crate::secp256k1::silentpayments::recipient_scan_lightclient_spend_points(
+            &secp,
+            tweak,
+            scan_key,
+            spend_points,
+        )?;
+        Ok(xonly
+            .into_iter()
+            .map(|key| {
+                let mut spk = [0u8; 34];
+                // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
+                spk[..2].copy_from_slice(&[0x51, 0x20]);
+                spk[2..].copy_from_slice(&key.serialize());
+                spk
+            })
+            .collect())
+    }
+
+    /// The candidate output spks for a batch of tweaks, derived in a single
+    /// native call. Returns one inner vector per tweak (in the same order as
+    /// `tweaks`), each holding one 34-byte p2tr spk (`0x51 0x20 || xonly`) per
+    /// spend point. This is the byte-identical batched equivalent of calling
+    /// [`candidate_output_spks`](Receiver::candidate_output_spks) once per tweak;
+    /// the native call phases the work so per-chunk field inversions are batched.
+    ///
+    /// It runs in variable time over the scan key and must only be used for
+    /// recipient scanning.
+    pub fn candidate_output_spks_batch(
+        &self,
+        tweaks: &[PublicKey],
+        scan_key: &SecretKey,
+        spend_points: &[PublicKey],
+    ) -> Result<Vec<Vec<[u8; 34]>>> {
+        let secp = Secp256k1::new();
+        let per_tweak =
+            crate::secp256k1::silentpayments::recipient_scan_lightclient_spend_points_batch(
+                &secp,
+                tweaks,
+                scan_key,
+                spend_points,
+            )?;
+        Ok(per_tweak
+            .into_iter()
+            .map(|xonly| {
+                xonly
+                    .into_iter()
+                    .map(|key| {
+                        let mut spk = [0u8; 34];
+                        // hardcoded opcode values for OP_PUSHNUM_1 and OP_PUSHBYTES_32
+                        spk[..2].copy_from_slice(&[0x51, 0x20]);
+                        spk[2..].copy_from_slice(&key.serialize());
+                        spk
+                    })
+                    .collect()
+            })
+            .collect())
+    }
+
     fn get_silent_payment_address(&self, m_pubkey: PublicKey) -> SilentPaymentAddress {
         SilentPaymentAddress::new(self.scan_pubkey, m_pubkey, self.network, 0)
             .expect("only fails if version != 0")
@@ -504,6 +594,57 @@ mod tests {
         let label_str = serde_json::to_string(&label).unwrap();
 
         assert_eq!(label_str, s);
+    }
+
+    // Byte-identical equivalence: the batched candidate primitive must produce
+    // exactly the same spks as calling the per-tweak primitive once per tweak.
+    #[test]
+    fn candidate_output_spks_batch_matches_per_tweak() {
+        use crate::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        use crate::{receiving::Receiver, Network};
+        use bitcoin_hashes::{sha256, Hash};
+
+        let secp = Secp256k1::new();
+        // Deterministic distinct valid keys derived by hashing a domain + counter.
+        let key = |domain: &str, i: usize| -> SecretKey {
+            let h = sha256::Hash::hash(format!("{domain}-{i}").as_bytes());
+            SecretKey::from_slice(h.as_byte_array()).expect("hash is a valid seckey")
+        };
+
+        let scan_key = key("scan", 0);
+        let spend_key = key("spend", 0);
+        let scan_pubkey = PublicKey::from_secret_key(&secp, &scan_key);
+        let spend_pubkey = PublicKey::from_secret_key(&secp, &spend_key);
+
+        let change_label = Label::new(scan_key, 0);
+        let mut receiver =
+            Receiver::new(0, scan_pubkey, spend_pubkey, change_label, Network::Regtest).unwrap();
+        // Register a couple of extra labels so there is more than one spend point.
+        receiver.add_label(Label::new(scan_key, 1)).unwrap();
+        receiver.add_label(Label::new(scan_key, 2)).unwrap();
+        let spend_points = receiver.candidate_spend_points().unwrap();
+        assert!(spend_points.len() > 1);
+
+        // Several sizes, exercising the K-lane lockstep tail (counts that are not
+        // a multiple of the lane count) and crossing the native tweak-chunk (32)
+        // and candidate sub-chunk (64) boundaries.
+        for n_tweaks in [1usize, 5, 6, 7, 13, 33, 64, 70, 100] {
+            let tweaks: Vec<PublicKey> = (0..n_tweaks)
+                .map(|i| PublicKey::from_secret_key(&secp, &key("tweak", i)))
+                .collect();
+
+            let batched = receiver
+                .candidate_output_spks_batch(&tweaks, &scan_key, &spend_points)
+                .unwrap();
+            assert_eq!(batched.len(), n_tweaks);
+
+            for (t, tweak) in tweaks.iter().enumerate() {
+                let per_tweak = receiver
+                    .candidate_output_spks(tweak, &scan_key, &spend_points)
+                    .unwrap();
+                assert_eq!(batched[t], per_tweak);
+            }
+        }
     }
 
     #[test]

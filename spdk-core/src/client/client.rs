@@ -20,6 +20,24 @@ use {
     std::str::FromStr,
 };
 
+/// Tweaks per batched native candidate-derivation call. Each chunk is one FFI
+/// call; rayon parallelism is kept across chunks, so this is kept small enough
+/// that a block's tweaks split into many chunks and all cores stay busy. Matches
+/// the native primitive's internal tweak-chunk size so each call is one chunk.
+const CANDIDATE_TWEAK_CHUNK: usize = 32;
+
+/// Tweak-chunk size, overridable via `BWK_SP_CANDIDATE_CHUNK` for sweeping the
+/// rayon task granularity. Only changes how a block's tweaks split into batched
+/// calls; the native primitive's internal chunk (`SP_BATCH_TWEAK_CHUNK`) is
+/// compile-time. Defaults to the const above.
+fn candidate_tweak_chunk() -> usize {
+    std::env::var("BWK_SP_CANDIDATE_CHUNK")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(CANDIDATE_TWEAK_CHUNK)
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct SpClient {
     scan_sk: SecretKey,
@@ -181,7 +199,6 @@ impl SpClient {
     ) -> Result<HashMap<[u8; 34], PublicKey>> {
         let b_scan = &self.get_scan_key();
 
-        let __t = std::time::Instant::now();
         // Use parallel iteration for CPU-intensive ECDH calculations
         #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
         let shared_secrets: Vec<PublicKey> = {
@@ -198,9 +215,7 @@ impl SpClient {
             .into_iter()
             .map(|tweak| sp_utils::receiving::calculate_ecdh_shared_secret(&tweak, b_scan))
             .collect();
-        crate::scan_profile::add(&crate::scan_profile::ECDH_NS, __t.elapsed());
 
-        let __t = std::time::Instant::now();
         // Use parallel iteration for CPU-intensive SPK derivation
         #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
         let items: Result<Vec<_>> = {
@@ -224,7 +239,6 @@ impl SpClient {
                 Ok((secret, spks.into_values()))
             })
             .collect();
-        crate::scan_profile::add(&crate::scan_profile::SPKS_NS, __t.elapsed());
 
         let mut res = HashMap::new();
         for (secret, spks) in items? {
@@ -233,6 +247,46 @@ impl SpClient {
             }
         }
         Ok(res)
+    }
+
+    /// The candidate output spks for a batch of tweaks, derived in one native
+    /// call per tweak (vartime ECDH plus `k = 0` candidate derivation, no FFI
+    /// round-trips). The spend points are constant across tweaks, so they are
+    /// computed once and reused. This is the GCS-filter membership set; on a
+    /// match the caller recovers the shared secrets via
+    /// [`get_script_to_secret_map`](SpClient::get_script_to_secret_map).
+    pub fn get_candidate_spks(&self, tweaks: &[PublicKey]) -> Result<Vec<[u8; 34]>> {
+        let scan_key = self.get_scan_key();
+        let spend_points = self.sp_receiver.candidate_spend_points()?;
+
+        let __t = std::time::Instant::now();
+        // One batched native call per chunk of tweaks, keeping rayon parallelism
+        // across chunks.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "parallel"))]
+        let spks: Result<Vec<Vec<Vec<[u8; 34]>>>> = {
+            use rayon::prelude::*;
+            tweaks
+                .par_chunks(candidate_tweak_chunk())
+                .map(|chunk| {
+                    self.sp_receiver
+                        .candidate_output_spks_batch(chunk, &scan_key, &spend_points)
+                        .map_err(Into::into)
+                })
+                .collect()
+        };
+
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "parallel")))]
+        let spks: Result<Vec<Vec<Vec<[u8; 34]>>>> = tweaks
+            .chunks(candidate_tweak_chunk())
+            .map(|chunk| {
+                self.sp_receiver
+                    .candidate_output_spks_batch(chunk, &scan_key, &spend_points)
+                    .map_err(Into::into)
+            })
+            .collect();
+        crate::scan_profile::add(&crate::scan_profile::CANDIDATES_NS, __t.elapsed());
+
+        Ok(spks?.into_iter().flatten().flatten().collect())
     }
 
     pub fn get_client_fingerprint(&self) -> Result<[u8; 8]> {

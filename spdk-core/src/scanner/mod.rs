@@ -57,7 +57,7 @@ pub trait SpScanner {
     fn process_block_outputs(
         &self,
         blkheight: Height,
-        tweaks: Vec<bitcoin::secp256k1::PublicKey>,
+        tweaks: &[bitcoin::secp256k1::PublicKey],
         new_utxo_filter: FilterData,
     ) -> Result<HashMap<OutPoint, OwnedOutput>>;
 
@@ -502,7 +502,7 @@ mod tests {
         fn process_block_outputs(
             &self,
             _blkheight: Height,
-            _tweaks: Vec<bitcoin::secp256k1::PublicKey>,
+            _tweaks: &[bitcoin::secp256k1::PublicKey],
             _new_utxo_filter: FilterData,
         ) -> Result<HashMap<OutPoint, OwnedOutput>> {
             panic!("not used");

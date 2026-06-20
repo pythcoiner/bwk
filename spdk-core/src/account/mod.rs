@@ -134,7 +134,7 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
             spent_filter,
         } = blockdata;
 
-        let outs = self.process_block_outputs(blkheight, tweaks, new_utxo_filter)?;
+        let outs = self.process_block_outputs(blkheight, &tweaks, new_utxo_filter)?;
 
         // after processing outputs, we add the found outputs to our list
         self.owned_outpoints.extend(outs.keys());
@@ -150,17 +150,18 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
     fn process_block_outputs(
         &self,
         blkheight: bitcoin::absolute::Height,
-        tweaks: Vec<bitcoin::secp256k1::PublicKey>,
+        tweaks: &[bitcoin::secp256k1::PublicKey],
         new_utxo_filter: crate::FilterData,
     ) -> crate::error::Result<std::collections::HashMap<bitcoin::OutPoint, crate::OwnedOutput>>
     {
         let mut res = HashMap::new();
 
         if !tweaks.is_empty() {
-            let secrets_map = self.client.get_script_to_secret_map(tweaks)?;
-
-            //last_scan = last_scan.max(n as u32);
-            let candidate_spks: Vec<&[u8; 34]> = secrets_map.keys().collect();
+            // Derive the candidate spks in one native call per tweak; the shared
+            // secrets needed to recover spend tweaks are recomputed only on a
+            // filter match below.
+            let candidate_spks = self.client.get_candidate_spks(tweaks)?;
+            let candidate_spks: Vec<&[u8; 34]> = candidate_spks.iter().collect();
 
             //get block gcs & check match
             let __t = std::time::Instant::now();
@@ -173,6 +174,7 @@ impl<B: ChainBackend, U: Updater> SpScanner for SpAccount<B, U> {
             //if match: fetch and scan utxos
             if matched_outputs {
                 log::info!("matched outputs on: {}", blkheight);
+                let secrets_map = self.client.get_script_to_secret_map(tweaks.to_vec())?;
                 let __t = std::time::Instant::now();
                 let found = self.scan_utxos(blkheight, secrets_map)?;
                 crate::scan_profile::add(&crate::scan_profile::SCAN_UTXOS_NS, __t.elapsed());

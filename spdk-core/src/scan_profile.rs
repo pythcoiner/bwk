@@ -11,10 +11,9 @@ use std::{
     time::Duration,
 };
 
-/// `b_scan * tweak` ECDH shared-secret derivation (per-tweak, parallel).
-pub static ECDH_NS: AtomicU64 = AtomicU64::new(0);
-/// Candidate output-key (P_0 / labelled) derivation from the shared secret.
-pub static SPKS_NS: AtomicU64 = AtomicU64::new(0);
+/// Per-tweak candidate spk derivation: vartime ECDH plus the `k = 0` candidate
+/// output keys (unlabeled and labelled), in one native call per tweak (parallel).
+pub static CANDIDATES_NS: AtomicU64 = AtomicU64::new(0);
 /// Building the output GCS filter and testing candidate spks against it.
 pub static OUTPUT_FILTER_NS: AtomicU64 = AtomicU64::new(0);
 /// Fetching + scanning a block's UTXOs after a filter match (rare).
@@ -30,23 +29,16 @@ pub fn add(counter: &AtomicU64, elapsed: Duration) {
 
 /// Reset every counter to zero (call before a measured run).
 pub fn reset() {
-    for c in [
-        &ECDH_NS,
-        &SPKS_NS,
-        &OUTPUT_FILTER_NS,
-        &SCAN_UTXOS_NS,
-        &INPUT_NS,
-    ] {
+    for c in [&CANDIDATES_NS, &OUTPUT_FILTER_NS, &SCAN_UTXOS_NS, &INPUT_NS] {
         c.store(0, Ordering::Relaxed);
     }
 }
 
 /// `(label, seconds)` for each phase, in hot-path order.
-pub fn snapshot_secs() -> [(&'static str, f64); 5] {
+pub fn snapshot_secs() -> [(&'static str, f64); 4] {
     let s = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e9;
     [
-        ("ecdh", s(&ECDH_NS)),
-        ("spks", s(&SPKS_NS)),
+        ("candidates", s(&CANDIDATES_NS)),
         ("output_filter", s(&OUTPUT_FILTER_NS)),
         ("scan_utxos", s(&SCAN_UTXOS_NS)),
         ("input", s(&INPUT_NS)),

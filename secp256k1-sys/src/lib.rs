@@ -887,6 +887,29 @@ extern "C" {
         label_integers: *const u32,
         n_label_integers: size_t,
     ) -> c_int;
+
+    #[cfg_attr(not(rust_secp_no_symbol_renaming), link_name = "rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient_spend_points")]
+    pub fn secp256k1_silentpayments_recipient_scan_lightclient_spend_points(
+        cx: *const Context,
+        candidate_xonly: *mut XOnlyPublicKey,
+        n_candidates: *mut size_t,
+        combined_tweak: *const PublicKey,
+        scan_key32: *const c_uchar,
+        spend_points: *const PublicKey,
+        n_spend_points: size_t,
+    ) -> c_int;
+
+    #[cfg_attr(not(rust_secp_no_symbol_renaming), link_name = "rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient_spend_points_batch")]
+    pub fn secp256k1_silentpayments_recipient_scan_lightclient_spend_points_batch(
+        cx: *const Context,
+        out_xonly: *mut XOnlyPublicKey,
+        n_out: *mut size_t,
+        tweaks: *const PublicKey,
+        n_tweaks: size_t,
+        scan_key32: *const c_uchar,
+        spend_points: *const PublicKey,
+        n_spend_points: size_t,
+    ) -> c_int;
 }
 
 /// A reimplementation of the C function `secp256k1_context_create` in rust.

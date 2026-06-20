@@ -121,6 +121,89 @@ const unsigned char* label_lookup(const unsigned char* key, const void* cache_pt
     return NULL;
 }
 
+/* Funds gate: the spend-points primitive must produce exactly the same k=0
+ * candidate set as `_recipient_scan_lightclient`, for the unlabeled output plus
+ * every requested label. The spend points are built the way the Rust wrapper
+ * builds them: the unlabeled spend pubkey first, then one labeled spend pubkey
+ * per requested label. */
+static void test_lightclient_spend_points_equivalence(
+    const rustsecp256k1_v0_10_0_context *ctx,
+    const rustsecp256k1_v0_10_0_pubkey *combined_tweak_pubkey,
+    const unsigned char *scan_seckey,
+    const rustsecp256k1_v0_10_0_pubkey *recipient_spend_pubkey,
+    const uint32_t *label_integers,
+    size_t n_label_integers
+) {
+    rustsecp256k1_v0_10_0_pubkey spend_points[MAX_OUTPUTS_PER_TEST_CASE];
+    rustsecp256k1_v0_10_0_xonly_pubkey reference_candidates[MAX_OUTPUTS_PER_TEST_CASE];
+    rustsecp256k1_v0_10_0_xonly_pubkey new_candidates[MAX_OUTPUTS_PER_TEST_CASE];
+    unsigned char reference_ser[MAX_OUTPUTS_PER_TEST_CASE][32];
+    unsigned char new_ser[MAX_OUTPUTS_PER_TEST_CASE][32];
+    size_t n_spend_points;
+    size_t n_reference = MAX_OUTPUTS_PER_TEST_CASE;
+    size_t n_new = MAX_OUTPUTS_PER_TEST_CASE;
+    size_t i;
+
+    /* Reference set from the per-output primitive. */
+    CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient(ctx,
+        reference_candidates,
+        &n_reference,
+        combined_tweak_pubkey,
+        scan_seckey,
+        recipient_spend_pubkey,
+        n_label_integers > 0 ? label_lookup : NULL,
+        n_label_integers > 0 ? &labels_cache : NULL,
+        label_integers,
+        n_label_integers
+    ));
+
+    /* Precompute the spend points: unlabeled, then one per requested label. */
+    spend_points[0] = *recipient_spend_pubkey;
+    n_spend_points = 1;
+    for (i = 0; i < n_label_integers; i++) {
+        rustsecp256k1_v0_10_0_pubkey label_pubkey;
+        unsigned char label_tweak32[32];
+        CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_create_label(ctx, &label_pubkey, label_tweak32, scan_seckey, label_integers[i]));
+        CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_create_labeled_spend_pubkey(ctx, &spend_points[n_spend_points], recipient_spend_pubkey, &label_pubkey));
+        n_spend_points++;
+    }
+
+    CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient_spend_points(ctx,
+        new_candidates,
+        &n_new,
+        combined_tweak_pubkey,
+        scan_seckey,
+        spend_points,
+        n_spend_points
+    ));
+
+    /* The reference primitive only emits labeled candidates for labels present in
+     * the cache, so it may emit fewer than n_spend_points. The spend-points
+     * primitive emits one candidate per spend point, in order. The unlabeled
+     * candidate (index 0) is always shared and must be identical. */
+    CHECK(n_new == n_spend_points);
+    CHECK(n_reference >= 1);
+    for (i = 0; i < n_new; i++) {
+        CHECK(rustsecp256k1_v0_10_0_xonly_pubkey_serialize(CTX, new_ser[i], &new_candidates[i]));
+    }
+    for (i = 0; i < n_reference; i++) {
+        CHECK(rustsecp256k1_v0_10_0_xonly_pubkey_serialize(CTX, reference_ser[i], &reference_candidates[i]));
+    }
+    /* Every reference candidate must appear in the new candidate set: same k=0
+     * candidates, exactly. */
+    for (i = 0; i < n_reference; i++) {
+        size_t j;
+        int matched = 0;
+        for (j = 0; j < n_new; j++) {
+            if (rustsecp256k1_v0_10_0_memcmp_var(reference_ser[i], new_ser[j], 32) == 0) {
+                matched = 1;
+                break;
+            }
+        }
+        CHECK(matched);
+    }
+}
+
 static void test_lightclient_candidate_set_matches_outputs(
     const rustsecp256k1_v0_10_0_context *ctx,
     rustsecp256k1_v0_10_0_xonly_pubkey *light_client_candidates,
@@ -655,6 +738,13 @@ void run_silentpayments_test_vector_receive(const struct bip352_test_vector *tes
             test->num_to_scan_outputs,
             found_outputs_light_client
         );
+        test_lightclient_spend_points_equivalence(CTX,
+            &combined_tweak_pubkey,
+            test->scan_seckey,
+            &recipient_spend_pubkey,
+            test->label_integers,
+            test->num_labels
+        );
     } else if (test->num_labels == 0) {
         size_t n_candidates = MAX_OUTPUTS_PER_TEST_CASE;
         int matched_output = 0;
@@ -724,11 +814,83 @@ void run_silentpayments_test_vectors(void) {
     }
 }
 
+/* Generate a random valid scan key (32 bytes, accepted as a seckey). */
+static void test_batch_random_scan_key(unsigned char *scan_key32) {
+    do {
+        testrand256(scan_key32);
+    } while (!rustsecp256k1_v0_10_0_ec_seckey_verify(CTX, scan_key32));
+}
+
+/* Generate a random valid pubkey by multiplying G by a random valid seckey. */
+static void test_batch_random_pubkey(rustsecp256k1_v0_10_0_pubkey *pubkey) {
+    unsigned char seckey[32];
+    do {
+        testrand256(seckey);
+    } while (!rustsecp256k1_v0_10_0_ec_seckey_verify(CTX, seckey));
+    CHECK(rustsecp256k1_v0_10_0_ec_pubkey_create(CTX, pubkey, seckey));
+}
+
+/* Equivalence gate: the batch primitive must produce, for every (tweak, spend
+ * point) pair, the exact same x-only candidate bytes as calling the per-tweak
+ * primitive once per tweak. Random scan key, random tweaks, random spend points,
+ * over several (n_tweaks, n_spend_points) sizes including ones that cross the
+ * internal tweak-chunk and candidate-subchunk boundaries. */
+static void test_lightclient_spend_points_batch_equivalence(void) {
+    #define BATCH_MAX_TWEAKS 70
+    #define BATCH_MAX_SPEND_POINTS 5
+    static const size_t tweak_sizes[] = {1, 2, 3, 33, 64, 65, BATCH_MAX_TWEAKS};
+    static const size_t spend_sizes[] = {1, 2, 3, BATCH_MAX_SPEND_POINTS};
+    size_t si, ti;
+
+    for (si = 0; si < sizeof(spend_sizes) / sizeof(spend_sizes[0]); si++) {
+        for (ti = 0; ti < sizeof(tweak_sizes) / sizeof(tweak_sizes[0]); ti++) {
+            size_t n_tweaks = tweak_sizes[ti];
+            size_t n_spend_points = spend_sizes[si];
+            unsigned char scan_key32[32];
+            rustsecp256k1_v0_10_0_pubkey tweaks[BATCH_MAX_TWEAKS];
+            rustsecp256k1_v0_10_0_pubkey spend_points[BATCH_MAX_SPEND_POINTS];
+            rustsecp256k1_v0_10_0_xonly_pubkey batch_out[BATCH_MAX_TWEAKS * BATCH_MAX_SPEND_POINTS];
+            rustsecp256k1_v0_10_0_xonly_pubkey ref_out[BATCH_MAX_SPEND_POINTS];
+            size_t n_out = BATCH_MAX_TWEAKS * BATCH_MAX_SPEND_POINTS;
+            size_t t, s;
+
+            test_batch_random_scan_key(scan_key32);
+            for (t = 0; t < n_tweaks; t++) {
+                test_batch_random_pubkey(&tweaks[t]);
+            }
+            for (s = 0; s < n_spend_points; s++) {
+                test_batch_random_pubkey(&spend_points[s]);
+            }
+
+            CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient_spend_points_batch(
+                CTX, batch_out, &n_out, tweaks, n_tweaks, scan_key32, spend_points, n_spend_points));
+            CHECK(n_out == n_tweaks * n_spend_points);
+
+            for (t = 0; t < n_tweaks; t++) {
+                size_t n_ref = BATCH_MAX_SPEND_POINTS;
+                CHECK(rustsecp256k1_v0_10_0_silentpayments_recipient_scan_lightclient_spend_points(
+                    CTX, ref_out, &n_ref, &tweaks[t], scan_key32, spend_points, n_spend_points));
+                CHECK(n_ref == n_spend_points);
+                for (s = 0; s < n_spend_points; s++) {
+                    unsigned char ref_ser[32];
+                    unsigned char batch_ser[32];
+                    CHECK(rustsecp256k1_v0_10_0_xonly_pubkey_serialize(CTX, ref_ser, &ref_out[s]));
+                    CHECK(rustsecp256k1_v0_10_0_xonly_pubkey_serialize(CTX, batch_ser, &batch_out[t * n_spend_points + s]));
+                    CHECK(rustsecp256k1_v0_10_0_memcmp_var(ref_ser, batch_ser, 32) == 0);
+                }
+            }
+        }
+    }
+    #undef BATCH_MAX_TWEAKS
+    #undef BATCH_MAX_SPEND_POINTS
+}
+
 void run_silentpayments_tests(void) {
     test_recipient_sort();
     test_send_api();
     test_label_api();
     test_recipient_api();
+    test_lightclient_spend_points_batch_equivalence();
     run_silentpayments_test_vectors();
 }
 

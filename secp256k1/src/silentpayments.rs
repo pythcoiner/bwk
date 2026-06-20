@@ -89,6 +89,117 @@ pub fn recipient_scan_lightclient<C: Verification + Signing>(
     Ok(candidates.into_iter().map(XOnlyPublicKey::from).collect())
 }
 
+/// Builds the candidate Silent Payment output keys over precomputed spend
+/// points, in one native call.
+///
+/// Faster variant of [`recipient_scan_lightclient`] for the common scan hot
+/// path. Given the combined tweak `T`, the recipient's scan key, and the
+/// recipient's precomputed spend points (the unlabeled spend pubkey first, then
+/// one `spend_pubkey + label_point` per label the recipient registered), returns
+/// the `k = 0` candidate x-only output key for each spend point, in the same
+/// order.
+///
+/// The shared secret and `t_0 * G` are computed once and reused for every spend
+/// point, so adding labels costs only one point addition each, with no extra
+/// scan-key EC operation or per-label gen-mul.
+///
+/// This is a recipient-scan helper only: it derives candidates the caller tests
+/// against a filter, it does NOT match against transaction outputs. It runs in
+/// variable time over the recipient's secret scan key and so must not be used in
+/// a context where timing is observable by an adversary.
+pub fn recipient_scan_lightclient_spend_points<C: Verification + Signing>(
+    secp: &Secp256k1<C>,
+    combined_tweak: &PublicKey,
+    scan_key: &SecretKey,
+    spend_points: &[PublicKey],
+) -> Result<Vec<XOnlyPublicKey>, Error> {
+    let capacity = spend_points.len();
+
+    // The buffer is written by the C function as an out-parameter; the zeroed
+    // entries are never read by it.
+    let mut candidates: Vec<ffi::XOnlyPublicKey> =
+        (0..capacity).map(|_| unsafe { ffi::XOnlyPublicKey::new() }).collect();
+    let mut n_candidates = capacity;
+
+    let ret = unsafe {
+        ffi::secp256k1_silentpayments_recipient_scan_lightclient_spend_points(
+            secp.ctx.as_ptr(),
+            candidates.as_mut_ptr(),
+            &mut n_candidates,
+            combined_tweak.as_c_ptr(),
+            scan_key.as_c_ptr(),
+            // `PublicKey` is `repr(transparent)` over `ffi::PublicKey`, so the
+            // slice is layout-identical to a `[ffi::PublicKey]`.
+            spend_points.as_ptr() as *const ffi::PublicKey,
+            spend_points.len(),
+        )
+    };
+
+    if ret != 1 {
+        return Err(Error::InvalidPublicKey);
+    }
+
+    candidates.truncate(n_candidates);
+    Ok(candidates.into_iter().map(XOnlyPublicKey::from).collect())
+}
+
+/// Batched form of [`recipient_scan_lightclient_spend_points`]: derives the
+/// `k = 0` candidates for many tweaks in a single native call. The candidates are
+/// grouped by tweak, so the returned outer vector has one entry per tweak (in the
+/// same order as `tweaks`), each holding one x-only candidate per spend point (in
+/// the same order as `spend_points`).
+///
+/// The result is byte-identical to calling
+/// [`recipient_scan_lightclient_spend_points`] once per tweak. The native call
+/// phases the work so per-chunk field inversions are batched.
+///
+/// This is a recipient-scan helper only. It runs in variable time over the
+/// recipient's secret scan key and so must not be used in a context where timing
+/// is observable by an adversary.
+pub fn recipient_scan_lightclient_spend_points_batch<C: Verification + Signing>(
+    secp: &Secp256k1<C>,
+    tweaks: &[PublicKey],
+    scan_key: &SecretKey,
+    spend_points: &[PublicKey],
+) -> Result<Vec<Vec<XOnlyPublicKey>>, Error> {
+    if tweaks.is_empty() || spend_points.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n_spend_points = spend_points.len();
+    let capacity = tweaks.len() * n_spend_points;
+
+    // The buffer is written by the C function as an out-parameter; the zeroed
+    // entries are never read by it.
+    let mut candidates: Vec<ffi::XOnlyPublicKey> =
+        (0..capacity).map(|_| unsafe { ffi::XOnlyPublicKey::new() }).collect();
+    let mut n_out = capacity;
+
+    let ret = unsafe {
+        ffi::secp256k1_silentpayments_recipient_scan_lightclient_spend_points_batch(
+            secp.ctx.as_ptr(),
+            candidates.as_mut_ptr(),
+            &mut n_out,
+            // `PublicKey` is `repr(transparent)` over `ffi::PublicKey`, so the
+            // slices are layout-identical to `[ffi::PublicKey]`.
+            tweaks.as_ptr() as *const ffi::PublicKey,
+            tweaks.len(),
+            scan_key.as_c_ptr(),
+            spend_points.as_ptr() as *const ffi::PublicKey,
+            n_spend_points,
+        )
+    };
+
+    if ret != 1 {
+        return Err(Error::InvalidPublicKey);
+    }
+
+    candidates.truncate(n_out);
+    Ok(candidates
+        .chunks(n_spend_points)
+        .map(|chunk| chunk.iter().copied().map(XOnlyPublicKey::from).collect())
+        .collect())
+}
+
 /// C callback bridging the [`LabelLookup`] trait to the FFI.
 ///
 /// `label_context` is a pointer to a `&dyn LabelLookup`. The returned pointer
