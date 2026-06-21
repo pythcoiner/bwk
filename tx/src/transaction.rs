@@ -243,8 +243,6 @@ impl TxTemplate {
             xpub: Default::default(),
             proprietary: Default::default(),
             unknown: Default::default(),
-            sp_dleqs: Default::default(),
-            sp_ecdh_shares: Default::default(),
             inputs: vec![],
             outputs: vec![],
         };
@@ -262,11 +260,12 @@ impl TxTemplate {
                 label,
             } = o.psbt_output_info()
             {
-                psbt_output.sp_v0_info = Some(bitcoin::psbt::SilentPaymentV0Info {
-                    scan_key: scan_pubkey,
-                    spend_key: spend_pubkey,
-                });
-                psbt_output.sp_v0_label = label;
+                crate::psbt_sp::set_sp_v0_output(
+                    &mut psbt_output,
+                    scan_pubkey,
+                    spend_pubkey,
+                    label,
+                );
             }
             psbt.outputs.push(psbt_output);
         }

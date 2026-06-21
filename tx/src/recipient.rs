@@ -210,8 +210,6 @@ impl Recipient {
                 xpub: Default::default(),
                 proprietary: Default::default(),
                 unknown: Default::default(),
-                sp_dleqs: Default::default(),
-                sp_ecdh_shares: Default::default(),
                 inputs: Default::default(),
                 outputs: vec![bitcoin::psbt::Output::default()],
             };
@@ -294,8 +292,6 @@ impl RecipientProvider for Recipient {
                 xpub: Default::default(),
                 proprietary: Default::default(),
                 unknown: Default::default(),
-                sp_dleqs: Default::default(),
-                sp_ecdh_shares: Default::default(),
                 inputs: Default::default(),
                 outputs: vec![bitcoin::psbt::Output::default()],
             };
