@@ -468,7 +468,26 @@ impl HotSigner {
                 Err(Error::MissingWitnessUtxo)
             }?;
 
-            let signature = self.secp().sign_ecdsa_low_r(&hash, &signing_key);
+            // Grind the nonce until the signature serializes to its full
+            // fixed-size low-R, low-S form (32-byte R with the high bit clear,
+            // 32-byte S, a 70-byte DER body). Plain low-R signing still lets R or
+            // S land below 32 bytes now and then, shaving a byte off the witness
+            // and making the transaction vsize nondeterministic, which flakes
+            // size and fee assertions. Forcing the maximal form keeps vsize stable.
+            let signature = {
+                let mut counter: u32 = 0;
+                loop {
+                    let mut noncedata = [0u8; 32];
+                    noncedata[..4].copy_from_slice(&counter.to_le_bytes());
+                    let sig =
+                        self.secp()
+                            .sign_ecdsa_with_noncedata(&hash, &signing_key, &noncedata);
+                    if sig.serialize_der().len() == 70 {
+                        break sig;
+                    }
+                    counter = counter.wrapping_add(1);
+                }
+            };
 
             self.secp()
                 .verify_ecdsa(&hash, &signature, &pubkey)
