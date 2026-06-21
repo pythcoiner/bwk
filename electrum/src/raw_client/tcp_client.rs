@@ -1,13 +1,27 @@
-use super::{Error, PEEK_BUFFER_SIZE};
+use super::Error;
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{ErrorKind, Read, Write},
     net::{self, SocketAddr},
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-type TcpStream = Arc<Mutex<net::TcpStream>>;
+/// A connected TCP stream plus the bytes already read past the last delimiter.
+/// We keep a residual buffer across read calls so chunked reads never drop the
+/// tail of a burst: leftover bytes after a `\n` survive to the next read.
+pub struct TcpState {
+    stream: net::TcpStream,
+    buf: Vec<u8>,
+}
+
+impl std::fmt::Debug for TcpState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TcpState").finish()
+    }
+}
+
+type TcpStream = Arc<Mutex<TcpState>>;
 
 #[derive(Debug)]
 pub struct TcpClient {
@@ -87,27 +101,34 @@ impl TcpClient {
             .set_write_timeout(self.write_timeout)
             .map_err(Error::TcpStream)?;
         if self.stream.is_none() {
-            self.stream = Some(Arc::new(Mutex::new(stream)));
+            self.stream = Some(Arc::new(Mutex::new(TcpState {
+                stream,
+                buf: Vec::new(),
+            })));
             Ok(())
         } else {
             Err(Error::AlreadyConnected)
         }
     }
 
-    pub fn send(stream: &mut net::TcpStream, request: &str) -> Result<(), Error> {
-        stream
+    pub fn send(state: &mut TcpState, request: &str) -> Result<(), Error> {
+        state
+            .stream
             .write_all(request.as_bytes())
             .map_err(Error::TcpStream)?;
         // add a \n char for EOL
-        stream.write_all(&[10]).map_err(Error::TcpStream)?;
-        stream.flush().map_err(Error::TcpStream)?;
+        state.stream.write_all(&[10]).map_err(Error::TcpStream)?;
+        state.stream.flush().map_err(Error::TcpStream)?;
         Ok(())
     }
 
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> Result<(), Error> {
         if let Some(stream) = self.stream.as_mut() {
             let stream = stream.lock().map_err(|_| Error::Mutex)?;
-            stream.set_read_timeout(timeout).map_err(Error::TcpStream)?;
+            stream
+                .stream
+                .set_read_timeout(timeout)
+                .map_err(Error::TcpStream)?;
         }
         self.read_timeout = timeout;
         Ok(())
@@ -117,6 +138,7 @@ impl TcpClient {
         if let Some(stream) = self.stream.as_mut() {
             let stream = stream.lock().map_err(|_| Error::Mutex)?;
             stream
+                .stream
                 .set_write_timeout(timeout)
                 .map_err(Error::TcpStream)?;
         }
@@ -124,36 +146,70 @@ impl TcpClient {
         Ok(())
     }
 
-    fn raw_read(stream: &mut net::TcpStream, blocking: bool) -> Result<Option<String>, Error> {
-        let mut peek_buffer = [0u8; PEEK_BUFFER_SIZE];
+    /// Split off the first line (including the trailing `\n`) from the residual
+    /// buffer if it holds a complete one, leaving the remainder in `buf`.
+    fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+        let pos = buf.iter().position(|b| *b == b'\n')?;
+        let rest = buf.split_off(pos + 1);
+        let line = std::mem::replace(buf, rest);
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
 
-        // TcpStream.peek() if `nonblocking` is false
-        stream
+    /// Non-blocking read of one newline-terminated line. Returns `Ok(None)` when
+    /// no full line is available yet.
+    pub fn try_read(state: &mut TcpState) -> Result<Option<String>, Error> {
+        if let Some(line) = Self::take_line(&mut state.buf) {
+            return Ok(Some(line));
+        }
+        state
+            .stream
             .set_nonblocking(true)
             .map_err(|_| Error::SetNonBlocking)?;
-        // If no data in the TcpStream receiving end, TcpStream.peek() will error
-        let peek = stream.peek(&mut peek_buffer).ok();
-        stream
+        // Unbounded line length: electrs is trusted, no max or timeout.
+        let mut tmp = [0u8; 8192];
+        let result = loop {
+            match state.stream.read(&mut tmp) {
+                // connection closed
+                Ok(0) => break Ok(None),
+                Ok(n) => {
+                    state.buf.extend_from_slice(&tmp[..n]);
+                    if let Some(line) = Self::take_line(&mut state.buf) {
+                        break Ok(Some(line));
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break Ok(None),
+                Err(e) => break Err(Error::TcpStream(e)),
+            }
+        };
+        state
+            .stream
             .set_nonblocking(false)
             .map_err(|_| Error::SetBlocking)?;
+        result
+    }
 
-        // If blocking or data in the TcpStream receiving end
-        if blocking || peek.is_some() {
-            let mut response = String::new();
-            let mut reader = BufReader::new(stream.try_clone().map_err(Error::TcpStream)?);
-            reader.read_line(&mut response).map_err(Error::TcpStream)?;
-            Ok(Some(response))
-        } else {
-            Ok(None)
+    /// Blocking read of one newline-terminated line.
+    pub fn read(state: &mut TcpState) -> Result<String, Error> {
+        state
+            .stream
+            .set_nonblocking(false)
+            .map_err(|_| Error::SetBlocking)?;
+        // Unbounded line length: electrs is trusted, no max or timeout.
+        let mut tmp = [0u8; 8192];
+        loop {
+            if let Some(line) = Self::take_line(&mut state.buf) {
+                return Ok(line);
+            }
+            match state.stream.read(&mut tmp) {
+                // connection closed: flush whatever remains as the final line
+                Ok(0) => {
+                    let line = std::mem::take(&mut state.buf);
+                    return Ok(String::from_utf8_lossy(&line).into_owned());
+                }
+                Ok(n) => state.buf.extend_from_slice(&tmp[..n]),
+                Err(e) => return Err(Error::TcpStream(e)),
+            }
         }
-    }
-
-    pub fn try_read(stream: &mut net::TcpStream) -> Result<Option<String>, Error> {
-        Self::raw_read(stream, false)
-    }
-
-    pub fn read(stream: &mut net::TcpStream) -> Result<String, Error> {
-        Ok(Self::raw_read(stream, true)?.expect("blocking"))
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
@@ -161,6 +217,7 @@ impl TcpClient {
             stream
                 .try_lock()
                 .map_err(|_| Error::Mutex)?
+                .stream
                 .shutdown(net::Shutdown::Both)
                 .map_err(|_| Error::ShutDown)?;
             Ok(())

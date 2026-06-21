@@ -2033,14 +2033,30 @@ mod integration_tests {
                         .get_new_address(None, None)
                         .unwrap()
                         .assume_checked();
-                    let mut psbt = builder
-                        .pay(random_range(10_000..1_000_000), addr, 1000)
-                        .unwrap();
-                    account.sign_psbt(&mut psbt);
-                    PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
-                        .unwrap();
-                    let tx = psbt.extract_tx_unchecked_fee_rate();
-                    let _txid = bitcoind.client.send_raw_transaction(&tx).unwrap();
+                    let amount = random_range(10_000..1_000_000);
+                    // The wallet may not have synced a prior spend yet (electrum lag
+                    // under CI load), so a freshly built tx can select an already
+                    // spent coin (-25 bad-txns-inputs-missingorspent). Rebuild from
+                    // the wallet's current coins and retry, letting sync catch up,
+                    // until bitcoind accepts it.
+                    let mut attempt = 0;
+                    loop {
+                        let mut psbt = builder.pay(amount, addr.clone(), 1000).unwrap();
+                        account.sign_psbt(&mut psbt);
+                        PsbtExt::finalize_mut(&mut psbt, &bitcoin::secp256k1::Secp256k1::new())
+                            .unwrap();
+                        let tx = psbt.extract_tx_unchecked_fee_rate();
+                        match bitcoind.client.send_raw_transaction(&tx) {
+                            Ok(_) => break,
+                            Err(_) if attempt < 30 => {
+                                attempt += 1;
+                                sleep(Duration::from_millis(500));
+                            }
+                            Err(e) => {
+                                panic!("send_raw_transaction failed after {attempt} retries: {e:?}")
+                            }
+                        }
+                    }
                     generate(&bitcoind, blocks);
                     prev_blocks = blocks;
                 } else {

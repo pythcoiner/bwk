@@ -17,11 +17,11 @@ use miniscript::bitcoin::{
     OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid,
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt::{Debug, Display},
     sync::mpsc,
     thread::{self},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Clone)]
@@ -226,17 +226,29 @@ impl Client {
         let mut watched_spks_sh = BTreeMap::<usize /* request_id */, ScriptHash>::new();
         let mut sh_sbf_map = BTreeMap::<ScriptHash, ScriptBuf>::new();
 
-        let mut last_request = None;
-
-        fn responses_matches_requests(req: &[Request], resp: &[Response]) -> bool {
-            req.iter()
-                .all(|rq| resp.iter().any(|response| response.id() == Some(rq.id)))
-        }
+        // The batch of requests still awaiting a response. electrs streams batch
+        // responses across multiple reads (one JSON line each), so we drain answered
+        // request ids as they arrive and only pull the next consumer request once the
+        // batch is fully answered. `last_sent` drives a resend if it stalls (electrs
+        // empty-responds to a request that arrives while it is still answering).
+        let mut last_request: Option<Vec<Request>> = None;
+        let mut last_sent = Instant::now();
+        // Resend a pending batch electrs never answered after this long.
+        const STALL_RESEND_AFTER: Duration = Duration::from_secs(2);
 
         let mut backoff = Backoff::new_ms(50);
 
         loop {
             let mut received = false;
+            // If a pending batch has gone unanswered too long, electrs likely dropped
+            // a request (empty response while busy); resend the still-pending requests
+            // so the batch can complete instead of stalling forever.
+            if let Some(reqs) = &last_request {
+                if last_sent.elapsed() > STALL_RESEND_AFTER {
+                    let _ = self.inner.try_send_batch(reqs.iter().collect());
+                    last_sent = Instant::now();
+                }
+            }
             // Handle requests from consumer
             // NOTE: some server implementation (electrs for instance) will answer by an empty
             // response if it receive a request while it has not yes sent its previous response
@@ -265,6 +277,7 @@ impl Client {
                                         batch.len()
                                     );
                                     last_request = Some(batch.clone());
+                                    last_sent = Instant::now();
 
                                     let mut retry = 0usize;
                                     while let Err(e) =
@@ -295,6 +308,7 @@ impl Client {
                                         batch.len()
                                     );
                                     last_request = Some(batch.clone());
+                                    last_sent = Instant::now();
 
                                     let mut retry = 0usize;
                                     while let Err(e) =
@@ -322,6 +336,7 @@ impl Client {
                                         batch.len()
                                     );
                                     last_request = Some(batch.clone());
+                                    last_sent = Instant::now();
 
                                     let mut retry = 0usize;
                                     while let Err(e) =
@@ -359,19 +374,22 @@ impl Client {
             match self.inner.try_recv(&self.index) {
                 Ok(Some(r)) => {
                     log::debug!("Client::listen_txs() from electrum: {r:#?}");
-                    let r_match = if let Some(req) = &last_request {
-                        responses_matches_requests(req, &r)
-                    } else {
-                        false
-                    };
-                    if r_match {
-                        last_request = None;
-                    } else if let Some(last_req) = &last_request {
-                        log::debug!("Client::listen_txs() request not match resend last request");
-                        thread::sleep(Duration::from_millis(100));
-                        self.inner
-                            .try_send_batch(last_req.iter().collect())
-                            .unwrap();
+                    // Drop from the pending batch each request whose response just
+                    // arrived; the batch is done only once fully drained. electrs
+                    // streams responses across multiple reads, so requiring the whole
+                    // batch in one read (the old behaviour) livelocked on any batch
+                    // larger than one. Notifications carry no id and match nothing
+                    // here, they are handled in the processing below.
+                    if let Some(reqs) = &mut last_request {
+                        let answered: BTreeSet<usize> =
+                            r.iter().filter_map(|resp| resp.id()).collect();
+                        let before = reqs.len();
+                        reqs.retain(|rq| !answered.contains(&rq.id));
+                        if reqs.is_empty() {
+                            last_request = None;
+                        } else if reqs.len() != before {
+                            last_sent = Instant::now();
+                        }
                     }
 
                     received = true;
@@ -649,31 +667,41 @@ impl Client {
         let req_id = request.id;
         self.inner.try_send(&request)?;
         self.index.insert(req_id, request);
-        let resp = match self.inner.recv(&self.index) {
-            Ok(r) => r,
-            Err(e) => {
-                self.index.remove(&req_id);
-                return Err(e.into());
+        // electrs may answer with an empty response while it is still busy with a
+        // prior request, which surfaces as a parse error rather than our answer.
+        // Re-read until the response carrying our id arrives (or we give up),
+        // instead of failing on the transient empty line.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let resp = match self.inner.recv(&self.index) {
+                Ok(r) => r,
+                Err(_) if Instant::now() < deadline => continue,
+                Err(e) => {
+                    self.index.remove(&req_id);
+                    return Err(e.into());
+                }
+            };
+            for r in resp {
+                match r {
+                    Response::TxBroadcast(TxBroadcastResponse { id, .. }) if id == req_id => {
+                        self.index.remove(&req_id);
+                        return Ok(tx.compute_txid());
+                    }
+                    Response::Error(ErrorResponse {
+                        id,
+                        error: ErrorResult { message, .. },
+                    }) if id == req_id => {
+                        self.index.remove(&req_id);
+                        return Err(Error::Rejected(message));
+                    }
+                    _ => {}
+                }
             }
-        };
-        for r in resp {
-            match r {
-                Response::TxBroadcast(TxBroadcastResponse { id, .. }) if id == req_id => {
-                    self.index.remove(&req_id);
-                    return Ok(tx.compute_txid());
-                }
-                Response::Error(ErrorResponse {
-                    id,
-                    error: ErrorResult { message, .. },
-                }) if id == req_id => {
-                    self.index.remove(&req_id);
-                    return Err(Error::Rejected(message));
-                }
-                _ => {}
+            if Instant::now() >= deadline {
+                self.index.remove(&req_id);
+                return Err(Error::WrongResponse);
             }
         }
-        self.index.remove(&req_id);
-        Err(Error::WrongResponse)
     }
 
     /// Returns the URL of the electrum client.

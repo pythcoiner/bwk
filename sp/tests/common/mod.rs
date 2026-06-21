@@ -378,7 +378,11 @@ pub const DUST: u64 = 330;
 #[allow(dead_code)]
 pub fn wait_until_sync_at_height<B: ChainBackend>(backend: &B, height: u32) {
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(120);
+    // Generous: blindbitd indexes 100 blocks in seconds locally, but deep into a
+    // long single-threaded CI run (dozens of daemon spin-ups) it gets starved and
+    // can crawl ~50x slower, so wait long enough for the slow tail rather than
+    // flaking the test.
+    let timeout = Duration::from_secs(600);
     loop {
         if start.elapsed() > timeout {
             panic!("wait_until_sync_at_height: timed out waiting for height {height}");

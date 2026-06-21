@@ -174,7 +174,11 @@ impl<P: StorageProfile> TxStore<P> {
     pub fn update_height(&mut self, txid: &Txid, height: Option<u64>) {
         match self.store.modify(txid, |e| e.height = height) {
             Ok(true) => {}
-            Ok(false) => panic!("update_height on a missing txid"),
+            // The spk history can carry a height change for a tx the store has
+            // not fetched yet (sync race under load); skip it instead of
+            // panicking and poisoning the store lock — the height is set when
+            // the tx itself lands.
+            Ok(false) => log::debug!("TxStore::update_height: missing txid {txid}, skipping"),
             Err(e) => log::error!("TxStore::update_height: {e}"),
         }
     }
