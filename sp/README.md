@@ -28,7 +28,7 @@ let mut account = Account::new(config)?;
 let receiver = account.receiver().unwrap();
 
 // Start background scanning
-account.start_scan(ScanMode::Continuous);
+account.start_scan(ScanMode::Continuous, None);
 
 // Handle notifications
 loop {

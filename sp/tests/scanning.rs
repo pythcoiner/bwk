@@ -270,6 +270,94 @@ fn test_scan_single_sp_output() {
     );
 }
 
+#[test]
+fn test_scan_oneshot_from_chosen_height() {
+    use bwk_sign::{bip39, HotSigner};
+    use bwk_sp::receiver::SpReceiver;
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let network = bitcoin::Network::Regtest;
+
+    let mut bbd = BlindbitD::new().unwrap();
+    let blindbit_url = bbd.url();
+
+    let mut bitcoind_node = bbd.bitcoin().unwrap();
+    let bitcoind = &mut bitcoind_node.client;
+
+    bwk_test::generate_blocks(bitcoind, 101);
+    wait_for_sync_and_index(&blindbit_url, 101);
+
+    let mnemonic_str = test_mnemonic();
+    let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
+    let sp_receiver =
+        SpReceiver::new_from_mnemonic(mnemonic.clone(), network).expect("sp_receiver");
+
+    let tr_signer = HotSigner::new_taproot_from_mnemonics(network, mnemonic_str)
+        .expect("create taproot signer");
+    let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
+
+    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
+    bwk_test::generate_blocks(bitcoind, 2);
+    wait_until_sync_at_height(&blindbit_url, 103);
+
+    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+    let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
+        .into_iter()
+        .next()
+        .expect("find txout");
+    let outpoint = OutPoint {
+        txid: fund_txid,
+        vout: index as u32,
+    };
+
+    let sp_address = sp_receiver.get_receiving_address();
+    let recipient_pubkey = generate_recipient_pubkey(sk, outpoint, &txout, sp_address, &secp)
+        .expect("generate recipient pubkey");
+
+    let sp_tx = swap_to_sp(
+        sk,
+        outpoint,
+        txout,
+        recipient_pubkey,
+        bitcoin::Amount::from_sat(1000),
+        &secp,
+    )
+    .expect("create sp tx");
+
+    let sp_txid = sp_tx.compute_txid();
+    bitcoind
+        .send_raw_transaction(&sp_tx)
+        .expect("broadcast sp tx");
+    bwk_test::generate_blocks(bitcoind, 1);
+    let tip = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
+    wait_for_sync_and_index(&blindbit_url, tip);
+
+    let mut account = test_account_named("scan-oneshot-from-height", &blindbit_url);
+    assert_eq!(account.last_scanned_height(), None);
+
+    account.scan_oneshot(Some(1)).expect("scan");
+
+    let coins = account.coins();
+    assert_eq!(coins.len(), 1, "Should find exactly 1 SP output");
+
+    let expected_op = OutPoint {
+        txid: sp_txid,
+        vout: 0,
+    };
+    assert!(
+        coins.contains_key(&expected_op),
+        "Should find output at {}:0, got {:?}",
+        sp_txid,
+        coins.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(account.last_scanned_height(), Some(tip));
+
+    account.scan_oneshot(None).expect("rescan");
+    assert_eq!(account.coins().len(), 1);
+    assert_eq!(account.last_scanned_height(), Some(tip));
+}
+
 /// Test 10.4.2.3: Scan and detect multiple SP outputs in different blocks.
 ///
 /// This test verifies:

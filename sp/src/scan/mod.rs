@@ -999,6 +999,8 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     ///
     /// # Arguments
     /// * `mode` - The scanning mode (OneShot or Continuous)
+    /// * `start` - overrides where the scan begins; `None` resumes from the last
+    ///   scanned position; for Continuous it only applies to the first pass.
     ///
     /// # Modes
     /// - `OneShot`: Synchronous scan from last position to current chain tip, then returns.
@@ -1009,15 +1011,18 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     /// # Errors
     /// - `AccountError::ScannerAlreadyRunning` if continuous scan is already active
     /// - `AccountError::Scan` if scan fails
-    pub fn start_scan(&mut self, mode: ScanMode) -> Result<(), AccountError> {
+    pub fn start_scan(&mut self, mode: ScanMode, start: Option<u32>) -> Result<(), AccountError> {
         match mode {
-            ScanMode::OneShot => self.scan_oneshot(),
-            ScanMode::Continuous => self.start_continuous_scan(),
+            ScanMode::OneShot => self.scan_oneshot(start),
+            ScanMode::Continuous => self.start_continuous_scan(start),
         }
     }
 
-    /// Internal: Execute one-shot scan to current chain tip.
-    fn scan_oneshot(&mut self) -> Result<(), AccountError> {
+    /// Execute a one-shot scan to the current chain tip.
+    ///
+    /// `start` overrides where the scan begins. `None` uses
+    /// `ScanState::next_scan_start()` (resume from last scanned, or birthday).
+    pub fn scan_oneshot(&mut self, start: Option<u32>) -> Result<(), AccountError> {
         // Clear any stale cancel signal from a previous run before we hand
         // the flag down to the scanner. Without this, a caller that flipped
         // the flag via `cancel_flag()` for a prior scan would cause the next
@@ -1025,7 +1030,9 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         // returns Ok early when `should_interrupt()` is true).
         self.scanner_stop.store(false, Ordering::Relaxed);
 
-        let start_height = self.scan_state.lock().expect("poisoned").next_scan_start();
+        let start_height = start
+            .unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start())
+            .max(self.config.min_birthday_height());
         let end_height = self.block_height()?;
 
         if start_height > end_height {
@@ -1077,8 +1084,11 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         Ok(())
     }
 
-    /// Internal: Start continuous scan in background thread.
-    fn start_continuous_scan(&mut self) -> Result<(), AccountError> {
+    /// Start continuous scan in background thread.
+    ///
+    /// `start` overrides where the first pass begins; later passes resume from
+    /// the last scanned position.
+    fn start_continuous_scan(&mut self, start: Option<u32>) -> Result<(), AccountError> {
         if self.scanner_handle.is_some() {
             return Err(AccountError::ScannerAlreadyRunning);
         }
@@ -1097,6 +1107,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let scan_state = self.scan_state.clone();
         let sender = self.sender.clone();
         let stop = self.scanner_stop.clone();
+        let mut first_start = start.map(|h| h.max(self.config.min_birthday_height()));
 
         let handle = thread::spawn(move || {
             let mut last_notified_tip: Option<u32> = None;
@@ -1125,7 +1136,9 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                     }
                 };
 
-                let start_height = scan_state.lock().expect("poisoned").next_scan_start();
+                let start_height = first_start
+                    .take()
+                    .unwrap_or_else(|| scan_state.lock().expect("poisoned").next_scan_start());
 
                 if start_height > chain_height {
                     if !waiting {
@@ -1243,7 +1256,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     ) -> Result<(), AccountError> {
         // If both are None, use the new one-shot scan
         if start.is_none() && end.is_none() {
-            return self.start_scan(ScanMode::OneShot);
+            return self.start_scan(ScanMode::OneShot, None);
         }
 
         // Custom range scan (legacy behavior)
@@ -1297,7 +1310,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
 
     /// Start a background scanner thread.
     pub fn start_scanner(&mut self) -> Result<(), AccountError> {
-        self.start_scan(ScanMode::Continuous)
+        self.start_scan(ScanMode::Continuous, None)
     }
 
     /// Stop the background scanner thread.
@@ -1316,6 +1329,10 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             .lock()
             .expect("poisoned")
             .last_scanned_height()
+    }
+
+    pub fn min_birthday_height(&self) -> u32 {
+        self.config.min_birthday_height()
     }
 }
 

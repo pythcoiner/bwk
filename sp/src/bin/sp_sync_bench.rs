@@ -1078,7 +1078,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     account.seed_synthetic_owned_coin();
     let rx = account.receiver().take().expect("receiver");
 
-    let handle = std::thread::spawn(move || account.start_scan(bwk_sp::account::ScanMode::OneShot));
+    let handle =
+        std::thread::spawn(move || account.start_scan(bwk_sp::account::ScanMode::OneShot, None));
 
     let mut scan_start: Option<Instant> = None;
     let mut block_count: u64 = 0;
