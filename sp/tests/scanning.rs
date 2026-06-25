@@ -274,7 +274,9 @@ fn test_scan_single_sp_output() {
 fn test_scan_oneshot_from_chosen_height() {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{
+        generate_recipient_pubkey, swap_to_sp, wait_for_oneshot_done, wait_until_sync_at_height,
+    };
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
@@ -337,6 +339,7 @@ fn test_scan_oneshot_from_chosen_height() {
     assert_eq!(account.last_scanned_height(), None);
 
     account.scan_oneshot(Some(1)).expect("scan");
+    wait_for_oneshot_done(&account, Duration::from_secs(60));
 
     let coins = account.coins();
     assert_eq!(coins.len(), 1, "Should find exactly 1 SP output");
@@ -354,6 +357,7 @@ fn test_scan_oneshot_from_chosen_height() {
     assert_eq!(account.last_scanned_height(), Some(tip));
 
     account.scan_oneshot(None).expect("rescan");
+    wait_for_oneshot_done(&account, Duration::from_secs(60));
     assert_eq!(account.coins().len(), 1);
     assert_eq!(account.last_scanned_height(), Some(tip));
 }

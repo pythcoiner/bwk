@@ -495,6 +495,19 @@ pub fn wait_for_sync_and_index(blindbit_url: &str, height: u32) {
     thread::sleep(Duration::from_secs(2));
 }
 
+/// Block until a background one-shot scan finishes (or `timeout` elapses).
+#[allow(dead_code)]
+pub fn wait_for_oneshot_done(account: &bwk_sp::account::Account, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while account.is_scanning() {
+        assert!(
+            Instant::now() < deadline,
+            "one-shot scan did not finish in time"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// Extract the XOnlyPublicKey from a P2TR output script.
 ///
 /// # Panics

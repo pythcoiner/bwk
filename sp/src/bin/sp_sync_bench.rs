@@ -1078,8 +1078,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     account.seed_synthetic_owned_coin();
     let rx = account.receiver().take().expect("receiver");
 
-    let handle =
-        std::thread::spawn(move || account.start_scan(bwk_sp::account::ScanMode::OneShot, None));
+    account.start_scan(bwk_sp::account::ScanMode::OneShot, None)?;
 
     let mut scan_start: Option<Instant> = None;
     let mut block_count: u64 = 0;
@@ -1125,14 +1124,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 break;
             }
-            bwk_sp::Notification::Sp(bwk_sp::SpNotification::FailScan { message }) => {
+            bwk_sp::Notification::Sp(bwk_sp::SpNotification::FailStartScanning { message })
+            | bwk_sp::Notification::Sp(bwk_sp::SpNotification::FailScan { message }) => {
                 return Err(format!("scan failed: {message}").into());
             }
             _ => {}
         }
     }
-
-    handle.join().expect("scan thread panicked")?;
 
     let secs = elapsed.as_secs_f64();
     let (blocks_per_sec, ms_per_block) = if secs > 0.0 && block_count > 0 {

@@ -1003,14 +1003,13 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     ///   scanned position; for Continuous it only applies to the first pass.
     ///
     /// # Modes
-    /// - `OneShot`: Synchronous scan from last position to current chain tip, then returns.
-    ///   If already at tip, returns immediately without scanning.
+    /// - `OneShot`: Spawns a background thread that scans from the last position
+    ///   to the current chain tip, then ends. Returns immediately after spawning.
     /// - `Continuous`: Spawns a background thread that scans to tip, then watches for new blocks.
     ///   Returns immediately after spawning. Use `stop_scan()` to stop.
     ///
     /// # Errors
-    /// - `AccountError::ScannerAlreadyRunning` if continuous scan is already active
-    /// - `AccountError::Scan` if scan fails
+    /// - `AccountError::ScannerAlreadyRunning` if a scan is already running
     pub fn start_scan(&mut self, mode: ScanMode, start: Option<u32>) -> Result<(), AccountError> {
         match mode {
             ScanMode::OneShot => self.scan_oneshot(start),
@@ -1018,11 +1017,25 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         }
     }
 
-    /// Execute a one-shot scan to the current chain tip.
+    /// Execute a one-shot scan to the current chain tip on a background thread.
     ///
     /// `start` overrides where the scan begins. `None` uses
     /// `ScanState::next_scan_start()` (resume from last scanned, or birthday).
+    ///
+    /// Returns immediately after spawning the scanner thread; progress is
+    /// reported through the notification channel (`ScanStarted`, `ScanCompleted`,
+    /// `FailStartScanning`, `FailScan`). Use `is_scanning()` to poll for
+    /// completion and `stop_scan()` to cancel.
     pub fn scan_oneshot(&mut self, start: Option<u32>) -> Result<(), AccountError> {
+        if self
+            .scanner_handle
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+        {
+            return Err(AccountError::ScannerAlreadyRunning);
+        }
+
         // Clear any stale cancel signal from a previous run before we hand
         // the flag down to the scanner. Without this, a caller that flipped
         // the flag via `cancel_flag()` for a prior scan would cause the next
@@ -1030,57 +1043,90 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         // returns Ok early when `should_interrupt()` is true).
         self.scanner_stop.store(false, Ordering::Relaxed);
 
-        let start_height = start
-            .unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start())
-            .max(self.config.min_birthday_height());
-        let end_height = self.block_height()?;
-
-        if start_height > end_height {
-            return Ok(()); // Already at tip, nothing to scan
-        }
-
-        let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
-        let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
-
+        let sp_receiver = self.sp_receiver.clone();
+        let agent = self.agent.clone();
+        let blindbit_url = self.config.blindbit_url.clone();
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
+        let coin_store = self.coin_store.clone();
+        let tx_store = self.tx_store.clone();
+        let scan_state = self.scan_state.clone();
+        let sender = self.sender.clone();
+        let stop = self.scanner_stop.clone();
+        let min_birthday = self.config.min_birthday_height();
 
-        let with_cutthrough = blindbit::info(&self.agent, &self.config.blindbit_url)
-            .map(|info| info.tweaks_cut_through_with_dust_filter)
-            .unwrap_or(false);
+        let handle = thread::spawn(move || {
+            let with_cutthrough = blindbit::info(&agent, &blindbit_url)
+                .map(|info| info.tweaks_cut_through_with_dust_filter)
+                .unwrap_or(false);
 
-        let stores = ScanStores {
-            coin_store: self.coin_store.clone(),
-            tx_store: self.tx_store.clone(),
-            scan_state: self.scan_state.clone(),
-            sender: self.sender.clone(),
-        };
+            let chain_height = match blindbit::block_height(&agent, &blindbit_url) {
+                Ok(h) => h.to_consensus_u32(),
+                Err(e) => {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailStartScanning {
+                        message: e.to_string(),
+                    }));
+                    return;
+                }
+            };
 
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanStarted {
+            let start_height = start
+                .unwrap_or_else(|| scan_state.lock().expect("poisoned").next_scan_start())
+                .max(min_birthday);
+
+            if start_height > chain_height {
+                // Already at tip, nothing to scan.
+                let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
+                return;
+            }
+
+            let (start, end) = match (
+                Height::from_consensus(start_height),
+                Height::from_consensus(chain_height),
+            ) {
+                (Ok(start), Ok(end)) => (start, end),
+                _ => {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailScan {
+                        message: format!("invalid height range {start_height}..{chain_height}"),
+                    }));
+                    return;
+                }
+            };
+
+            let stores = ScanStores {
+                coin_store,
+                tx_store,
+                scan_state,
+                sender: sender.clone(),
+            };
+
+            let _ = sender.send(Notification::Sp(SpNotification::ScanStarted {
                 start: start_height,
-                end: end_height,
+                end: chain_height,
             }));
 
-        scan_blocks(
-            self.agent.clone(),
-            &self.config.blindbit_url,
-            &self.sp_receiver,
-            &stores,
-            &self.scanner_stop,
-            start,
-            end,
-            dust_limit,
-            with_cutthrough,
-        )
-        .map_err(|e| AccountError::Scan(e.to_string()))?;
+            match scan_blocks(
+                agent.clone(),
+                &blindbit_url,
+                &sp_receiver,
+                &stores,
+                &stop,
+                start,
+                end,
+                dust_limit,
+                with_cutthrough,
+            ) {
+                Ok(()) => {
+                    let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
+                }
+                Err(e) => {
+                    let _ = sender.send(Notification::Sp(SpNotification::FailScan {
+                        message: e.to_string(),
+                    }));
+                }
+            }
+        });
 
-        let _ = self
-            .sender
-            .send(Notification::Sp(SpNotification::ScanCompleted));
-
+        self.scanner_handle = Some(handle);
         Ok(())
     }
 
