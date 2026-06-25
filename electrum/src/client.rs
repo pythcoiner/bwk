@@ -85,6 +85,18 @@ impl Debug for CoinRequest {
     }
 }
 
+impl CoinRequest {
+    /// Compact one-line description (counts only) for hot-path logging.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Subscribe(v) => format!("Subscribe({})", v.len()),
+            Self::History(v) => format!("History({})", v.len()),
+            Self::Txs(v) => format!("Txs({})", v.len()),
+            Self::Stop => "Stop".to_string(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum CoinResponse {
     Status(BTreeMap<ScriptBuf, Option<String>>),
@@ -132,6 +144,19 @@ impl Debug for CoinResponse {
             }
             Self::Stopped => write!(f, "Stopped"),
             Self::Error(e) => write!(f, "Error({e})"),
+        }
+    }
+}
+
+impl CoinResponse {
+    /// Compact one-line description (counts only) for hot-path logging.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Status(m) => format!("Status({})", m.len()),
+            Self::History(m) => format!("History({} scripts)", m.len()),
+            Self::Txs(v) => format!("Txs({})", v.len()),
+            Self::Stopped => "Stopped".to_string(),
+            Self::Error(e) => format!("Error({e})"),
         }
     }
 }
@@ -256,16 +281,15 @@ impl Client {
             if last_request.is_none() {
                 match recv.try_recv() {
                     Ok(rq) => {
-                        log::debug!("Client::listen_txs() recv request: {rq:#?}");
                         received = true;
                         let rq: CoinRequest = rq.into();
+                        log::debug!("Client::listen_txs() recv request: {}", rq.summary());
                         match rq {
                             CoinRequest::Subscribe(spks) => {
                                 let mut batch = vec![];
                                 for spk in spks {
                                     let mut sub = Request::subscribe_sh(&spk);
                                     let id = self.register(&mut sub);
-                                    log::debug!("Client::listen_txs() subscribe request: {sub:?}");
                                     let sh = ScriptHash::new(&spk);
                                     watched_spks_sh.insert(id, sh);
                                     sh_sbf_map.insert(sh, spk);
@@ -296,9 +320,6 @@ impl Client {
                                 for spk in sbfs {
                                     let mut history = Request::sh_get_history(&spk);
                                     let id = self.register(&mut history);
-                                    log::debug!(
-                                        "Client::listen_txs() history request: {history:?}"
-                                    );
                                     req_id_spk_map.insert(id, spk);
                                     batch.push(history);
                                 }
@@ -327,7 +348,6 @@ impl Client {
                                 for txid in txids {
                                     let mut tx = Request::tx_get(txid);
                                     self.register(&mut tx);
-                                    log::debug!("Client::listen_txs() txs request: {tx:?}");
                                     batch.push(tx);
                                 }
                                 if !batch.is_empty() {
@@ -373,7 +393,7 @@ impl Client {
             // Handle responses from electrum server
             match self.inner.try_recv(&self.index) {
                 Ok(Some(r)) => {
-                    log::debug!("Client::listen_txs() from electrum: {r:#?}");
+                    log::debug!("Client::listen_txs() from electrum: {} responses", r.len());
                     // Drop from the pending batch each request whose response just
                     // arrived; the batch is done only once fully drained. electrs
                     // streams responses across multiple reads, so requiring the whole
@@ -465,18 +485,18 @@ impl Client {
                     }
                     if !histories.is_empty() {
                         let rsp = CoinResponse::History(histories);
-                        log::debug!("Client::listen_txs() send response: {rsp:#?}");
+                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
                         send.send(rsp.into()).unwrap();
                     }
                     if !statuses.is_empty() {
                         let rsp = CoinResponse::Status(statuses);
-                        log::debug!("Client::listen_txs() send response: {rsp:#?}");
+                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
                         send.send(rsp.into()).unwrap();
                     }
                     // let mut txs = Vec::new();
                     if !txs.is_empty() {
                         let rsp = CoinResponse::Txs(txs);
-                        log::debug!("Client::listen_txs() send response: {rsp:#?}");
+                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
                         send.send(rsp.into()).unwrap();
                     }
                 }

@@ -917,7 +917,7 @@ fn listen_txs<T, P>(
         // listen for response
         match response.try_recv() {
             Ok(rsp) => {
-                log::debug!("listen_txs() receive {rsp:#?}");
+                log::debug!("listen_txs() receive {}", rsp.summary());
                 received = true;
                 match rsp {
                     CoinResponse::Status(elct_status) => {
@@ -975,7 +975,7 @@ fn listen_txs<T, P>(
                         }
                         if !history.is_empty() {
                             let hist = CoinRequest::History(history);
-                            log::debug!("listen_txs() send {hist:#?}");
+                            log::debug!("listen_txs() send {}", hist.summary());
                             send_electrum!(request, notification, hist);
                         }
                         if dirty {
