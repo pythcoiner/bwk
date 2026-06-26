@@ -1028,9 +1028,9 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     /// `ScanState::next_scan_start()` (resume from last scanned, or birthday).
     ///
     /// Returns immediately after spawning the scanner thread; progress is
-    /// reported through the notification channel (`ScanStarted`, `ScanCompleted`,
-    /// `FailStartScanning`, `FailScan`). Use `is_scanning()` to poll for
-    /// completion and `stop_scan()` to cancel.
+    /// reported through the notification channel (`ScanStarted`, `ScanProgress`,
+    /// `ScanCompleted`, `FailStartScanning`, `FailScan`). Use `is_scanning()` to
+    /// poll for completion and `stop_scan()` to cancel.
     pub fn scan_oneshot(&mut self, start: Option<u32>) -> Result<(), AccountError> {
         if self
             .scanner_handle
