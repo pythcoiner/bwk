@@ -855,6 +855,11 @@ fn process_blocks<P: SpStorageProfile>(
             &mut last_checkpoint,
         )?;
         if should_interrupt(scan.stop) {
+            if let Some(tip) = recv_tip {
+                let i = (tip - start_u32) as usize;
+                let hash = hashes[i].ok_or(receiver::error::Error::MissingBlockHash(tip))?;
+                record_scan_frontier(scan.stores, Height::from_consensus(tip)?, hash)?;
+            }
             save_state(scan.stores)?;
             return Ok(true);
         }
