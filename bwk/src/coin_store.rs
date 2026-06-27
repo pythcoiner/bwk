@@ -49,6 +49,10 @@ pub struct Payment {
     pub payment_type: PaymentType,
     pub amount: u64,
     pub label: String,
+    /// Confirmation height, `None` while unconfirmed.
+    pub height: Option<u64>,
+    /// Confirming block time, `None` until known.
+    pub timestamp: Option<u64>,
 }
 
 impl From<TxEntry> for Payment {
@@ -78,6 +82,8 @@ impl From<TxEntry> for Payment {
             payment_type,
             amount,
             label: String::new(),
+            height: value.height(),
+            timestamp: value.timestamp(),
         }
     }
 }

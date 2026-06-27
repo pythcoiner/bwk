@@ -6,6 +6,7 @@ pub mod coin_store;
 pub mod config;
 pub mod header_store;
 pub mod header_validator;
+pub mod history;
 pub mod label_store;
 pub mod log;
 pub mod profile;
