@@ -26,6 +26,10 @@ pub struct SpTxEntry {
     pub height: Option<u32>,
     pub timestamp: Option<u64>,
     pub label: Option<String>,
+    /// For an outgoing send we built, the SP change amount returning to us
+    /// (builder-known; 0 otherwise). Lets the history aggregator net the send
+    /// amount while unconfirmed, before the scan records the change coin.
+    pub change: u64,
 }
 
 impl SpTxEntry {
@@ -37,6 +41,7 @@ impl SpTxEntry {
             height: None,
             timestamp: None,
             label: None,
+            change: 0,
         }
     }
     pub fn with_tx(txid: Txid, tx: Transaction) -> Self {
@@ -47,6 +52,7 @@ impl SpTxEntry {
             height: None,
             timestamp: None,
             label: None,
+            change: 0,
         }
     }
     pub fn txid(&self) -> &Txid {

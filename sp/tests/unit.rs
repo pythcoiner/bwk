@@ -445,6 +445,7 @@ fn test_concurrent_writes_different_stores() {
                 label: Some(format!("tx {i}")),
                 height: Some(100 + i),
                 timestamp: None,
+                change: 0,
             });
         }
     });

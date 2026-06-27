@@ -72,6 +72,7 @@ fn test_stores_independent_persistence() {
             label: Some("test tx".to_string()),
             height: Some(100),
             timestamp: None,
+            change: 0,
         });
         tx_store.persist();
     }
@@ -162,7 +163,7 @@ fn test_real_backend_connection() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account pointing to real backend
     let account = test_account_named("test-real-backend", &bbd.url());
@@ -197,7 +198,7 @@ fn test_real_backend_scan() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account pointing to real backend
     let mut account = test_account_named("test-real-scan", &bbd.url());
@@ -280,7 +281,7 @@ fn test_reorg_handling() {
 
     // 3. Generate initial blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer
     let mnemonic_str = test_mnemonic();
@@ -295,7 +296,7 @@ fn test_reorg_handling() {
     // 5. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 6. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -330,7 +331,7 @@ fn test_reorg_handling() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 9. Scan and verify SP output is found
     let mut account = test_account_with_mnemonic("test-reorg", mnemonic_str, &backend);
@@ -410,7 +411,7 @@ fn test_reorg_handling() {
     // 13. Mine new blocks on alternate chain
     bwk_test::generate_blocks(bitcoind, 5);
     let new_height: u32 = bitcoind.call("getblockcount", &[]).unwrap();
-    wait_for_sync_and_index(&backend, new_height);
+    wait_for_sync_and_index(&mut bbd, new_height);
 
     // 14. Verify block hash is different at the original fund height
     let new_fund_block_hash: String = bitcoind
@@ -459,7 +460,7 @@ fn test_full_receive_flow() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account with persist enabled
     let (mut account, _config, _dir) =
@@ -578,7 +579,7 @@ fn test_scan_state_consistent_after_crash() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account with persist=true and scan some blocks
     let (mut account, config, _dir) =
@@ -701,7 +702,7 @@ fn test_concurrent_funding_during_scan() {
 
     // 3. Generate initial blocks
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and signer
     let mnemonic_str = test_mnemonic();
@@ -715,7 +716,7 @@ fn test_concurrent_funding_during_scan() {
     // 5. Fund taproot address and create SP output
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
     let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
@@ -744,7 +745,7 @@ fn test_concurrent_funding_during_scan() {
 
     // 6. Generate more blocks (for the scan to process)
     bwk_test::generate_blocks(bitcoind, 50);
-    wait_for_sync_and_index(&backend, 153);
+    wait_for_sync_and_index(&mut bbd, 153);
 
     // 7. Setup concurrent scan
     let url_clone = url.clone();
@@ -766,7 +767,7 @@ fn test_concurrent_funding_during_scan() {
     bitcoind.send_raw_transaction(&sp_tx).expect("broadcast");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("height") as u32;
-    wait_for_sync_and_index(&backend, sp_height);
+    wait_for_sync_and_index(&mut bbd, sp_height);
 
     // 10. Wait for scan to complete
     let _initial_count = scan_handle.join().expect("scan thread should complete");
@@ -813,7 +814,7 @@ fn test_mempool_tx_not_counted_in_balance() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&bbd.url(), 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Create Account with temp directory
     let dir = TempDir::new().unwrap();
@@ -835,7 +836,7 @@ fn test_mempool_tx_not_counted_in_balance() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.5).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_for_sync_and_index(&bbd.url(), 103);
+    wait_for_sync_and_index(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -886,7 +887,7 @@ fn test_mempool_tx_not_counted_in_balance() {
     // 12. Now mine the block containing the SP transaction
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&bbd.url(), sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 13. Scan again - now the output should be found
     account
@@ -947,7 +948,7 @@ fn test_notification_order_full_sequence() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -963,7 +964,7 @@ fn test_notification_order_full_sequence() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -998,7 +999,7 @@ fn test_notification_order_full_sequence() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 10. Scan with the public Account notification receiver
     let mut account = test_account_with_mnemonic("notification-order", mnemonic_str, &backend);
@@ -1103,7 +1104,7 @@ fn test_notification_multiple_outputs_same_block() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1130,7 +1131,7 @@ fn test_notification_multiple_outputs_same_block() {
 
     // Mine all funding transactions together
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // Now create SP transactions for all funded UTXOs
     for (fund_txid, taproot_addr, sk) in funding_data {
@@ -1171,7 +1172,7 @@ fn test_notification_multiple_outputs_same_block() {
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height =
         bwk_test::get_tx_height(bitcoind, sp_txids[0]).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // Verify both transactions are in the same block
     let height_0 = bwk_test::get_tx_height(bitcoind, sp_txids[0]).expect("height 0") as u32;
@@ -1241,7 +1242,7 @@ fn test_birthday_height_skips_old_blocks() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account with birthday_height=50
     let dir = TempDir::new().unwrap();
@@ -1317,7 +1318,7 @@ fn test_birthday_height_misses_earlier_outputs() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup taproot signer with test mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1330,7 +1331,7 @@ fn test_birthday_height_misses_earlier_outputs() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_for_sync_and_index(&backend, 103);
+    wait_for_sync_and_index(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -1382,7 +1383,7 @@ fn test_birthday_height_misses_earlier_outputs() {
     // Generate more blocks to have a higher chain tip
     bwk_test::generate_blocks(bitcoind, 10);
     let final_height = sp_tx_height + 10;
-    wait_for_sync_and_index(&backend, final_height);
+    wait_for_sync_and_index(&mut bbd, final_height);
 
     // Verify SP output is at a height BEFORE our birthday
     assert!(
@@ -1524,7 +1525,7 @@ fn test_dust_limit_filters_small_outputs() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1540,7 +1541,7 @@ fn test_dust_limit_filters_small_outputs() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -1580,7 +1581,7 @@ fn test_dust_limit_filters_small_outputs() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 10. Create account with dust_limit = 1000 sats
     let dir = TempDir::new().unwrap();
@@ -1707,7 +1708,7 @@ fn test_dust_limit_zero_accepts_all() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1723,7 +1724,7 @@ fn test_dust_limit_zero_accepts_all() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -1763,7 +1764,7 @@ fn test_dust_limit_zero_accepts_all() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 10. Create account with NO dust_limit (None means accept all)
     let mut account = test_account_with_mnemonic("dust-limit-none", mnemonic_str, &backend);
@@ -1801,22 +1802,15 @@ fn test_dust_limit_zero_accepts_all() {
 /// that starts with the correct prefix for the network (tsp for regtest).
 #[test]
 fn test_sp_address_format_valid() {
-    // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let backend = bbd.url();
-
-    // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
     let bitcoind = &mut bitcoind_node.client;
 
-    // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
-    // 4. Create Account
-    let account = test_account_named("test-sp-address", &bbd.url());
-
-    // 5. Get SP address
+    let account = test_account_named("test-sp-address", &backend);
     let sp_addr = account.sp_address();
     let addr_str = sp_addr.to_string();
 
@@ -1837,25 +1831,20 @@ fn test_sp_address_format_valid() {
 /// produces identical SP addresses.
 #[test]
 fn test_sp_address_deterministic() {
-    // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let backend = bbd.url();
-
-    // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
     let bitcoind = &mut bitcoind_node.client;
 
-    // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
-    // 4. Create first Account with test mnemonic
     let dir1 = TempDir::new().unwrap();
     let config1 = Config::new(
         "test-sp-addr-1".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
-        bbd.url(),
+        backend.clone(),
         dir1.path().to_path_buf(),
     )
     .enable_persist(false);
@@ -1869,7 +1858,7 @@ fn test_sp_address_deterministic() {
         "test-sp-addr-2".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(),
-        bbd.url(),
+        backend,
         dir2.path().to_path_buf(),
     )
     .enable_persist(false);
@@ -1890,25 +1879,20 @@ fn test_sp_address_deterministic() {
 /// produces different SP addresses.
 #[test]
 fn test_sp_address_different_per_mnemonic() {
-    // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let backend = bbd.url();
-
-    // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
     let bitcoind = &mut bitcoind_node.client;
 
-    // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
-    // 4. Create first Account with test mnemonic
     let dir1 = TempDir::new().unwrap();
     let config1 = Config::new(
         "test-mnemonic-1".to_string(),
         bitcoin::Network::Regtest,
         test_mnemonic().to_string(), // "abandon abandon ... about"
-        bbd.url(),
+        backend.clone(),
         dir1.path().to_path_buf(),
     )
     .enable_persist(false);
@@ -1925,7 +1909,7 @@ fn test_sp_address_different_per_mnemonic() {
         "test-mnemonic-2".to_string(),
         bitcoin::Network::Regtest,
         different_mnemonic.to_string(),
-        bbd.url(),
+        backend,
         dir2.path().to_path_buf(),
     )
     .enable_persist(false);
@@ -1965,7 +1949,7 @@ fn test_receive_with_sp_label() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1981,7 +1965,7 @@ fn test_receive_with_sp_label() {
     // 8. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 9. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -2021,7 +2005,7 @@ fn test_receive_with_sp_label() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 12. Scan
     let mut account = test_account_with_mnemonic("receive-with-sp-label", mnemonic_str, &backend);
@@ -2062,7 +2046,7 @@ fn test_concurrent_scan_and_read() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account
     let mut account = test_account_named("test-concurrent", &bbd.url());
@@ -2203,7 +2187,7 @@ fn test_scanner_with_concurrent_api_calls() {
 
     // 3. Generate blocks
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account
     let mut account = test_account_named("test-concurrent-api", &bbd.url());
@@ -2283,7 +2267,7 @@ fn test_persists_immediately_on_new_output() {
 
     // 3. Generate 101 blocks (coinbase maturity)
     bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&backend, 101);
+    wait_for_sync_and_index(&mut bbd, 101);
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -2299,7 +2283,7 @@ fn test_persists_immediately_on_new_output() {
     // 6. Fund the taproot address
     let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
     bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&backend, 103);
+    wait_until_sync_at_height(&mut bbd, 103);
 
     // 7. Get the funded UTXO
     let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
@@ -2334,7 +2318,7 @@ fn test_persists_immediately_on_new_output() {
         .expect("broadcast sp tx");
     bwk_test::generate_blocks(bitcoind, 1);
     let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&backend, sp_tx_height);
+    wait_for_sync_and_index(&mut bbd, sp_tx_height);
 
     // 10. Create persistent account and scan
     let (mut account, config, _dir) = test_account_persistent_named("persist-new-output", &backend);
@@ -2379,7 +2363,7 @@ fn test_no_persist_on_empty_scan() {
 
     // 3. Generate blocks (no SP outputs in standard coinbase blocks)
     bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&backend, 100);
+    wait_for_sync_and_index(&mut bbd, 100);
 
     // 4. Create Account with persist=true
     let (mut account, config, _dir) =

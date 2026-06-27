@@ -460,28 +460,67 @@ pub use bwk_utils::test::TempDir;
 #[allow(dead_code)]
 pub const DUST: u64 = 330;
 
+pub trait SyncTarget {
+    fn url(&self) -> String;
+    fn dump_logs(&mut self) {}
+}
+
+impl SyncTarget for &str {
+    fn url(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl SyncTarget for &String {
+    fn url(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl SyncTarget for &mut BlindbitD {
+    fn url(&self) -> String {
+        BlindbitD::url(self)
+    }
+
+    fn dump_logs(&mut self) {
+        eprintln!("blindbitd logs:");
+        while let Ok(log) = self.logs.try_recv() {
+            eprint!("{log}");
+        }
+    }
+}
+
 /// Wait until the backend has synced to at least the given height.
 ///
 /// Polls the backend every 500ms until `block_height()` returns at least `height`.
 /// 60 s flaked under CI load when the runner was indexing many regtest blocks
 /// in parallel; 120 s with finer polling is more robust.
 #[allow(dead_code)]
-pub fn wait_until_sync_at_height(blindbit_url: &str, height: u32) {
+pub fn wait_until_sync_at_height(mut target: impl SyncTarget, height: u32) {
     let agent = bwk_sp::blindbit::agent();
+    let blindbit_url = target.url();
     let start = std::time::Instant::now();
     // Generous: blindbitd indexes 100 blocks in seconds locally, but deep into a
     // long single-threaded CI run (dozens of daemon spin-ups) it gets starved and
     // can crawl ~50x slower, so wait long enough for the slow tail rather than
     // flaking the test.
     let timeout = Duration::from_secs(600);
+    let mut last_error = None;
     loop {
         if start.elapsed() > timeout {
+            if let Some(error) = last_error {
+                eprintln!("last block_height error: {error}");
+            }
+            target.dump_logs();
             panic!("wait_until_sync_at_height: timed out waiting for height {height}");
         }
-        if let Ok(h) = bwk_sp::blindbit::block_height(&agent, blindbit_url) {
-            if h.to_consensus_u32() >= height {
-                return;
+        match bwk_sp::blindbit::block_height(&agent, &blindbit_url) {
+            Ok(h) => {
+                if h.to_consensus_u32() >= height {
+                    return;
+                }
             }
+            Err(e) => last_error = Some(e),
         }
         thread::sleep(Duration::from_millis(500));
     }
@@ -492,8 +531,8 @@ pub fn wait_until_sync_at_height(blindbit_url: &str, height: u32) {
 /// Waits until sync reaches `height`, then sleeps an additional 2 seconds
 /// to allow BlindbitD time to index the new blocks.
 #[allow(dead_code)]
-pub fn wait_for_sync_and_index(blindbit_url: &str, height: u32) {
-    wait_until_sync_at_height(blindbit_url, height);
+pub fn wait_for_sync_and_index(target: impl SyncTarget, height: u32) {
+    wait_until_sync_at_height(target, height);
     // Give blindbitd extra time to index new blocks
     thread::sleep(Duration::from_secs(2));
 }
@@ -698,7 +737,7 @@ impl TestEnv {
         let mut bbd = BlindbitD::new().unwrap();
         let mut bitcoind = bbd.bitcoin().unwrap();
         bwk_utils::test::generate_blocks(&mut bitcoind.client, 101);
-        wait_for_sync_and_index(&bbd.url(), 101);
+        wait_for_sync_and_index(&mut bbd, 101);
         TestEnv {
             bbd,
             bitcoind,
@@ -740,7 +779,7 @@ impl TestEnv {
     pub fn mine(&mut self, blocks: usize) {
         bwk_utils::test::generate_blocks(&mut self.bitcoind.client, blocks);
         self.height = bwk_utils::test::get_height(&mut self.bitcoind.client) as u32;
-        wait_for_sync_and_index(&self.bbd.url(), self.height);
+        wait_for_sync_and_index(&mut self.bbd, self.height);
     }
 
     /// Broadcast a transaction and mine 1 block.

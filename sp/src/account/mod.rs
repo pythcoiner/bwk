@@ -1004,7 +1004,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Returns `AccountError::NoElectrumEndpoint` if no Electrum endpoint is
     /// configured, or `AccountError::Broadcast` if the send fails; nothing is
     /// injected unless the broadcast succeeds.
-    pub fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<Txid, AccountError> {
+    pub fn broadcast(&self, tx: &bitcoin::Transaction, change: u64) -> Result<Txid, AccountError> {
         let (url, port) = self
             .config
             .electrum_endpoint()
@@ -1014,7 +1014,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         // Reflect the spend in every store that owns part of it: SP inputs/change
         // here, and each sub-account's own inputs/change. The aggregator then
         // sums their contributions into one payment.
-        let txid = self.record_unconfirmed_spend(tx)?;
+        let txid = self.record_unconfirmed_spend(tx, change)?;
         for sub in &self.sub_accounts {
             sub.record_unconfirmed_spend(tx);
         }
@@ -1027,10 +1027,13 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// inserts the outgoing transaction with no height. A later scan confirms the
     /// inputs and sets the transaction height. Only SP coins are touched;
     /// sub-account inputs are left to their own listeners. The send amount is
-    /// derived by the history aggregator from coin ownership, not stored here.
+    /// derived by the history aggregator from coin ownership; `change` (the
+    /// builder-known SP change, 0 if none) nets the amount while unconfirmed,
+    /// before the scan records the change coin.
     pub fn record_unconfirmed_spend(
         &self,
         tx: &bitcoin::Transaction,
+        change: u64,
     ) -> Result<Txid, AccountError> {
         let txid = tx.compute_txid();
         let mut sp_matched = false;
@@ -1053,8 +1056,10 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         // comes from the sub-account that owns the inputs). Direction and amount
         // are derived later by the history aggregator from coin ownership.
         if sp_matched {
+            let mut entry = SpTxEntry::with_tx(txid, tx.clone());
+            entry.change = change;
             let mut tx_store = self.tx_store.lock().expect("poisoned");
-            tx_store.insert(SpTxEntry::with_tx(txid, tx.clone()));
+            tx_store.insert(entry);
             tx_store.persist();
         }
         Ok(txid)
@@ -1746,6 +1751,12 @@ impl<P: crate::profile::SpStorageProfile> bwk::history::AccountHistory for Accou
                 }
                 if c.tx.is_none() {
                     c.tx = e.tx.clone();
+                }
+                // Our own send's SP change nets the amount while unconfirmed.
+                // Once the scan records the real change coin, `owned_out` is set
+                // from it above, so the recorded value is no longer applied.
+                if e.change > 0 && c.owned_out == 0 {
+                    c.owned_out = e.change;
                 }
             }
         }

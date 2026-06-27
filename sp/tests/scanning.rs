@@ -1651,6 +1651,7 @@ fn test_unconfirmed_spend_injection() {
         *coins.keys().next().unwrap()
     };
     let funding_txid = owned.txid;
+    let input_value = account.get_coin(&owned).expect("coin").amount_sat();
 
     // The receive scan recorded the funding tx as a confirmed receive.
     {
@@ -1665,20 +1666,25 @@ fn test_unconfirmed_spend_injection() {
     assert!(account.balance() > 0);
 
     // Build + sign a spend of the SP coin (change returns to our SP address).
+    let dest = env.taproot_addr(0);
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to(dest, 100_000);
+    for coin in builder.select_coins(100_000, 1000) {
+        builder.add_input(coin);
+    }
+    // The builder knows the SP change; thread it so the unconfirmed send nets it.
+    let change = builder.simulate().change.map(|a| a.to_sat()).unwrap_or(0);
+    assert!(change > 0, "this spend should produce SP change");
     let tx = {
-        let dest = env.taproot_addr(0);
-        let mut builder = account.tx_builder().feerate(1000);
-        builder.send_to(dest, 100_000);
-        for coin in builder.select_coins(100_000, 1000) {
-            builder.add_input(coin);
-        }
         let mut psbt = builder.generate().expect("build spend tx");
         account.sign_and_finalize(&mut psbt).expect("sign spend tx")
     };
     let spend_txid = tx.compute_txid();
 
     // Inject as unconfirmed (no broadcast/mine yet).
-    account.record_unconfirmed_spend(&tx).expect("inject spend");
+    account
+        .record_unconfirmed_spend(&tx, change)
+        .expect("inject spend");
     {
         let entry = account.get_coin(&owned).expect("coin still tracked");
         assert!(!entry.is_spendable(), "spent coin must drop from spendable");
@@ -1694,6 +1700,11 @@ fn test_unconfirmed_spend_injection() {
             .expect("outgoing tx injected");
         assert!(matches!(out.payment_type, PaymentType::Send));
         assert!(out.height.is_none(), "injected spend is unconfirmed");
+        assert_eq!(
+            out.amount,
+            input_value - change,
+            "unconfirmed send amount = inputs - change = sent + fee"
+        );
     }
 
     // Mine + scan: the spend confirms, the coin is mined, and the self-spend
@@ -1714,25 +1725,136 @@ fn test_unconfirmed_spend_injection() {
             "self-spend change must keep it a send"
         );
         assert!(out.height.is_some(), "spend confirmed after scan");
+        assert_eq!(
+            out.amount,
+            input_value - change,
+            "scanned change supersedes the recorded value, same amount"
+        );
     }
 }
 
-/// `broadcast` errors when no Electrum endpoint is configured (no network).
+/// A spend that references no SP coin must succeed yet record nothing in the SP
+/// stores (the `sp_matched == false` path of `record_unconfirmed_spend`).
 #[test]
-fn test_broadcast_requires_electrum_endpoint() {
-    use bwk_sp::account::AccountError;
+fn test_unconfirmed_spend_no_sp_coin() {
+    use bitcoin::hashes::Hash;
+    use common::TestEnv;
 
-    let account = test_account_named("broadcast-no-endpoint", "http://127.0.0.1:1");
+    let mut env = TestEnv::new();
+    let (mut account, _config, _dir) =
+        test_account_persistent_named("unconfirmed-no-sp-coin", &env.url());
+
+    // Fund an SP coin so the store is non-empty; the spent tx won't touch it.
+    env.fund_sp(&mut account, 0.5);
+    let owned = {
+        let coins = account.coins();
+        assert_eq!(coins.len(), 1, "should own exactly one SP output");
+        *coins.keys().next().unwrap()
+    };
+    assert!(
+        account.get_coin(&owned).expect("coin").is_spendable(),
+        "pre-funded SP coin starts spendable"
+    );
+
+    // A tx spending a FOREIGN outpoint absent from the SP coin store.
+    let foreign = OutPoint::new(bitcoin::Txid::from_byte_array([7u8; 32]), 0);
     let tx = bitcoin::Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![],
-        output: vec![],
+        input: vec![bitcoin::TxIn {
+            previous_output: foreign,
+            script_sig: Default::default(),
+            sequence: bitcoin::Sequence::ZERO,
+            witness: Default::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(10_000),
+            script_pubkey: bitcoin::ScriptBuf::new(),
+        }],
     };
+    let txid = tx.compute_txid();
+
+    account
+        .record_unconfirmed_spend(&tx, 0)
+        .expect("record spend of foreign coin");
+
+    // No SP record: neither an SpTxStore entry nor a payment_history row.
+    assert!(
+        !account.tx_history().iter().any(|e| e.txid == txid),
+        "no SP tx_store entry for a tx spending no SP coin"
+    );
+    assert!(
+        !account
+            .payment_history()
+            .into_iter()
+            .any(|p| p.txid == txid.to_string()),
+        "no payment_history row for a tx spending no SP coin"
+    );
+
+    // The pre-funded SP coin is untouched: still tracked and spendable.
+    let entry = account.get_coin(&owned).expect("coin still tracked");
+    assert!(entry.is_spendable(), "unrelated SP coin stays spendable");
+    assert_eq!(account.coins().len(), 1, "coin store not mutated");
+}
+
+/// `broadcast` refuses when no Electrum endpoint is configured, and the refusal
+/// leaves state untouched: it resolves the endpoint and broadcasts before
+/// recording anything, so a real spend of an SP coin must not be injected.
+#[test]
+fn test_broadcast_requires_electrum_endpoint() {
+    use bwk_sp::account::AccountError;
+    use common::TestEnv;
+
+    // Reachable blindbit (to fund/scan) but no Electrum endpoint configured.
+    let mut env = TestEnv::new();
+    let (mut account, _config, _dir) =
+        test_account_persistent_named("broadcast-no-endpoint", &env.url());
+
+    // Fund a real SP coin and build + sign a spend of it.
+    env.fund_sp(&mut account, 0.5);
+    let owned = {
+        let coins = account.coins();
+        assert_eq!(coins.len(), 1, "should own exactly one SP output");
+        *coins.keys().next().unwrap()
+    };
+
+    let dest = env.taproot_addr(0);
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to(dest, 100_000);
+    for coin in builder.select_coins(100_000, 1000) {
+        builder.add_input(coin);
+    }
+    let change = builder.simulate().change.map(|a| a.to_sat()).unwrap_or(0);
+    assert!(change > 0, "this spend should produce SP change");
+    let tx = {
+        let mut psbt = builder.generate().expect("build spend tx");
+        account.sign_and_finalize(&mut psbt).expect("sign spend tx")
+    };
+    let spend_txid = tx.compute_txid();
+
     let err = account
-        .broadcast(&tx)
-        .expect_err("broadcast without endpoint must fail");
+        .broadcast(&tx, change)
+        .expect_err("broadcast without an endpoint must fail");
     assert!(matches!(err, AccountError::NoElectrumEndpoint));
+
+    // The refusal left state untouched: the spent SP coin is still spendable and
+    // no SP record exists for the refused spend.
+    let entry = account.get_coin(&owned).expect("coin still tracked");
+    assert!(
+        entry.is_spendable(),
+        "refused broadcast must not mark the input spent"
+    );
+    assert!(
+        !account.tx_history().iter().any(|e| e.txid == spend_txid),
+        "no SP tx_store entry for a refused broadcast"
+    );
+    assert!(
+        !account
+            .payment_history()
+            .into_iter()
+            .any(|p| p.txid == spend_txid.to_string()),
+        "no payment_history row for a refused broadcast"
+    );
 }
 
 /// The scan stamps a confirmation block time on recorded txs, fetched from
