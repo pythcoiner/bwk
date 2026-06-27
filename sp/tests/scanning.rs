@@ -1636,7 +1636,7 @@ fn test_spend_only_resume_at_same_tip() {
 /// later scan confirms it without turning the self-spend change into an incoming.
 #[test]
 fn test_unconfirmed_spend_injection() {
-    use bwk_sp::account::tx_store::TxDirection;
+    use bwk::coin_store::PaymentType;
     use common::{wait_for_oneshot_done, TestEnv};
 
     let mut env = TestEnv::new();
@@ -1652,15 +1652,15 @@ fn test_unconfirmed_spend_injection() {
     };
     let funding_txid = owned.txid;
 
-    // The receive scan recorded the funding tx as a confirmed incoming entry.
+    // The receive scan recorded the funding tx as a confirmed receive.
     {
-        let history = account.tx_history();
-        let entry = history
-            .iter()
-            .find(|e| *e.txid() == funding_txid)
+        let payment = account
+            .payment_history()
+            .into_iter()
+            .find(|p| p.txid == funding_txid.to_string())
             .expect("incoming tx recorded by scan");
-        assert!(matches!(entry.direction(), TxDirection::Incoming));
-        assert!(entry.is_confirmed(), "incoming tx should be confirmed");
+        assert!(matches!(payment.payment_type, PaymentType::Receive));
+        assert!(payment.height.is_some(), "incoming tx should be confirmed");
     }
     assert!(account.balance() > 0);
 
@@ -1687,13 +1687,13 @@ fn test_unconfirmed_spend_injection() {
             0,
             "balance drops to 0 (change not yet scanned)"
         );
-        let history = account.tx_history();
-        let out = history
-            .iter()
-            .find(|e| *e.txid() == spend_txid)
+        let out = account
+            .payment_history()
+            .into_iter()
+            .find(|p| p.txid == spend_txid.to_string())
             .expect("outgoing tx injected");
-        assert!(matches!(out.direction(), TxDirection::Outgoing));
-        assert!(!out.is_confirmed(), "injected spend is unconfirmed");
+        assert!(matches!(out.payment_type, PaymentType::Send));
+        assert!(out.height.is_none(), "injected spend is unconfirmed");
     }
 
     // Mine + scan: the spend confirms, the coin is mined, and the self-spend
@@ -1704,16 +1704,16 @@ fn test_unconfirmed_spend_injection() {
     {
         let entry = account.get_coin(&owned).expect("coin still tracked");
         assert!(!entry.is_spendable(), "spent coin stays spent after scan");
-        let history = account.tx_history();
-        let out = history
-            .iter()
-            .find(|e| *e.txid() == spend_txid)
+        let out = account
+            .payment_history()
+            .into_iter()
+            .find(|p| p.txid == spend_txid.to_string())
             .expect("outgoing tx present after scan");
         assert!(
-            matches!(out.direction(), TxDirection::Outgoing),
-            "self-spend change must not turn the entry incoming"
+            matches!(out.payment_type, PaymentType::Send),
+            "self-spend change must keep it a send"
         );
-        assert!(out.is_confirmed(), "spend confirmed after scan");
+        assert!(out.height.is_some(), "spend confirmed after scan");
     }
 }
 

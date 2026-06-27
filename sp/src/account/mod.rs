@@ -140,33 +140,8 @@ pub enum ScanMode {
 
 // PaymentType
 
-#[cfg(feature = "mnemonic")]
-/// Type of payment (for UI display).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PaymentType {
-    /// Received payment
-    Receive,
-    /// Sent payment
-    Send,
-}
-
-// Payment
-
-#[cfg(feature = "mnemonic")]
-/// A payment record for UI display.
-#[derive(Debug, Clone)]
-pub struct Payment {
-    /// Transaction ID as string
-    pub txid: String,
-    /// Type of payment
-    pub payment_type: PaymentType,
-    /// Amount in satoshis
-    pub amount: u64,
-    /// User-assigned label
-    pub label: String,
-    /// Confirmation height if confirmed
-    pub height: Option<u32>,
-}
+// Payment history is produced by the generic aggregator in `bwk::history`;
+// callers receive `bwk::coin_store::Payment`. See `Account::payment_history`.
 
 // Account
 
@@ -559,152 +534,17 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         self.tx_store.lock().expect("poisoned").transactions()
     }
 
-    /// Returns a unified payment history combining coins and transactions.
-    ///
-    /// This method creates a unified view of all payments by:
-    /// 1. Converting coins from coin_store to received payments
-    /// 2. Converting transactions from tx_store to payments
-    /// 3. Deduplicating by txid (tx_store entries take precedence)
-    /// 4. Sorting by height (newest first), then by txid for same height
-    ///
-    /// For received coins, the label is looked up from label_store.
-    /// For transactions, the label from the transaction entry is used,
-    /// falling back to label_store lookup.
-    pub fn payment_history(&self) -> Vec<Payment> {
-        // Local struct to avoid clippy::type_complexity warning for tx_data tuple
-        struct TxData {
-            txid: Txid,
-            txid_str: String,
-            direction: crate::account::tx_store::TxDirection,
-            amount: u64,
-            label: Option<String>,
-            height: Option<u32>,
+    /// Returns a unified payment history across the SP store and every
+    /// sub-account, de-duplicated per txid by the generic aggregator. Direction
+    /// and amount are derived from additive input/output ownership, so change
+    /// nets out and a tx that spends no SP coin produces no spurious SP entry.
+    pub fn payment_history(&self) -> Vec<bwk::coin_store::Payment> {
+        let mut sources: Vec<&dyn bwk::history::AccountHistory> =
+            vec![self as &dyn bwk::history::AccountHistory];
+        for sub in &self.sub_accounts {
+            sources.push(sub as &dyn bwk::history::AccountHistory);
         }
-
-        let mut payments_by_txid: HashMap<String, Payment> = HashMap::new();
-
-        // First, process coins from coin_store as received payments
-        // Collect coins data while holding only coin_store lock
-        let coins_data: Vec<(OutPoint, u64, u32, String)> = {
-            let coin_store = self.coin_store.lock().expect("poisoned");
-            coin_store
-                .coins()
-                .iter()
-                .map(|(outpoint, coin)| {
-                    (
-                        *outpoint,
-                        coin.amount_sat(),
-                        coin.height(),
-                        outpoint.txid.to_string(),
-                    )
-                })
-                .collect()
-        };
-
-        // Now lookup labels with only label_store lock
-        let coin_labels: HashMap<OutPoint, String> = {
-            let label_store = self.label_store.lock().expect("poisoned");
-            coins_data
-                .iter()
-                .filter_map(|(outpoint, _, _, _)| {
-                    label_store
-                        .outpoint(*outpoint)
-                        .map(|l| (*outpoint, l.clone()))
-                })
-                .collect()
-        };
-
-        // Process coins without any locks
-        for (outpoint, amount, height, txid_str) in coins_data {
-            let label = coin_labels.get(&outpoint).cloned().unwrap_or_default();
-
-            let payment = Payment {
-                txid: txid_str.clone(),
-                payment_type: PaymentType::Receive,
-                amount,
-                label,
-                height: Some(height),
-            };
-
-            // If we already have a payment for this txid, aggregate the amount
-            if let Some(existing) = payments_by_txid.get_mut(&txid_str) {
-                existing.amount += payment.amount;
-            } else {
-                payments_by_txid.insert(txid_str, payment);
-            }
-        }
-
-        // Then, process transactions from tx_store (these take precedence)
-        // Collect transaction data while holding only tx_store lock
-        let tx_data: Vec<TxData> = {
-            let tx_store = self.tx_store.lock().expect("poisoned");
-            tx_store
-                .transactions()
-                .iter()
-                .map(|tx_entry| TxData {
-                    txid: tx_entry.txid,
-                    txid_str: tx_entry.txid.to_string(),
-                    direction: tx_entry.direction.clone(),
-                    amount: tx_entry.amount,
-                    label: tx_entry.label.clone(),
-                    height: tx_entry.height,
-                })
-                .collect()
-        };
-
-        // Lookup labels for transactions that don't have one, with only label_store lock
-        let tx_labels: HashMap<Txid, String> = {
-            let label_store = self.label_store.lock().expect("poisoned");
-            tx_data
-                .iter()
-                .filter(|td| td.label.is_none())
-                .filter_map(|td| {
-                    label_store
-                        .transaction(td.txid)
-                        .map(|l| (td.txid, l.clone()))
-                })
-                .collect()
-        };
-
-        // Process transactions without any locks
-        for td in tx_data {
-            // Determine payment type from transaction direction
-            let payment_type = match td.direction {
-                crate::account::tx_store::TxDirection::Incoming => PaymentType::Receive,
-                crate::account::tx_store::TxDirection::Outgoing => PaymentType::Send,
-                crate::account::tx_store::TxDirection::Internal => PaymentType::Send, // Treat internal as send
-            };
-
-            // Get label: prefer tx_entry label, fallback to label_store
-            let label = td
-                .label
-                .or_else(|| tx_labels.get(&td.txid).cloned())
-                .unwrap_or_default();
-
-            let payment = Payment {
-                txid: td.txid_str.clone(),
-                payment_type,
-                amount: td.amount,
-                label,
-                height: td.height,
-            };
-
-            // tx_store entries take precedence over coin_store entries
-            payments_by_txid.insert(td.txid_str, payment);
-        }
-
-        // Collect and sort payments
-        let mut payments: Vec<Payment> = payments_by_txid.into_values().collect();
-
-        // Sort by height (newest first, None last), then by txid for stability
-        payments.sort_by(|a, b| match (b.height, a.height) {
-            (Some(h_b), Some(h_a)) => h_b.cmp(&h_a).then_with(|| a.txid.cmp(&b.txid)),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.txid.cmp(&b.txid),
-        });
-
-        payments
+        bwk::history::aggregate_payments(sources)
     } // Labels
 
     /// Update the label for a coin.
@@ -1170,28 +1010,35 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .ok_or(AccountError::NoElectrumEndpoint)?;
         let mut client = bwk::bwk_electrum::client::Client::new(url, port)?;
         client.broadcast_tx(tx)?;
-        self.record_unconfirmed_spend(tx)
+        // Reflect the spend in every store that owns part of it: SP inputs/change
+        // here, and each sub-account's own inputs/change. The aggregator then
+        // sums their contributions into one payment.
+        let txid = self.record_unconfirmed_spend(tx)?;
+        for sub in &self.sub_accounts {
+            sub.record_unconfirmed_spend(tx);
+        }
+        Ok(txid)
     }
 
     /// Inject a just-broadcast spend into local state as unconfirmed.
     ///
     /// Marks each spent SP input `Spent(txid)` (dropping it from spendable) and
-    /// inserts the outgoing transaction with no height. A later scan upgrades the
-    /// inputs to `Mined` and sets the transaction height. Only SP coins are
-    /// touched; sub-account inputs are left to their own listeners. `amount` is
-    /// the gross value of the spent SP inputs (SP change is unknown until scanned).
+    /// inserts the outgoing transaction with no height. A later scan confirms the
+    /// inputs and sets the transaction height. Only SP coins are touched;
+    /// sub-account inputs are left to their own listeners. The send amount is
+    /// derived by the history aggregator from coin ownership, not stored here.
     pub fn record_unconfirmed_spend(
         &self,
         tx: &bitcoin::Transaction,
     ) -> Result<Txid, AccountError> {
         let txid = tx.compute_txid();
-        let mut amount: u64 = 0;
+        let mut sp_matched = false;
         {
             let mut coin_store = self.coin_store.lock().expect("poisoned");
             for input in &tx.input {
                 let outpoint = input.previous_output;
-                if let Some(entry) = coin_store.get(&outpoint) {
-                    amount += entry.amount_sat();
+                if coin_store.get(&outpoint).is_some() {
+                    sp_matched = true;
                     coin_store.mark_spent(&outpoint, txid.to_byte_array());
                     let _ = self
                         .sender
@@ -1200,14 +1047,13 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             }
             coin_store.persist();
         }
-        {
+        // Only carry the tx in the SP store when an SP coin was actually spent;
+        // a tx spending no SP coin must not create an SP record (its history
+        // comes from the sub-account that owns the inputs). Direction and amount
+        // are derived later by the history aggregator from coin ownership.
+        if sp_matched {
             let mut tx_store = self.tx_store.lock().expect("poisoned");
-            tx_store.insert(SpTxEntry::with_tx(
-                txid,
-                tx.clone(),
-                crate::account::tx_store::TxDirection::Outgoing,
-                amount,
-            ));
+            tx_store.insert(SpTxEntry::with_tx(txid, tx.clone()));
             tx_store.persist();
         }
         Ok(txid)
@@ -1571,81 +1417,6 @@ mod tests {
     }
 
     #[test]
-    fn test_payment_type_eq() {
-        assert_eq!(PaymentType::Receive, PaymentType::Receive);
-        assert_eq!(PaymentType::Send, PaymentType::Send);
-        assert_ne!(PaymentType::Receive, PaymentType::Send);
-    }
-
-    #[test]
-    fn test_payment_struct() {
-        let payment = Payment {
-            txid: "abc123".to_string(),
-            payment_type: PaymentType::Receive,
-            amount: 50000,
-            label: "test payment".to_string(),
-            height: Some(800000),
-        };
-
-        assert_eq!(payment.txid, "abc123");
-        assert_eq!(payment.payment_type, PaymentType::Receive);
-        assert_eq!(payment.amount, 50000);
-        assert_eq!(payment.label, "test payment");
-        assert_eq!(payment.height, Some(800000));
-    }
-
-    #[test]
-    fn test_payment_struct_unconfirmed() {
-        let payment = Payment {
-            txid: "def456".to_string(),
-            payment_type: PaymentType::Send,
-            amount: 10000,
-            label: String::new(),
-            height: None,
-        };
-
-        assert_eq!(payment.txid, "def456");
-        assert_eq!(payment.payment_type, PaymentType::Send);
-        assert_eq!(payment.amount, 10000);
-        assert!(payment.label.is_empty());
-        assert!(payment.height.is_none());
-    }
-
-    #[test]
-    fn test_payment_clone() {
-        let payment = Payment {
-            txid: "abc123".to_string(),
-            payment_type: PaymentType::Receive,
-            amount: 50000,
-            label: "original".to_string(),
-            height: Some(100),
-        };
-
-        let cloned = payment.clone();
-        assert_eq!(cloned.txid, payment.txid);
-        assert_eq!(cloned.payment_type, payment.payment_type);
-        assert_eq!(cloned.amount, payment.amount);
-        assert_eq!(cloned.label, payment.label);
-        assert_eq!(cloned.height, payment.height);
-    }
-
-    #[test]
-    fn test_payment_debug() {
-        let payment = Payment {
-            txid: "abc".to_string(),
-            payment_type: PaymentType::Send,
-            amount: 1000,
-            label: "test".to_string(),
-            height: Some(1),
-        };
-
-        let debug_str = format!("{payment:?}");
-        assert!(debug_str.contains("Payment"));
-        assert!(debug_str.contains("abc"));
-        assert!(debug_str.contains("Send"));
-    }
-
-    #[test]
     fn test_config_validation_no_keys() {
         let mut config = test_config();
         config.mnemonic = None;
@@ -1925,5 +1696,73 @@ mod tests {
         assert_eq!(hit.account_name, account.name());
         assert_eq!(hit.status, bwk::address_store::AddressStatus::Used);
         assert!(hit.funding_txids.contains(&outpoint.txid));
+    }
+}
+
+#[cfg(feature = "mnemonic")]
+impl<P: crate::profile::SpStorageProfile> bwk::history::AccountHistory for Account<P> {
+    fn tx_contributions(
+        &self,
+    ) -> std::collections::BTreeMap<bitcoin::Txid, bwk::history::TxContribution> {
+        use bitcoin::hashes::Hash;
+        use std::collections::BTreeMap;
+
+        let mut map: BTreeMap<bitcoin::Txid, bwk::history::TxContribution> = BTreeMap::new();
+
+        // Ownership comes from the coin store: a coin is an output we own (its
+        // funding txid), and a coin marked `Spent { txid, .. }` is an input we
+        // own in that spending txid.
+        {
+            let coin_store = self.coin_store.lock().expect("poisoned");
+            for entry in coin_store.coins().values() {
+                let op = entry.outpoint();
+                let received = map.entry(op.txid).or_default();
+                received.owned_out = received.owned_out.saturating_add(entry.amount_sat());
+                received.owned_vouts.insert(op.vout);
+                if received.height.is_none() {
+                    received.height = Some(entry.height() as u64);
+                }
+                if let crate::receiver::OutputSpendStatus::Spent { txid, .. } = entry.status() {
+                    let spent_in = bitcoin::Txid::from_byte_array(*txid);
+                    let spent = map.entry(spent_in).or_default();
+                    spent.owned_in = spent.owned_in.saturating_add(entry.amount_sat());
+                }
+            }
+        }
+
+        // The tx store carries the full tx, the confirmation height/time, and an
+        // optional label for the transactions we know about (our sends and the
+        // receives recorded by the scanner).
+        {
+            let tx_store = self.tx_store.lock().expect("poisoned");
+            for e in tx_store.transactions() {
+                let c = map.entry(e.txid).or_default();
+                if let Some(h) = e.height {
+                    c.height = Some(h as u64);
+                }
+                if c.timestamp.is_none() {
+                    c.timestamp = e.timestamp;
+                }
+                if c.tx.is_none() {
+                    c.tx = e.tx.clone();
+                }
+            }
+        }
+
+        {
+            let labels = self.label_store.lock().expect("poisoned");
+            for (txid, c) in map.iter_mut() {
+                if c.label.is_none() {
+                    // The tx label if set, else a label on any owned coin of
+                    // this tx (set through update_coin_label).
+                    c.label = labels.transaction(*txid).or_else(|| {
+                        c.owned_vouts
+                            .iter()
+                            .find_map(|vout| labels.outpoint(OutPoint::new(*txid, *vout)))
+                    });
+                }
+            }
+        }
+        map
     }
 }

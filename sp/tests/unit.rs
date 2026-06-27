@@ -441,8 +441,6 @@ fn test_concurrent_writes_different_stores() {
             store.insert(bwk_sp::account::tx_store::SpTxEntry {
                 txid: test_outpoint().txid,
                 tx: None,
-                direction: bwk_sp::account::tx_store::TxDirection::Incoming,
-                amount: 1000 * (i as u64 + 1),
                 fee: None,
                 label: Some(format!("tx {i}")),
                 height: Some(100 + i),
@@ -497,25 +495,4 @@ fn test_notification_debug() {
     let debug = format!("{notif:?}");
     assert!(debug.contains("ScanReceiveProgress"));
     assert!(debug.contains("100"));
-}
-
-/// Test Payment and PaymentType structures.
-#[test]
-fn test_payment_structures() {
-    use bwk_sp::account::{Payment, PaymentType};
-
-    let payment = Payment {
-        txid: "abc123".to_string(),
-        payment_type: PaymentType::Receive,
-        amount: 50000,
-        label: "test payment".to_string(),
-        height: Some(800000),
-    };
-
-    assert_eq!(payment.payment_type, PaymentType::Receive);
-    assert_ne!(payment.payment_type, PaymentType::Send);
-
-    let debug = format!("{payment:?}");
-    assert!(debug.contains("Payment"));
-    assert!(debug.contains("abc123"));
 }

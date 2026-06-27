@@ -23,10 +23,7 @@ use bitcoin::{
 use crossbeam::channel;
 
 use crate::{
-    account::{
-        coin_store::SpCoinStore,
-        tx_store::{SpTxEntry, TxDirection},
-    },
+    account::{coin_store::SpCoinStore, tx_store::SpTxEntry},
     blindbit,
     core::receiving::Label,
     profile::SpStorageProfile,
@@ -393,15 +390,14 @@ fn record_outputs<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     outputs: HashMap<OutPoint, OwnedOutput>,
 ) -> Result<(), receiver::error::Error> {
-    // Aggregate received value per transaction so each gets one incoming entry.
-    let mut by_tx: HashMap<Txid, (u64, u32)> = HashMap::new();
+    // One entry per funding tx, recording the block height it confirmed at.
+    let mut by_tx: HashMap<Txid, u32> = HashMap::new();
     {
         let mut store = stores.coin_store.lock().expect("poisoned");
         for (outpoint, output) in outputs {
-            let entry = by_tx
+            by_tx
                 .entry(outpoint.txid)
-                .or_insert((0, output.blockheight.to_consensus_u32()));
-            entry.0 += output.amount.to_sat();
+                .or_insert(output.blockheight.to_consensus_u32());
             store.insert(outpoint, output);
             let _ = stores
                 .sender
@@ -411,13 +407,13 @@ fn record_outputs<P: SpStorageProfile>(
     }
 
     let mut tx_store = stores.tx_store.lock().expect("poisoned");
-    for (txid, (amount, height)) in by_tx {
+    for (txid, height) in by_tx {
         // Do not clobber an existing entry (e.g. our own outgoing spend whose
         // change lands back here); only confirm its height.
         if tx_store.get(&txid).is_some() {
             tx_store.update_height(&txid, Some(height));
         } else {
-            let mut entry = SpTxEntry::new(txid, TxDirection::Incoming, amount);
+            let mut entry = SpTxEntry::new(txid);
             entry.height = Some(height);
             tx_store.insert(entry);
         }

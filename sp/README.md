@@ -62,7 +62,7 @@ Notification ──► Account consumer
 ## Stores
 
 - `SpCoinStore` — Detected SP outputs with spend status
-- `SpTxStore` — Transaction history (incoming/outgoing)
+- `SpTxStore` — Transaction history (direction and amount derived by the aggregator)
 - `bwk::LabelStore` — User labels for coins and transactions (shared with bwk)
 - `ScanState` — Scan progress and checkpoint management
 

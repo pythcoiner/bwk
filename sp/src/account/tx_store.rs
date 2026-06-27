@@ -12,21 +12,16 @@ use serde::{Deserialize, Serialize};
 
 pub const STORE_KEY: &str = bwk::persist::TXS_STORE_KEY;
 
-/// Direction of a transaction relative to the wallet.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TxDirection {
-    Incoming,
-    Outgoing,
-    Internal,
-}
-
 /// A transaction entry in the store.
+///
+/// Carries the full tx, confirmation height/time, fee, and label for txs the
+/// wallet knows about. Direction and amount are NOT stored: they are derived by
+/// the generic history aggregator from coin ownership across accounts, so the
+/// change of a send nets out automatically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpTxEntry {
     pub txid: Txid,
     pub tx: Option<Transaction>,
-    pub direction: TxDirection,
-    pub amount: u64,
     pub fee: Option<u64>,
     pub height: Option<u32>,
     pub timestamp: Option<u64>,
@@ -34,24 +29,20 @@ pub struct SpTxEntry {
 }
 
 impl SpTxEntry {
-    pub fn new(txid: Txid, direction: TxDirection, amount: u64) -> Self {
+    pub fn new(txid: Txid) -> Self {
         Self {
             txid,
             tx: None,
-            direction,
-            amount,
             fee: None,
             height: None,
             timestamp: None,
             label: None,
         }
     }
-    pub fn with_tx(txid: Txid, tx: Transaction, direction: TxDirection, amount: u64) -> Self {
+    pub fn with_tx(txid: Txid, tx: Transaction) -> Self {
         Self {
             txid,
             tx: Some(tx),
-            direction,
-            amount,
             fee: None,
             height: None,
             timestamp: None,
@@ -63,12 +54,6 @@ impl SpTxEntry {
     }
     pub fn tx(&self) -> Option<&Transaction> {
         self.tx.as_ref()
-    }
-    pub fn direction(&self) -> &TxDirection {
-        &self.direction
-    }
-    pub fn amount(&self) -> u64 {
-        self.amount
     }
     pub fn fee(&self) -> Option<u64> {
         self.fee

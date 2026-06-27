@@ -68,8 +68,6 @@ fn test_stores_independent_persistence() {
         tx_store.insert(bwk_sp::account::tx_store::SpTxEntry {
             txid: test_outpoint().txid,
             tx: None,
-            direction: bwk_sp::account::tx_store::TxDirection::Incoming,
-            amount: 50000,
             fee: None,
             label: Some("test tx".to_string()),
             height: Some(100),
