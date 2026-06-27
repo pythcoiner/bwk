@@ -204,6 +204,16 @@ impl ScanState {
             .unwrap_or(self.birthday_height)
     }
 
+    /// Returns the height where the next spend sweep should start.
+    ///
+    /// Mirrors `next_scan_start` for the spend (input) sweep: last swept height
+    /// + 1, or the birthday if nothing has been swept yet.
+    pub fn next_spend_start(&self) -> u32 {
+        self.last_spend_height
+            .map(|h| h + 1)
+            .unwrap_or(self.birthday_height)
+    }
+
     /// Persist the state through the configured backend.
     ///
     /// Writes the three scalar fields as individual rows under the
@@ -281,6 +291,19 @@ mod tests {
 
         // After scanning to 150, next scan starts at 151
         assert_eq!(state.next_scan_start(), 151);
+    }
+
+    #[test]
+    fn test_scan_state_next_spend_start() {
+        let mut state = ScanState::new(100);
+
+        // Nothing swept yet, should return birthday.
+        assert_eq!(state.next_spend_start(), 100);
+
+        state.advance_spend_frontier(150);
+
+        // After sweeping to 150, next spend sweep starts at 151.
+        assert_eq!(state.next_spend_start(), 151);
     }
 
     #[test]
