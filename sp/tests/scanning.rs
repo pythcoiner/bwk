@@ -1631,3 +1631,106 @@ fn test_spend_only_resume_at_same_tip() {
         entry.status()
     );
 }
+
+/// A scan records incoming txs; a broadcast injects the spend as unconfirmed; a
+/// later scan confirms it without turning the self-spend change into an incoming.
+#[test]
+fn test_unconfirmed_spend_injection() {
+    use bwk_sp::account::tx_store::TxDirection;
+    use common::{wait_for_oneshot_done, TestEnv};
+
+    let mut env = TestEnv::new();
+    let (mut account, _config, _dir) =
+        test_account_persistent_named("unconfirmed-spend", &env.url());
+
+    // Fund an SP output; fund_sp scans, so the funding tx is recorded.
+    env.fund_sp(&mut account, 0.5);
+    let owned = {
+        let coins = account.coins();
+        assert_eq!(coins.len(), 1, "should own exactly one SP output");
+        *coins.keys().next().unwrap()
+    };
+    let funding_txid = owned.txid;
+
+    // The receive scan recorded the funding tx as a confirmed incoming entry.
+    {
+        let history = account.tx_history();
+        let entry = history
+            .iter()
+            .find(|e| *e.txid() == funding_txid)
+            .expect("incoming tx recorded by scan");
+        assert!(matches!(entry.direction(), TxDirection::Incoming));
+        assert!(entry.is_confirmed(), "incoming tx should be confirmed");
+    }
+    assert!(account.balance() > 0);
+
+    // Build + sign a spend of the SP coin (change returns to our SP address).
+    let tx = {
+        let dest = env.taproot_addr(0);
+        let mut builder = account.tx_builder().feerate(1000);
+        builder.send_to(dest, 100_000);
+        for coin in builder.select_coins(100_000, 1000) {
+            builder.add_input(coin);
+        }
+        let mut psbt = builder.generate().expect("build spend tx");
+        account.sign_and_finalize(&mut psbt).expect("sign spend tx")
+    };
+    let spend_txid = tx.compute_txid();
+
+    // Inject as unconfirmed (no broadcast/mine yet).
+    account.record_unconfirmed_spend(&tx).expect("inject spend");
+    {
+        let entry = account.get_coin(&owned).expect("coin still tracked");
+        assert!(!entry.is_spendable(), "spent coin must drop from spendable");
+        assert_eq!(
+            account.balance(),
+            0,
+            "balance drops to 0 (change not yet scanned)"
+        );
+        let history = account.tx_history();
+        let out = history
+            .iter()
+            .find(|e| *e.txid() == spend_txid)
+            .expect("outgoing tx injected");
+        assert!(matches!(out.direction(), TxDirection::Outgoing));
+        assert!(!out.is_confirmed(), "injected spend is unconfirmed");
+    }
+
+    // Mine + scan: the spend confirms, the coin is mined, and the self-spend
+    // change does not turn the outgoing entry into an incoming one.
+    env.broadcast_and_mine(&tx);
+    account.scan_oneshot(None).expect("scan");
+    wait_for_oneshot_done(&account, Duration::from_secs(60));
+    {
+        let entry = account.get_coin(&owned).expect("coin still tracked");
+        assert!(!entry.is_spendable(), "spent coin stays spent after scan");
+        let history = account.tx_history();
+        let out = history
+            .iter()
+            .find(|e| *e.txid() == spend_txid)
+            .expect("outgoing tx present after scan");
+        assert!(
+            matches!(out.direction(), TxDirection::Outgoing),
+            "self-spend change must not turn the entry incoming"
+        );
+        assert!(out.is_confirmed(), "spend confirmed after scan");
+    }
+}
+
+/// `broadcast` errors when no Electrum endpoint is configured (no network).
+#[test]
+fn test_broadcast_requires_electrum_endpoint() {
+    use bwk_sp::account::AccountError;
+
+    let account = test_account_named("broadcast-no-endpoint", "http://127.0.0.1:1");
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![],
+    };
+    let err = account
+        .broadcast(&tx)
+        .expect_err("broadcast without endpoint must fail");
+    assert!(matches!(err, AccountError::Broadcast(_)));
+}
