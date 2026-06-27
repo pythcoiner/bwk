@@ -61,8 +61,10 @@ pub enum SpNotification {
     StoppingScan,
     /// Scanner has stopped
     ScanStopped,
-    /// Scan progress update
-    ScanProgress { current: u32, end: u32 },
+    /// Receive (output) scan progress update
+    ScanReceiveProgress { current: u32, end: u32 },
+    /// Spend (input) sweep progress update
+    ScanSpendProgress { current: u32, end: u32 },
     /// Scan completed successfully
     ScanCompleted,
     /// A new output was found

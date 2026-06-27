@@ -171,7 +171,7 @@ fn test_notification_channel_send_receive() {
     // Send various notifications
     sender.send(SpNotification::StartingScan.into()).unwrap();
     sender
-        .send(Notification::Sp(SpNotification::ScanProgress {
+        .send(Notification::Sp(SpNotification::ScanReceiveProgress {
             current: 100,
             end: 200,
         }))
@@ -196,11 +196,11 @@ fn test_notification_channel_send_receive() {
         Notification::Sp(SpNotification::StartingScan)
     ));
     match receiver.recv().unwrap() {
-        Notification::Sp(SpNotification::ScanProgress { current, end }) => {
+        Notification::Sp(SpNotification::ScanReceiveProgress { current, end }) => {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         }
-        _ => panic!("expected ScanProgress"),
+        _ => panic!("expected ScanReceiveProgress"),
     }
     assert!(matches!(
         receiver.recv().unwrap(),
@@ -499,17 +499,17 @@ fn test_account_error_display() {
 /// Test Notification Debug and Clone.
 #[test]
 fn test_notification_debug_clone() {
-    let notif = Notification::Sp(SpNotification::ScanProgress {
+    let notif = Notification::Sp(SpNotification::ScanReceiveProgress {
         current: 100,
         end: 200,
     });
     let debug = format!("{notif:?}");
-    assert!(debug.contains("ScanProgress"));
+    assert!(debug.contains("ScanReceiveProgress"));
     assert!(debug.contains("100"));
 
     let cloned = notif.clone();
     match cloned {
-        Notification::Sp(SpNotification::ScanProgress { current, end }) => {
+        Notification::Sp(SpNotification::ScanReceiveProgress { current, end }) => {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         }

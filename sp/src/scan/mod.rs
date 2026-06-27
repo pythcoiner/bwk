@@ -423,14 +423,28 @@ fn record_inputs<P: SpStorageProfile>(
     Ok(())
 }
 
-fn record_progress<P: SpStorageProfile>(
+fn record_receive_progress<P: SpStorageProfile>(
+    stores: &ScanStores<P>,
+    current: Height,
+    end: Height,
+) -> Result<(), receiver::error::Error> {
+    let _ = stores.sender.send(crate::Notification::Sp(
+        SpNotification::ScanReceiveProgress {
+            current: current.to_consensus_u32(),
+            end: end.to_consensus_u32(),
+        },
+    ));
+    Ok(())
+}
+
+fn record_spend_progress<P: SpStorageProfile>(
     stores: &ScanStores<P>,
     current: Height,
     end: Height,
 ) -> Result<(), receiver::error::Error> {
     let _ = stores
         .sender
-        .send(crate::Notification::Sp(SpNotification::ScanProgress {
+        .send(crate::Notification::Sp(SpNotification::ScanSpendProgress {
             current: current.to_consensus_u32(),
             end: end.to_consensus_u32(),
         }));
@@ -722,7 +736,7 @@ fn commit_block<P: SpStorageProfile>(
 
     if let Some(tip) = *recv_tip {
         if !*notified_any || tip.saturating_sub(*last_progress) >= 100 {
-            record_progress(scan.stores, Height::from_consensus(tip)?, scan.end)?;
+            record_receive_progress(scan.stores, Height::from_consensus(tip)?, scan.end)?;
             *last_progress = tip;
             *notified_any = true;
         }
@@ -870,7 +884,7 @@ fn process_blocks<P: SpStorageProfile>(
     }
     let end_hash = hashes[len - 1].ok_or(receiver::error::Error::MissingBlockHash(end_u32))?;
     record_scan_frontier(scan.stores, scan.end, end_hash)?;
-    record_progress(scan.stores, scan.end, scan.end)?;
+    record_receive_progress(scan.stores, scan.end, scan.end)?;
     save_state(scan.stores)?;
     Ok(false)
 }
@@ -935,7 +949,7 @@ fn process_spends<P: SpStorageProfile>(
             spend_tip += 1;
         }
         if spend_tip.saturating_sub(last_progress) >= 1000 {
-            record_progress(scan.stores, Height::from_consensus(spend_tip)?, scan.end)?;
+            record_spend_progress(scan.stores, Height::from_consensus(spend_tip)?, scan.end)?;
             last_progress = spend_tip;
         }
         if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
@@ -1028,9 +1042,10 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
     /// `ScanState::next_scan_start()` (resume from last scanned, or birthday).
     ///
     /// Returns immediately after spawning the scanner thread; progress is
-    /// reported through the notification channel (`ScanStarted`, `ScanProgress`,
-    /// `ScanCompleted`, `FailStartScanning`, `FailScan`). Use `is_scanning()` to
-    /// poll for completion and `stop_scan()` to cancel.
+    /// reported through the notification channel (`ScanStarted`,
+    /// `ScanReceiveProgress`, `ScanSpendProgress`, `ScanCompleted`,
+    /// `FailStartScanning`, `FailScan`). Use `is_scanning()` to poll for
+    /// completion and `stop_scan()` to cancel.
     pub fn scan_oneshot(&mut self, start: Option<u32>) -> Result<(), AccountError> {
         if self
             .scanner_handle

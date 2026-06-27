@@ -1013,7 +1013,7 @@ fn test_notification_order_full_sequence() {
     let notifs: Vec<_> = receiver
         .try_iter()
         .filter_map(|notif| match notif {
-            Notification::Sp(SpNotification::ScanProgress { .. }) => {
+            Notification::Sp(SpNotification::ScanReceiveProgress { .. }) => {
                 Some(TestNotification::ScanProgress)
             }
             Notification::Sp(SpNotification::NewOutput(outpoint)) => {

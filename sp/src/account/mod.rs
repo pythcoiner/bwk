@@ -1392,15 +1392,15 @@ mod tests {
             Notification::Sp(SpNotification::ScanStopped)
         ));
 
-        let notif = Notification::Sp(SpNotification::ScanProgress {
+        let notif = Notification::Sp(SpNotification::ScanReceiveProgress {
             current: 100,
             end: 200,
         });
-        if let Notification::Sp(SpNotification::ScanProgress { current, end }) = notif {
+        if let Notification::Sp(SpNotification::ScanReceiveProgress { current, end }) = notif {
             assert_eq!(current, 100);
             assert_eq!(end, 200);
         } else {
-            panic!("expected ScanProgress");
+            panic!("expected ScanReceiveProgress");
         }
 
         let notif = Notification::Sp(SpNotification::ScanCompleted);

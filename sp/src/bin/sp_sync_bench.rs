@@ -1085,6 +1085,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_print = Instant::now();
     let mut elapsed = Duration::ZERO;
 
+    let report_progress = |phase: &str,
+                           current: u32,
+                           end: u32,
+                           scan_start: Option<Instant>,
+                           block_count: u64,
+                           last_print: &mut Instant| {
+        let Some(t0) = scan_start else { return };
+        if last_print.elapsed().as_secs_f64() < PRINT_INTERVAL_SECS {
+            return;
+        }
+        *last_print = Instant::now();
+        let start = end + 1 - block_count as u32;
+        let processed = u64::from(current.saturating_sub(start)) + 1;
+        let secs = t0.elapsed().as_secs_f64().max(1e-9);
+        let rate = processed as f64 / secs;
+        let pct = processed as f64 / block_count.max(1) as f64 * 100.0;
+        let eta = if rate > 0.0 {
+            fmt_dur((block_count.saturating_sub(processed)) as f64 / rate)
+        } else {
+            "?".to_string()
+        };
+        println!("  {phase} [{pct:5.1}%] {processed}/{block_count}  {rate:.0} blk/s  ETA {eta}");
+    };
+
     while let Ok(notif) = rx.recv() {
         match notif {
             bwk_sp::Notification::Sp(bwk_sp::SpNotification::ScanStarted { start, end }) => {
@@ -1100,24 +1124,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  dust limit:   {dust} sat");
                 println!("scanning (real Account, OneShot)...");
             }
-            bwk_sp::Notification::Sp(bwk_sp::SpNotification::ScanProgress { current, end }) => {
-                let Some(t0) = scan_start else { continue };
-                if last_print.elapsed().as_secs_f64() < PRINT_INTERVAL_SECS {
-                    continue;
-                }
-                last_print = Instant::now();
-                let start = end + 1 - block_count as u32;
-                let processed = u64::from(current.saturating_sub(start)) + 1;
-                let secs = t0.elapsed().as_secs_f64().max(1e-9);
-                let rate = processed as f64 / secs;
-                let pct = processed as f64 / block_count.max(1) as f64 * 100.0;
-                let eta = if rate > 0.0 {
-                    fmt_dur((block_count.saturating_sub(processed)) as f64 / rate)
-                } else {
-                    "?".to_string()
-                };
-                println!("  [{pct:5.1}%] {processed}/{block_count}  {rate:.0} blk/s  ETA {eta}");
-            }
+            bwk_sp::Notification::Sp(bwk_sp::SpNotification::ScanReceiveProgress {
+                current,
+                end,
+            }) => report_progress(
+                "recv ",
+                current,
+                end,
+                scan_start,
+                block_count,
+                &mut last_print,
+            ),
+            bwk_sp::Notification::Sp(bwk_sp::SpNotification::ScanSpendProgress {
+                current,
+                end,
+            }) => report_progress(
+                "spend",
+                current,
+                end,
+                scan_start,
+                block_count,
+                &mut last_print,
+            ),
             bwk_sp::Notification::Sp(bwk_sp::SpNotification::ScanCompleted) => {
                 if let Some(t0) = scan_start {
                     elapsed = t0.elapsed();

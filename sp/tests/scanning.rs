@@ -718,7 +718,8 @@ fn test_scan_notifications() {
     // Non-blocking receive with timeout
     while let Ok(notif) = receiver.try_recv() {
         match notif {
-            Notification::Sp(SpNotification::ScanProgress { .. }) => saw_progress = true,
+            Notification::Sp(SpNotification::ScanReceiveProgress { .. })
+            | Notification::Sp(SpNotification::ScanSpendProgress { .. }) => saw_progress = true,
             Notification::Sp(SpNotification::ScanCompleted) => saw_completed = true,
             _ => {}
         }
@@ -1061,7 +1062,8 @@ fn test_background_scanner_detects_new_blocks() {
         while let Ok(notification) = receiver.try_recv() {
             match notification {
                 Notification::Sp(SpNotification::StartingScan)
-                | Notification::Sp(SpNotification::ScanProgress { .. })
+                | Notification::Sp(SpNotification::ScanReceiveProgress { .. })
+                | Notification::Sp(SpNotification::ScanSpendProgress { .. })
                 | Notification::Sp(SpNotification::ScanCompleted) => {
                     received_progress = true;
                 }
