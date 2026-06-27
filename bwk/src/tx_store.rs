@@ -192,6 +192,7 @@ impl<P: StorageProfile> TxStore<P> {
                     outputs: BTreeMap::new(),
                     fees: 0,
                     weight,
+                    timestamp: None,
                 };
                 if let Err(e) = self.store.insert(txid, entry) {
                     log::error!("TxStore::insert_updates insert: {e}");
@@ -234,6 +235,15 @@ impl<P: StorageProfile> TxStore<P> {
         }
     }
 
+    /// Sets the confirming block time of a transaction, if it is in the store.
+    pub fn update_timestamp(&mut self, txid: &Txid, timestamp: u64) {
+        match self.store.modify(txid, |e| e.timestamp = Some(timestamp)) {
+            Ok(true) => {}
+            Ok(false) => log::debug!("TxStore::update_timestamp: missing txid {txid}, skipping"),
+            Err(e) => log::error!("TxStore::update_timestamp: {e}"),
+        }
+    }
+
     /// Persists pending changes through the configured backend.
     pub fn persist(&mut self) {
         if let Err(e) = self.store.flush() {
@@ -268,6 +278,8 @@ pub struct TxEntry {
     fees: u64,
     /// Tx weight in wu
     weight: u64,
+    /// Block time of the confirming block, when known.
+    timestamp: Option<u64>,
 }
 
 impl Debug for TxEntry {
@@ -279,6 +291,7 @@ impl Debug for TxEntry {
             .field("outputs", &self.outputs)
             .field("fees", &self.fees)
             .field("weight", &self.weight)
+            .field("timestamp", &self.timestamp)
             .finish()
     }
 }
@@ -298,6 +311,7 @@ impl TxEntry {
             outputs: BTreeMap::new(),
             fees: 0,
             weight,
+            timestamp: None,
         }
     }
 
@@ -326,6 +340,9 @@ impl TxEntry {
     }
     pub fn weight(&self) -> u64 {
         self.weight
+    }
+    pub fn timestamp(&self) -> Option<u64> {
+        self.timestamp
     }
 
     pub fn is_complete(&self) -> bool {
@@ -370,6 +387,7 @@ mod tests {
             outputs: BTreeMap::new(),
             fees: 0,
             weight,
+            timestamp: None,
         }
     }
 
@@ -476,5 +494,18 @@ mod tests {
         );
         let back: Inclusion = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
+    }
+
+    #[test]
+    fn tx_entry_timestamp_round_trips() {
+        let mut entry = entry_with(Inclusion::ConfirmedUnverified {
+            height: 101,
+            block_hash: dummy_block_hash(),
+        });
+        entry.timestamp = Some(1_700_000_000);
+        let bytes = encode_entry(&entry).expect("encode");
+        let decoded = decode_entry(&bytes).expect("decode");
+        assert_eq!(decoded.height(), Some(101));
+        assert_eq!(decoded.timestamp(), Some(1_700_000_000));
     }
 }
