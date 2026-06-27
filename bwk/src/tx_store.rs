@@ -223,7 +223,15 @@ impl<P: StorageProfile> TxStore<P> {
 
     /// Replaces the inclusion state of a transaction in the store.
     pub fn update_inclusion(&mut self, txid: &Txid, inclusion: Inclusion) {
-        match self.store.modify(txid, |e| e.inclusion = inclusion.clone()) {
+        // A tx demoted back to unconfirmed (reorg) must drop its stale
+        // confirmation time; it is re-stamped from the chain when it reconfirms.
+        let clear_timestamp = matches!(inclusion, Inclusion::Unconfirmed);
+        match self.store.modify(txid, |e| {
+            e.inclusion = inclusion.clone();
+            if clear_timestamp {
+                e.timestamp = None;
+            }
+        }) {
             Ok(true) => {}
             // The txid may not be in the store yet: a History response can
             // report a height change for a tx whose body has not arrived via

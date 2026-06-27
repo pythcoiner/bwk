@@ -249,6 +249,31 @@ impl<P: StorageProfile> CoinStore<P> {
         }
     }
 
+    /// Stamp every confirmed, un-timestamped tx with its confirming block time,
+    /// looked up from the validated header chain via `block_time`. Persists if
+    /// any timestamp was written. Entries whose header the caller cannot resolve
+    /// yet are left untouched and stamped on a later pass.
+    pub fn stamp_confirmation_times(&mut self, block_time: impl Fn(u64) -> Option<u64>) {
+        let mut stamp = Vec::<(Txid, u64)>::new();
+        for (txid, entry) in self.tx_store.iter() {
+            if entry.timestamp().is_some() {
+                continue;
+            }
+            if let Some(height) = entry.height() {
+                if let Some(time) = block_time(height) {
+                    stamp.push((txid, time));
+                }
+            }
+        }
+        if stamp.is_empty() {
+            return;
+        }
+        for (txid, time) in stamp {
+            self.tx_store.update_timestamp(&txid, time);
+        }
+        self.tx_store.persist();
+    }
+
     /// Initializes the address store with a channel to the tx listener.
     ///
     /// This method sets up the address store to send updates to the

@@ -1197,6 +1197,9 @@ where
     }
 
     refresh_unconfirmed_history(&coin_store, &request);
+    // Stamp any already-confirmed entries loaded from disk (e.g. a quiet wallet
+    // that gets no fresh history traffic) from the validated header chain.
+    stamp_confirmation_times(&coin_store, &header_store);
 
     let mut backoff = Backoff::new_ms(20);
     loop {
@@ -1268,6 +1271,8 @@ where
                         {
                             return statuses;
                         }
+                        // Newly confirmed entries can now be stamped from the chain.
+                        stamp_confirmation_times(&coin_store, &header_store);
                     }
                     CoinResponse::Txs(txs) => {
                         handle_txs_response_msg(
@@ -1277,6 +1282,8 @@ where
                             &request,
                             &notification,
                         );
+                        // Tx bodies just completed newly confirmed entries; stamp them.
+                        stamp_confirmation_times(&coin_store, &header_store);
                     }
                     CoinResponse::TxMerkle {
                         txid,
@@ -1342,6 +1349,9 @@ where
         if chain_tick {
             received = true;
             on_chain_update(&coin_store, &header_store, &request, &notification);
+            // Promotions may have just given entries a height whose header has
+            // now landed; stamp their confirmation time from the chain.
+            stamp_confirmation_times(&coin_store, &header_store);
         }
 
         if received {
@@ -1744,6 +1754,17 @@ fn apply_tx_merkle<P: StorageProfile>(
             ValidationFailure::MerkleProof { txid, height },
         ));
     }
+}
+
+/// Stamp confirmed, un-timestamped txs with their block time, read from the
+/// validated header chain. Entries whose header has not synced yet are left for
+/// a later pass.
+fn stamp_confirmation_times<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+) {
+    let mut store = coin_store.lock().expect("poisoned");
+    store.stamp_confirmation_times(|h| header_store.header(h as u32).map(|hdr| hdr.time as u64));
 }
 
 /// Chain-tip-advance pass: promote-only, resolves pending claims and queues merkle fetches against the validated chain.
@@ -3680,6 +3701,31 @@ mod integration_tests {
         assert_eq!(2, payments.len());
         let sorted = sort_payments(&payments);
         assert_eq!(sorted, (1, 1));
+
+        // Every confirmed payment gets a block timestamp from the listener.
+        wait_until_timeout(
+            || {
+                account
+                    .payment_history()
+                    .iter()
+                    .filter(|p| p.height.is_some())
+                    .all(|p| p.timestamp.is_some_and(|t| t > 0))
+            },
+            block_wait(5),
+        );
+        let confirmed: Vec<_> = account
+            .payment_history()
+            .into_iter()
+            .filter(|p| p.height.is_some())
+            .collect();
+        assert!(!confirmed.is_empty(), "expected a confirmed payment");
+        for p in &confirmed {
+            assert!(
+                p.timestamp.is_some_and(|t| t > 0),
+                "confirmed payment {} should have a block timestamp",
+                p.txid
+            );
+        }
     }
 
     #[cfg(feature = "test")]
