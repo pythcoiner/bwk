@@ -1551,3 +1551,83 @@ fn test_spend_frontier_resume_skips_swept_heights() {
         "scan state should advance to the second scan's end"
     );
 }
+
+/// A scan stopped during the spend sweep (receive frontier already at the tip,
+/// spend frontier still behind) must finish the spend sweep on resume at the
+/// SAME tip, and must not re-run the receive pass.
+#[test]
+fn test_spend_only_resume_at_same_tip() {
+    use bwk_sp::scan::state::ScanState;
+    use common::{wait_for_oneshot_done, TestEnv};
+
+    let mut env = TestEnv::new();
+    let (mut account, config, _dir) =
+        test_account_persistent_named("spend-only-resume", &env.url());
+
+    // Fund an SP output and scan to tip: both frontiers reach `c`.
+    env.fund_sp(&mut account, 0.5);
+    let c = env.height;
+    let owned = {
+        let coins = account.coins();
+        assert_eq!(coins.len(), 1, "should own exactly one SP output");
+        let (op, entry) = coins.iter().next().unwrap();
+        assert!(entry.is_spendable(), "owned output should start unspent");
+        *op
+    };
+
+    // Spend the SP output on-chain; the spend is mined above `c`. Scope the
+    // builder so it drops (releasing its backend handle) before the account does.
+    let tx = {
+        let dest = env.taproot_addr(0);
+        let mut builder = account.tx_builder().feerate(1000);
+        builder.send_to(dest, 100_000);
+        for coin in builder.select_coins(100_000, 1000) {
+            builder.add_input(coin);
+        }
+        let mut psbt = builder.generate().expect("build spend tx");
+        account.sign_and_finalize(&mut psbt).expect("sign spend tx")
+    };
+    env.broadcast_and_mine(&tx);
+    let c2 = env.height;
+    assert!(c2 > c, "spend must be mined above the funded tip");
+
+    // Reproduce a scan stopped mid spend-sweep: push only the receive frontier to
+    // the new tip, leaving the spend frontier at `c`.
+    drop(account);
+    {
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(config.account_dir()).expect("open backend"));
+        let mut state = ScanState::load_from_backend(0, backend).expect("load scan state");
+        assert_eq!(state.last_scanned_height(), Some(c));
+        assert_eq!(state.last_spend_height(), Some(c));
+        state.set_last_scanned_height(c2);
+        state.persist();
+    }
+
+    // Resume at the same tip: receive is already done, only the spend sweep runs.
+    let mut account = bwk_sp::account::Account::new(config.clone()).expect("reopen account");
+    let receiver = account.receiver().expect("receiver");
+    account.scan_oneshot(None).expect("resume scan");
+    wait_for_oneshot_done(&account, Duration::from_secs(60));
+
+    // The receive pass must be skipped (no re-receive): no ScanReceiveProgress.
+    let mut saw_receive_progress = false;
+    while let Ok(notif) = receiver.try_recv() {
+        if let Notification::Sp(SpNotification::ScanReceiveProgress { .. }) = notif {
+            saw_receive_progress = true;
+        }
+    }
+    assert!(
+        !saw_receive_progress,
+        "resume must not re-run the receive pass"
+    );
+
+    // The spend-only sweep ran and marked the owned output spent.
+    let coins = account.coins();
+    let entry = coins.get(&owned).expect("owned coin still tracked");
+    assert!(
+        !entry.is_spendable(),
+        "spend-only resume should mark the owned output spent, got {:?}",
+        entry.status()
+    );
+}
