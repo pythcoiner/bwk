@@ -1734,3 +1734,38 @@ fn test_broadcast_requires_electrum_endpoint() {
         .expect_err("broadcast without endpoint must fail");
     assert!(matches!(err, AccountError::NoElectrumEndpoint));
 }
+
+/// The scan stamps a confirmation block time on recorded txs, fetched from
+/// blindbitd's embedded Electrum (blindbit itself has no block time).
+#[test]
+fn test_sp_scan_timestamps() {
+    use common::TestEnv;
+
+    let mut env = TestEnv::new();
+    let (host, port) = env.electrum_endpoint();
+
+    let dir = common::TempDir::new().unwrap();
+    let mut config = Config::new(
+        "sp-scan-timestamps".to_string(),
+        bitcoin::Network::Regtest,
+        common::test_mnemonic().to_string(),
+        env.url(),
+        dir.path().to_path_buf(),
+    );
+    config.set_electrum_endpoint(host, port);
+    let mut account = bwk_sp::account::Account::new(config).expect("create account");
+
+    // fund_sp funds the SP address and scans, recording the funding tx.
+    env.fund_sp(&mut account, 0.5);
+
+    let payment = account
+        .payment_history()
+        .into_iter()
+        .next()
+        .expect("one recorded payment");
+    assert!(
+        payment.timestamp.is_some_and(|t| t > 0),
+        "scan must stamp a block time, got {:?}",
+        payment.timestamp
+    );
+}

@@ -175,7 +175,7 @@ pub struct Account<
     sub_accounts: Vec<bwk::Account>,
     /// Shared HeaderStore handle every BIP32 sub-account's chain-tip-advance
     /// pass reads from.
-    header_store: Arc<bwk::header_store::HeaderStore>,
+    pub(crate) header_store: Arc<bwk::header_store::HeaderStore>,
     /// Electrum endpoint the shared HeaderStore currently follows, if any
     /// (the first sub-account descriptor carrying one). Used by
     /// `start_electrum` and `set_electrum_settings` to decide whether to
@@ -422,9 +422,8 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     /// configured sub-account descriptor carrying one.
     fn header_store_endpoint(config: &Config) -> Option<(String, u16)> {
         config
-            .descriptors
-            .iter()
-            .find_map(|d| d.electrum_url.clone().zip(d.electrum_port))
+            .electrum_endpoint()
+            .map(|(url, port)| (url.to_string(), port))
     }
 
     /// Build the shared HeaderStore for this account's BIP32 sub-accounts:
@@ -439,12 +438,14 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             .persist
             .then(|| config.account_dir().join(bwk::config::HEADERS_FILENAME));
         let (url, port) = Self::header_store_endpoint(config).unzip();
+        // Backfill from the birthday so the worker covers the scan range, whose
+        // confirmation block times the scanner reads from this store.
         Ok(bwk::header_store::HeaderStore::start_or_open(
             url,
             port,
             config.network,
             path,
-            None,
+            Some(config.min_birthday_height()),
         )?)
     }
 }

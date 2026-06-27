@@ -93,7 +93,7 @@ anyhow = { version = "1", optional = true }
 ureq = { workspace = true, features = ["gzip", "native-tls", "vendored"] }
 
 [dev-dependencies]
-blindbitd = { workspace = true }
+blindbitd = { workspace = true, features = ["electrum"] }
 bwk = { workspace = true, features = ["sp", "test"] }
 bwk-utils = { workspace = true, features = ["test"] }
 bwk-sign = { workspace = true, features = ["test"] }

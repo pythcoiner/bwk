@@ -500,6 +500,7 @@ mod instrumented {
             tx_store: Arc::new(Mutex::new(bwk_sp::account::tx_store::SpTxStore::new())),
             scan_state: Arc::new(Mutex::new(bwk_sp::scan::state::ScanState::new(start))),
             sender: _sender,
+            header_store: bwk::header_store::HeaderStore::new_in_memory(params.network),
         };
         // Seed one synthetic owned outpoint at the first scanned height so the spend
         // (input) sweep always runs over every block, process_spends short-circuits on an

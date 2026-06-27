@@ -285,6 +285,38 @@ pub struct ScanStores<P: SpStorageProfile> {
     pub tx_store: Arc<Mutex<crate::account::tx_store::SpTxStore<P>>>,
     pub scan_state: Arc<Mutex<ScanState>>,
     pub sender: mpsc::Sender<crate::Notification>,
+    pub header_store: Arc<bwk::header_store::HeaderStore>,
+}
+
+/// Resolve a block's time for `height` from the shared HeaderStore, whose worker
+/// follows the chain and stores every header (with its nTime). Non-blocking: a
+/// height the worker has not synced yet returns `None` and is stamped on a later
+/// scan by [`restamp_missing_timestamps`], so a scan never stalls waiting for a
+/// header (which never arrives at all when no endpoint worker is running).
+fn block_time<P: SpStorageProfile>(stores: &ScanStores<P>, height: u32) -> Option<u64> {
+    stores.header_store.header(height).map(|h| h.time as u64)
+}
+
+/// Fill in confirmation timestamps left `None` by an earlier scan (the header
+/// was not synced yet when the tx confirmed). Runs at the start of every scan so
+/// stragglers heal as the header worker catches up.
+fn restamp_missing_timestamps<P: SpStorageProfile>(stores: &ScanStores<P>) {
+    let mut tx_store = stores.tx_store.lock().expect("poisoned");
+    let mut stamped = false;
+    for entry in tx_store.transactions() {
+        if entry.timestamp.is_some() {
+            continue;
+        }
+        if let Some(height) = entry.height {
+            if let Some(time) = block_time(stores, height) {
+                tx_store.update_timestamp(&entry.txid, time);
+                stamped = true;
+            }
+        }
+    }
+    if stamped {
+        tx_store.persist();
+    }
 }
 
 /// Connection + fetch config for the blindbit backend. Grouped so the scan
@@ -406,6 +438,12 @@ fn record_outputs<P: SpStorageProfile>(
         store.persist();
     }
 
+    // Resolve block times before taking the tx_store lock (network fetch).
+    let times: HashMap<Txid, Option<u64>> = by_tx
+        .iter()
+        .map(|(txid, h)| (*txid, block_time(stores, *h)))
+        .collect();
+
     let mut tx_store = stores.tx_store.lock().expect("poisoned");
     for (txid, height) in by_tx {
         // Do not clobber an existing entry (e.g. our own outgoing spend whose
@@ -416,6 +454,9 @@ fn record_outputs<P: SpStorageProfile>(
             let mut entry = SpTxEntry::new(txid);
             entry.height = Some(height);
             tx_store.insert(entry);
+        }
+        if let Some(ts) = times.get(&txid).copied().flatten() {
+            tx_store.update_timestamp(&txid, ts);
         }
     }
     tx_store.persist();
@@ -452,9 +493,14 @@ fn record_inputs<P: SpStorageProfile>(
 
     if !confirmed_txids.is_empty() {
         let h = height.to_consensus_u32();
+        // Resolve the block time before taking the tx_store lock (network fetch).
+        let ts = block_time(stores, h);
         let mut tx_store = stores.tx_store.lock().expect("poisoned");
         for txid in confirmed_txids {
             tx_store.update_height(&txid, Some(h));
+            if let Some(ts) = ts {
+                tx_store.update_timestamp(&txid, ts);
+            }
         }
         tx_store.persist();
     }
@@ -1022,6 +1068,9 @@ fn process_scan<P: SpStorageProfile>(
     let start_u32 = scan.start.to_consensus_u32();
     let end_u32 = scan.end.to_consensus_u32();
 
+    // Heal any confirmation timestamps a prior scan could not resolve yet.
+    restamp_missing_timestamps(scan.stores);
+
     if spend_frontier(scan.stores)?.is_none() {
         if let Some(floor) = start_u32.checked_sub(1) {
             record_spend_frontier(scan.stores, Height::from_consensus(floor)?)?;
@@ -1135,6 +1184,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let sender = self.sender.clone();
         let stop = self.scanner_stop.clone();
         let min_birthday = self.config.min_birthday_height();
+        let header_store = self.header_store.clone();
 
         let handle = thread::spawn(move || {
             let with_cutthrough = blindbit::info(&agent, &blindbit_url)
@@ -1182,6 +1232,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 tx_store,
                 scan_state,
                 sender: sender.clone(),
+                header_store,
             };
 
             // Clamp so a spend-only pass (start_height == tip + 1) does not report
@@ -1241,6 +1292,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let sender = self.sender.clone();
         let stop = self.scanner_stop.clone();
         let mut first_start = start.map(|h| h.max(self.config.min_birthday_height()));
+        let header_store = self.header_store.clone();
 
         let handle = thread::spawn(move || {
             let mut last_notified_tip: Option<u32> = None;
@@ -1255,6 +1307,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 tx_store: tx_store.clone(),
                 scan_state: scan_state.clone(),
                 sender: sender.clone(),
+                header_store,
             };
 
             while !stop.load(Ordering::Relaxed) {
@@ -1432,6 +1485,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             tx_store: self.tx_store.clone(),
             scan_state: self.scan_state.clone(),
             sender: self.sender.clone(),
+            header_store: self.header_store.clone(),
         };
 
         scan_blocks(

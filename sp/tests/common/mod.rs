@@ -686,6 +686,9 @@ pub struct TestEnv {
     pub bitcoind: corepc_node::Node,
     pub height: u32,
     fund_index: u32,
+    /// Keeps blindbitd's embedded electrsd alive once taken (type-erased to avoid
+    /// an electrsd dev-dep). Populated by `electrum_endpoint`.
+    _electrs: Option<Box<dyn std::any::Any>>,
 }
 
 #[allow(dead_code)]
@@ -701,11 +704,26 @@ impl TestEnv {
             bitcoind,
             height: 101,
             fund_index: 0,
+            _electrs: None,
         }
     }
 
     pub fn url(&self) -> String {
         self.bbd.url()
+    }
+
+    /// Take blindbitd's embedded electrsd, keep it alive, and return its
+    /// `(host, port)` so an account can fetch block times during a scan.
+    pub fn electrum_endpoint(&mut self) -> (String, u16) {
+        let electrs = self
+            .bbd
+            .electrum()
+            .expect("blindbitd built with the electrum feature");
+        let url = electrs.electrum_url.clone();
+        let (host, port) = url.rsplit_once(':').expect("electrum url host:port");
+        let endpoint = (host.to_string(), port.parse().expect("electrum port"));
+        self._electrs = Some(Box::new(electrs));
+        endpoint
     }
 
     /// Create SP account with default mnemonic (no persistence).

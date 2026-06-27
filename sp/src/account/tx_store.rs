@@ -161,6 +161,15 @@ impl<P: SpStorageProfile> SpTxStore<P> {
         }
     }
 
+    pub fn update_timestamp(&mut self, txid: &Txid, timestamp: u64) {
+        if let Err(e) = self
+            .store
+            .modify(txid, |entry| entry.timestamp = Some(timestamp))
+        {
+            log::error!("SpTxStore::update_timestamp: {e}");
+        }
+    }
+
     pub fn update_label(&mut self, txid: &Txid, label: String) {
         if let Err(e) = self.store.modify(txid, |entry| entry.label = Some(label)) {
             log::error!("SpTxStore::update_label: {e}");
