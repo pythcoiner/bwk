@@ -29,6 +29,7 @@ use crate::{
     },
     config::{Config, Tip},
     header_store::{HeaderStore, InvalidCause},
+    history::{AccountHistory, TxContribution},
     label_store::{LabelKey, LabelStore},
     profile::{self, DefaultBackend, OpenFromBackend, RamProfile, StorageProfile, Stores},
     tx_store::{Inclusion, TxEntry, TxStore},
@@ -632,11 +633,21 @@ impl<P: StorageProfile> Account<P> {
 
     pub fn balance(&self) -> (u64, Vec<Payment>) {
         let payments = self.payment_history();
-        let balance = payments.iter().fold(0, |a, b| match b.payment_type {
+        let total = payments.iter().fold(0i128, |a, b| match b.payment_type {
             PaymentType::Receive => a + (b.amount as i128),
-            PaymentType::Send => a - (b.amount as i128),
-            PaymentType::ToSelf => unimplemented!(),
-        }) as u64;
+            // A send and a self-send both reduce the balance by their outflow
+            // (a self-send keeps the change but still pays the fee).
+            PaymentType::Send | PaymentType::ToSelf => a - (b.amount as i128),
+        });
+        // A negative total means the history is inconsistent (e.g. a send whose
+        // funding receive was dropped). Report zero loudly rather than wrapping
+        // the cast into a huge balance.
+        let balance = if total < 0 {
+            log::error!("balance(): negative running total {total}, reporting 0");
+            0
+        } else {
+            total as u64
+        };
         (balance, payments)
     }
     /// Returns a map of coins associated with the account.
@@ -672,7 +683,7 @@ impl<P: StorageProfile> Account<P> {
 
     /// Returns a list of all historical payments
     pub fn payment_history(&self) -> Vec<Payment> {
-        self.tx_history().into_iter().map(Into::into).collect()
+        crate::history::aggregate_payments([self as &dyn AccountHistory])
     }
 
     /// Updates the label of a coin identified by the given outpoint.
@@ -726,6 +737,63 @@ impl<P: StorageProfile> Account<P> {
             .lock()
             .expect("poisoned")
             .new_change_addr()
+    }
+}
+
+impl<P: StorageProfile> AccountHistory for Account<P> {
+    fn tx_contributions(&self) -> BTreeMap<Txid, TxContribution> {
+        let mut map = BTreeMap::new();
+        // Read tx history (which locks coin_store) before taking the label
+        // lock. On the listener thread CoinStore::generate holds coin_store and
+        // then locks label_store; taking the two in the opposite order here
+        // would deadlock the two threads.
+        let history = self.tx_history();
+        let labels = self.label_store().lock().expect("poisoned");
+        for entry in history {
+            let txid = entry.txid();
+            let owned_in = entry
+                .inputs
+                .values()
+                .filter(|m| m.owned)
+                .map(|m| {
+                    m.value.unwrap_or_else(|| {
+                        // populate_tx_metadata guarantees an owned input carries
+                        // its value; a missing one is a broken invariant.
+                        log::error!("tx_contributions: owned input without value in tx {txid}");
+                        0
+                    })
+                })
+                .sum();
+            let mut owned_out = 0u64;
+            let mut owned_vouts = BTreeSet::new();
+            for (idx, meta) in entry.outputs.iter() {
+                if meta.owned {
+                    if let Some(txout) = entry.tx().output.get(*idx) {
+                        owned_out += txout.value.to_sat();
+                        owned_vouts.insert(*idx as u32);
+                    }
+                }
+            }
+            // The tx label if set, else a label on any owned output's coin.
+            let label = labels.transaction(txid).or_else(|| {
+                owned_vouts
+                    .iter()
+                    .find_map(|vout| labels.outpoint(OutPoint::new(txid, *vout)))
+            });
+            map.insert(
+                txid,
+                TxContribution {
+                    owned_in,
+                    owned_out,
+                    owned_vouts,
+                    height: entry.height(),
+                    timestamp: entry.timestamp(),
+                    label,
+                    tx: Some(entry.tx().clone()),
+                },
+            );
+        }
+        map
     }
 }
 

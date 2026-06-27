@@ -55,39 +55,6 @@ pub struct Payment {
     pub timestamp: Option<u64>,
 }
 
-impl From<TxEntry> for Payment {
-    fn from(value: TxEntry) -> Self {
-        // FIXME: handle ToSelf
-        assert!(value.is_complete());
-        let inputs = value.inputs.iter().fold(0, |a, (_, b)| {
-            let v = if b.owned { b.value.unwrap_or(0) } else { 0 };
-            a + v
-        });
-        let mut outputs = 0;
-        for index in 0..value.tx().output.len() {
-            let amount = value.tx().output[index].value.to_sat();
-            let owned = value.outputs.get(&index).map(|o| o.owned).unwrap_or(false);
-            if owned {
-                outputs += amount;
-            }
-        }
-        let (payment_type, amount) = if inputs > outputs {
-            (PaymentType::Send, inputs - outputs)
-        } else {
-            (PaymentType::Receive, outputs - inputs)
-        };
-        let txid = bitcoin::consensus::encode::serialize_hex(&value.tx().compute_txid());
-        Self {
-            txid,
-            payment_type,
-            amount,
-            label: String::new(),
-            height: value.height(),
-            timestamp: value.timestamp(),
-        }
-    }
-}
-
 pub struct CoinStoreSource<P: StorageProfile = RamProfile<DefaultBackend>>(
     Arc<Mutex<CoinStore<P>>>,
 );
