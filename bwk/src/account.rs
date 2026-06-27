@@ -686,6 +686,16 @@ impl<P: StorageProfile> Account<P> {
         crate::history::aggregate_payments([self as &dyn AccountHistory])
     }
 
+    /// Record a just-broadcast spend as unconfirmed: owned inputs flip to
+    /// `Spent` and any owned change is surfaced immediately, before the listener
+    /// or a scan sees the tx on-chain.
+    pub fn record_unconfirmed_spend(&self, tx: &bitcoin::Transaction) {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .record_unconfirmed_tx(tx.clone());
+    }
+
     /// Updates the label of a coin identified by the given outpoint.
     ///
     /// # Arguments

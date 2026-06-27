@@ -315,6 +315,21 @@ impl TxEntry {
         }
     }
 
+    /// A just-broadcast, not-yet-confirmed entry: `Inclusion::Unconfirmed`, no
+    /// input/output metadata yet (filled by `CoinStore::generate`).
+    pub fn unconfirmed(tx: bitcoin::Transaction) -> Self {
+        let weight = tx.weight().to_wu();
+        Self {
+            tx,
+            inclusion: Inclusion::Unconfirmed,
+            inputs: BTreeMap::new(),
+            outputs: BTreeMap::new(),
+            fees: 0,
+            weight,
+            timestamp: None,
+        }
+    }
+
     pub fn txid(&self) -> Txid {
         self.tx.compute_txid()
     }

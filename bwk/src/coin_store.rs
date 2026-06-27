@@ -535,6 +535,18 @@ impl<P: StorageProfile> CoinStore<P> {
         self.generate();
     }
 
+    /// Record a just-broadcast transaction as unconfirmed and rebuild the coin
+    /// view: owned inputs flip to `Spent`, any owned change is surfaced as an
+    /// `Unconfirmed` coin. A later listener/scan confirmation upgrades it. No-op
+    /// on the tx body if it is already known (do not clobber a confirmed entry).
+    pub fn record_unconfirmed_tx(&mut self, tx: bitcoin::Transaction) {
+        let txid = tx.compute_txid();
+        if self.tx_store.get(&txid).is_none() {
+            self.tx_store.update(TxEntry::unconfirmed(tx));
+        }
+        self.generate();
+    }
+
     /// Generates the coin store from the transaction store.
     ///
     /// This method populates the coin store with coins based on the
