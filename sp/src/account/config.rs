@@ -40,6 +40,12 @@ pub struct Config {
     // Backend
     /// Blindbit server URL for chain data
     pub blindbit_url: String,
+    /// Electrum server URL for broadcasting spends (blindbit is read-only).
+    #[serde(default)]
+    pub electrum_url: Option<String>,
+    /// Electrum server port for broadcasting spends.
+    #[serde(default)]
+    pub electrum_port: Option<u16>,
 
     // Persistence
     /// Base directory for account data
@@ -113,6 +119,8 @@ impl Config {
             scan_sk: None,
             spend_key: None,
             blindbit_url,
+            electrum_url: None,
+            electrum_port: None,
             data_dir,
             persist: true,
             persist_kind: bwk::persist::PersistenceKind::default(),
@@ -167,6 +175,8 @@ impl Config {
             scan_sk: Some(scan_sk),
             spend_key: Some(spend_key),
             blindbit_url,
+            electrum_url: None,
+            electrum_port: None,
             data_dir,
             persist: true,
             persist_kind: bwk::persist::PersistenceKind::default(),
@@ -216,6 +226,20 @@ impl Config {
     /// Set the Blindbit server URL.
     pub fn set_blindbit_url(&mut self, url: String) {
         self.blindbit_url = url;
+    }
+
+    /// Returns the Electrum broadcast endpoint, if both url and port are set.
+    pub fn electrum_endpoint(&self) -> Option<(&str, u16)> {
+        match (&self.electrum_url, self.electrum_port) {
+            (Some(url), Some(port)) => Some((url.as_str(), port)),
+            _ => None,
+        }
+    }
+
+    /// Set the Electrum server endpoint used to broadcast spends.
+    pub fn set_electrum_endpoint(&mut self, url: String, port: u16) {
+        self.electrum_url = Some(url);
+        self.electrum_port = Some(port);
     }
 
     /// Set the dust limit in satoshis.

@@ -86,6 +86,9 @@ pub enum AccountError {
     /// Transaction building failed
     #[error("transaction error: {0}")]
     Transaction(String),
+    /// Broadcasting a transaction failed
+    #[error("broadcast error: {0}")]
+    Broadcast(String),
     /// Persistence backend or store-open failure (e.g. directory already locked).
     #[error("persistence error: {0}")]
     Persist(String),
@@ -1047,6 +1050,63 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     ) -> Result<bitcoin::Transaction, AccountError> {
         self.sign_psbt(psbt)?;
         Self::finalize(psbt)
+    }
+
+    /// Broadcast a signed spend via Electrum and, on success, inject it into
+    /// local state as unconfirmed (see [`Account::record_unconfirmed_spend`]).
+    ///
+    /// Returns `AccountError::Broadcast` if no Electrum endpoint is configured or
+    /// the send fails; nothing is injected unless the broadcast succeeds.
+    pub fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<Txid, AccountError> {
+        let (url, port) = self.config.electrum_endpoint().ok_or_else(|| {
+            AccountError::Broadcast("no electrum endpoint configured".to_string())
+        })?;
+        let mut client = bwk::bwk_electrum::client::Client::new(url, port)
+            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
+        client
+            .broadcast_tx(tx)
+            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
+        self.record_unconfirmed_spend(tx)
+    }
+
+    /// Inject a just-broadcast spend into local state as unconfirmed.
+    ///
+    /// Marks each spent SP input `Spent(txid)` (dropping it from spendable) and
+    /// inserts the outgoing transaction with no height. A later scan upgrades the
+    /// inputs to `Mined` and sets the transaction height. Only SP coins are
+    /// touched; sub-account inputs are left to their own listeners. `amount` is
+    /// the gross value of the spent SP inputs (SP change is unknown until scanned).
+    pub fn record_unconfirmed_spend(
+        &self,
+        tx: &bitcoin::Transaction,
+    ) -> Result<Txid, AccountError> {
+        let txid = tx.compute_txid();
+        let mut amount: u64 = 0;
+        {
+            let mut coin_store = self.coin_store.lock().expect("poisoned");
+            for input in &tx.input {
+                let outpoint = input.previous_output;
+                if let Some(entry) = coin_store.get(&outpoint) {
+                    amount += entry.amount_sat();
+                    coin_store.mark_spent(&outpoint, txid.to_byte_array());
+                    let _ = self
+                        .sender
+                        .send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
+                }
+            }
+            coin_store.persist();
+        }
+        {
+            let mut tx_store = self.tx_store.lock().expect("poisoned");
+            tx_store.insert(SpTxEntry::with_tx(
+                txid,
+                tx.clone(),
+                crate::account::tx_store::TxDirection::Outgoing,
+                amount,
+            ));
+            tx_store.persist();
+        }
+        Ok(txid)
     }
 
     /// Finalize a signed PSBT into a broadcast-ready transaction.
