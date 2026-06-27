@@ -1109,12 +1109,15 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 }
             };
 
-            let start_height = start
-                .unwrap_or_else(|| scan_state.lock().expect("poisoned").next_scan_start())
-                .max(min_birthday);
+            let (resume_start, spend_resume) = {
+                let st = scan_state.lock().expect("poisoned");
+                (st.next_scan_start(), st.next_spend_start())
+            };
+            let start_height = start.unwrap_or(resume_start).max(min_birthday);
 
-            if start_height > chain_height {
-                // Already at tip, nothing to scan.
+            // Caught up only when BOTH passes have reached the tip; an explicit
+            // override always forces a run.
+            if start.is_none() && start_height > chain_height && spend_resume > chain_height {
                 let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
                 return;
             }
@@ -1139,8 +1142,10 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 sender: sender.clone(),
             };
 
+            // Clamp so a spend-only pass (start_height == tip + 1) does not report
+            // a backwards range.
             let _ = sender.send(Notification::Sp(SpNotification::ScanStarted {
-                start: start_height,
+                start: start_height.min(chain_height),
                 end: chain_height,
             }));
 
@@ -1222,11 +1227,19 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                     }
                 };
 
-                let start_height = first_start
-                    .take()
-                    .unwrap_or_else(|| scan_state.lock().expect("poisoned").next_scan_start());
+                let override_start = first_start.take();
+                let (resume_start, spend_resume) = {
+                    let st = scan_state.lock().expect("poisoned");
+                    (st.next_scan_start(), st.next_spend_start())
+                };
+                let start_height = override_start.unwrap_or(resume_start);
 
-                if start_height > chain_height {
+                // Caught up only when BOTH passes have reached the tip; an
+                // override forces a run.
+                if override_start.is_none()
+                    && start_height > chain_height
+                    && spend_resume > chain_height
+                {
                     if !waiting {
                         let _ = sender.send(Notification::Sp(SpNotification::WaitingForBlocks {
                             tip_height: chain_height,
@@ -1259,7 +1272,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 };
 
                 let _ = sender.send(Notification::Sp(SpNotification::ScanStarted {
-                    start: start.to_consensus_u32(),
+                    start: start_height.min(chain_height),
                     end: end.to_consensus_u32(),
                 }));
 
@@ -1346,14 +1359,19 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         }
 
         // Custom range scan (legacy behavior)
-        let start_height =
-            start.unwrap_or_else(|| self.scan_state.lock().expect("poisoned").next_scan_start());
+        let (resume_start, spend_resume) = {
+            let st = self.scan_state.lock().expect("poisoned");
+            (st.next_scan_start(), st.next_spend_start())
+        };
+        let start_height = start.unwrap_or(resume_start);
         let end_height = match end {
             Some(h) => h,
             None => self.block_height()?,
         };
 
-        if start_height > end_height {
+        // Nothing to do only when both passes have reached the end; otherwise fall
+        // through so a trailing spend sweep still runs.
+        if start_height > end_height && spend_resume > end_height {
             return Ok(());
         }
 
