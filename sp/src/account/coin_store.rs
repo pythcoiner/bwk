@@ -226,17 +226,29 @@ impl<P: SpStorageProfile> SpCoinStore<P> {
 
     pub fn mark_spent(&mut self, outpoint: &OutPoint, spending_txid: [u8; 32]) {
         if let Err(e) = self.store.modify(outpoint, |entry| {
-            entry.output.spend_status = OutputSpendStatus::Spent(spending_txid);
+            entry.output.spend_status = OutputSpendStatus::Spent {
+                txid: spending_txid,
+                block_hash: None,
+            };
         }) {
             log::error!("SpCoinStore::mark_spent: {e}");
         }
     }
 
-    pub fn mark_mined(&mut self, outpoint: &OutPoint, block_hash: [u8; 32]) {
+    /// Mark a spent output as confirmed in `block_hash`. A spend we already know
+    /// the txid of (our own broadcast) keeps that txid; a spend first seen by a
+    /// scan, with an unknown txid, becomes `Mined`.
+    pub fn confirm_spend(&mut self, outpoint: &OutPoint, block_hash: [u8; 32]) {
         if let Err(e) = self.store.modify(outpoint, |entry| {
-            entry.output.spend_status = OutputSpendStatus::Mined(block_hash);
+            entry.output.spend_status = match entry.output.spend_status {
+                OutputSpendStatus::Spent { txid, .. } => OutputSpendStatus::Spent {
+                    txid,
+                    block_hash: Some(block_hash),
+                },
+                _ => OutputSpendStatus::Mined(block_hash),
+            };
         }) {
-            log::error!("SpCoinStore::mark_mined: {e}");
+            log::error!("SpCoinStore::confirm_spend: {e}");
         }
     }
 
@@ -326,10 +338,8 @@ impl<P: SpStorageProfile> SpCoinStore<P> {
         for (outpoint, entry) in iter {
             let bucket = by_spk.entry(entry.script().clone()).or_default();
             bucket.0.insert(outpoint.txid);
-            if let OutputSpendStatus::Spent(spending_txid) = entry.status() {
-                bucket
-                    .1
-                    .insert(bitcoin::Txid::from_byte_array(*spending_txid));
+            if let OutputSpendStatus::Spent { txid, .. } = entry.status() {
+                bucket.1.insert(bitcoin::Txid::from_byte_array(*txid));
             }
         }
         by_spk
@@ -568,7 +578,10 @@ mod tests {
             amount: Amount::from_sat(amount_sats),
             script: ScriptBuf::new(),
             label: None,
-            spend_status: OutputSpendStatus::Spent([0u8; 32]),
+            spend_status: OutputSpendStatus::Spent {
+                txid: [0u8; 32],
+                block_hash: None,
+            },
         }
     }
 
@@ -666,20 +679,41 @@ mod tests {
 
         let entry = store.get(&outpoint).unwrap();
         assert!(!entry.is_spendable());
-        assert!(matches!(entry.status(), OutputSpendStatus::Spent(txid) if *txid == spending_txid));
+        assert!(
+            matches!(entry.status(), OutputSpendStatus::Spent { txid, block_hash: None } if *txid == spending_txid)
+        );
     }
 
     #[test]
-    fn test_coin_store_mark_mined() {
+    fn test_coin_store_confirm_spend_unknown_txid_is_mined() {
         let mut store = SpCoinStore::new();
         let outpoint = test_outpoint();
         store.insert(outpoint, test_owned_output(10000));
 
         let block_hash = [99u8; 32];
-        store.mark_mined(&outpoint, block_hash);
+        store.confirm_spend(&outpoint, block_hash);
 
         let entry = store.get(&outpoint).unwrap();
         assert!(matches!(entry.status(), OutputSpendStatus::Mined(hash) if *hash == block_hash));
+    }
+
+    #[test]
+    fn test_coin_store_confirm_spend_keeps_known_txid() {
+        let mut store = SpCoinStore::new();
+        let outpoint = test_outpoint();
+        store.insert(outpoint, test_owned_output(10000));
+
+        let spending_txid = [7u8; 32];
+        store.mark_spent(&outpoint, spending_txid);
+        let block_hash = [99u8; 32];
+        store.confirm_spend(&outpoint, block_hash);
+
+        let entry = store.get(&outpoint).unwrap();
+        assert!(matches!(
+            entry.status(),
+            OutputSpendStatus::Spent { txid, block_hash: Some(h) }
+                if *txid == spending_txid && *h == block_hash
+        ));
     }
 
     #[test]
@@ -826,7 +860,10 @@ mod tests {
     fn owned_at(spk: ScriptBuf, spending: Option<[u8; 32]>) -> OwnedOutput {
         let spend_status = match spending {
             None => OutputSpendStatus::Unspent,
-            Some(txid_bytes) => OutputSpendStatus::Spent(txid_bytes),
+            Some(txid_bytes) => OutputSpendStatus::Spent {
+                txid: txid_bytes,
+                block_hash: None,
+            },
         };
         OwnedOutput {
             blockheight: Height::from_consensus(100).unwrap(),

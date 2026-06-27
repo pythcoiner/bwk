@@ -66,7 +66,14 @@ type MinedInBlock = [u8; 32];
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum OutputSpendStatus {
     Unspent,
-    Spent(SpendingTxId),
+    /// Spent by a known transaction (our own broadcast). `block_hash` is set
+    /// once the spend confirms; the spending txid is retained through
+    /// confirmation so the spend can be attributed to its transaction.
+    Spent {
+        txid: SpendingTxId,
+        block_hash: Option<MinedInBlock>,
+    },
+    /// A spend discovered by a scan with an unknown spending txid, already mined.
     Mined(MinedInBlock),
 }
 

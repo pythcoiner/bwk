@@ -445,7 +445,10 @@ pub fn test_spent_output(height: u32, amount: u64) -> OwnedOutput {
         amount: Amount::from_sat(amount),
         script: ScriptBuf::new(),
         label: None,
-        spend_status: OutputSpendStatus::Spent([0u8; 32]),
+        spend_status: OutputSpendStatus::Spent {
+            txid: [0u8; 32],
+            block_hash: None,
+        },
     }
 }
 
@@ -1077,7 +1080,10 @@ mod tests {
 
         assert_eq!(output.blockheight.to_consensus_u32(), 100);
         assert_eq!(output.amount.to_sat(), 50000);
-        assert!(matches!(output.spend_status, OutputSpendStatus::Spent(_)));
+        assert!(matches!(
+            output.spend_status,
+            OutputSpendStatus::Spent { .. }
+        ));
     }
 
     #[test]

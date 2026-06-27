@@ -432,19 +432,19 @@ fn record_inputs<P: SpStorageProfile>(
     height: Height,
     inputs: HashSet<OutPoint>,
 ) -> Result<(), receiver::error::Error> {
-    // A coin already marked `Spent(txid)` came from our own broadcast inject; the
-    // txid lets us confirm that outgoing tx now that its spend is mined. Read it
-    // before `mark_mined` overwrites the status.
+    // A coin already marked `Spent { txid, .. }` came from our own broadcast
+    // inject; the txid lets us confirm that outgoing tx now that its spend is
+    // mined. Read it before `confirm_spend` records the block hash.
     let mut confirmed_txids = Vec::new();
     {
         let mut store = stores.coin_store.lock().expect("poisoned");
         for outpoint in inputs {
             if let Some(entry) = store.get(&outpoint) {
-                if let OutputSpendStatus::Spent(txid_bytes) = entry.status() {
-                    confirmed_txids.push(Txid::from_byte_array(*txid_bytes));
+                if let OutputSpendStatus::Spent { txid, .. } = entry.status() {
+                    confirmed_txids.push(Txid::from_byte_array(*txid));
                 }
             }
-            store.mark_mined(&outpoint, *block_hash.as_byte_array());
+            store.confirm_spend(&outpoint, *block_hash.as_byte_array());
             let _ = stores
                 .sender
                 .send(crate::Notification::Sp(SpNotification::OutputSpent(
