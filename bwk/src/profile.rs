@@ -392,4 +392,39 @@ mod tests {
             "change_index must be stored as a JSON number, got {on_disk}"
         );
     }
+
+    #[test]
+    fn open_statuses_reopens_persisted_rows() {
+        // The panic-recovery fallback (`reopen_statuses`, built from
+        // `open_statuses`) must reopen the same statuses rows a running listener
+        // persisted, so a restart after a lost handback keeps the wallet tracked.
+        use miniscript::bitcoin::ScriptBuf;
+        let dir = temp_dir::TempDir::new().expect("tempdir");
+        let spk = ScriptBuf::from(vec![0x51u8]);
+        {
+            let backend: Arc<dyn PersistenceBackend> =
+                Arc::new(JsonBackend::open(dir.path().to_path_buf()).expect("open JsonBackend"));
+            let mut store = RamStore::open(
+                backend,
+                bwk_persist::STATUSES_STORE_KEY,
+                encode_status_key,
+                decode_status_key,
+                encode_status_value,
+                decode_status_value,
+            )
+            .expect("open statuses RamStore");
+            store
+                .insert(spk.clone(), (Some("deadbeef".to_string()), 0, 7))
+                .expect("insert status");
+            store.flush().expect("flush");
+        }
+
+        let backend: Arc<dyn PersistenceBackend> =
+            Arc::new(JsonBackend::open(dir.path().to_path_buf()).expect("reopen JsonBackend"));
+        let reopened = RamProfile::<DefaultBackend>::open_statuses(backend).expect("open_statuses");
+        assert_eq!(
+            reopened.get(&spk).expect("get status"),
+            Some((Some("deadbeef".to_string()), 0, 7))
+        );
+    }
 }

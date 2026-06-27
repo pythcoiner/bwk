@@ -3040,8 +3040,11 @@ mod tests {
 mod integration_tests {
 
     use rand::random_range;
-    use std::{collections::BTreeMap, env, path::PathBuf, thread::sleep, time::Duration};
+    use std::{
+        collections::BTreeMap, env, path::PathBuf, sync::mpsc, thread::sleep, time::Duration,
+    };
 
+    use super::{Notification, TxListenerNotif};
     use crate::{
         coin_store::Payment,
         config::{maybe_create_dir, Config},
@@ -3599,6 +3602,94 @@ mod integration_tests {
         assert_eq!(2, payments.len());
         let sorted = sort_payments(&payments);
         assert_eq!(sorted, (1, 1));
+    }
+
+    #[cfg(feature = "test")]
+    #[test]
+    fn test_electrum_restart() {
+        let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+        generate(&bitcoind, 100);
+
+        let dir = TempDir::new().unwrap();
+        let mut path = dir.path().to_path_buf();
+        path.push(".bwk");
+        maybe_create_dir(&path);
+        let path = path.parent().unwrap().to_path_buf();
+
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "account_dir".to_string(),
+            bitcoin::Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            path,
+            ".bwk".to_string(),
+            true,
+        )
+        .unwrap();
+        config.network = Network::Regtest;
+        config.look_ahead = 20;
+        config.set_electrum_url(url);
+        config.set_electrum_port(port.to_string());
+        config.set_mnemonic(mnemonic.to_string());
+        let mut account = Account::new(config);
+        let notif = account.receiver().expect("receiver");
+        sleep(Duration::from_millis(300));
+
+        // Blocks until a notification matching `want` arrives (drain first so
+        // the match is post-restart).
+        let wait_notif =
+            |notif: &mpsc::Receiver<Notification>, want: fn(&Notification) -> bool| -> bool {
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                while std::time::Instant::now() < deadline {
+                    if let Ok(n) = notif.recv_timeout(Duration::from_millis(200)) {
+                        if want(&n) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            };
+        let is_started =
+            |n: &Notification| matches!(n, Notification::Electrum(TxListenerNotif::Started));
+        let is_stopped =
+            |n: &Notification| matches!(n, Notification::Electrum(TxListenerNotif::Stopped));
+
+        // The listener works before any restart.
+        let blocks = receive(&mut account, &bitcoind, 200_000);
+        wait_until_timeout(|| account.coins().len() == 1, block_wait(blocks));
+
+        // stop marks the account offline and the listener emits Stopped; a
+        // following start restarts it in place (no panic, fresh Started) and the
+        // statuses store handed back through the channel keeps the wallet tracked.
+        while notif.try_recv().is_ok() {}
+        account.stop_electrum();
+        assert!(
+            account.electrum_offline(),
+            "stop_electrum did not mark offline"
+        );
+        assert!(
+            wait_notif(&notif, is_stopped),
+            "listener did not emit Stopped"
+        );
+        account.start_electrum();
+        assert!(
+            wait_notif(&notif, is_started),
+            "listener did not restart on stop+start"
+        );
+        wait_until_timeout(|| !account.electrum_offline(), 15);
+        let blocks = receive(&mut account, &bitcoind, 150_000);
+        wait_until_timeout(|| account.coins().len() == 2, block_wait(blocks));
+
+        // restart_electrum() (the in-place path) behaves the same.
+        while notif.try_recv().is_ok() {}
+        account.restart_electrum();
+        assert!(
+            wait_notif(&notif, is_started),
+            "listener did not restart on restart_electrum"
+        );
+        let blocks = receive(&mut account, &bitcoind, 120_000);
+        wait_until_timeout(|| account.coins().len() == 3, block_wait(blocks));
     }
 
     #[test]
