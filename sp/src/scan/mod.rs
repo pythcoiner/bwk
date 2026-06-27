@@ -346,13 +346,9 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     with_cutthrough: bool,
     block_data_observer: Option<BlockDataObserver>,
 ) -> Result<(), receiver::error::Error> {
-    if start > end {
-        return Err(receiver::error::Error::InvalidRange(
-            start.to_consensus_u32(),
-            end.to_consensus_u32(),
-        ));
-    }
-
+    // `start > end` is allowed: it means the receive pass is already at the tip
+    // and only the trailing spend sweep needs to run. `process_scan` decides
+    // per phase and errors if neither phase has work.
     log::info!("start: {} end: {}", start, end);
     let start_time = Instant::now();
     let owned = stores.coin_store.lock().expect("poisoned").all_outpoints();
@@ -480,6 +476,21 @@ fn spend_frontier<P: SpStorageProfile>(
         .lock()
         .expect("poisoned")
         .last_spend_height())
+}
+
+/// Where the spend sweep starts for a scan beginning at `start_u32`.
+///
+/// A normal resume (`start_u32` past the spend frontier) resumes at frontier + 1
+/// so already-swept heights are skipped. An explicit override at or below the
+/// frontier (`start_u32 <= f`) re-sweeps from the override. With no frontier yet,
+/// it starts at `start_u32`.
+fn effective_spend_start<P: SpStorageProfile>(
+    stores: &ScanStores<P>,
+    start_u32: u32,
+) -> Result<u32, receiver::error::Error> {
+    Ok(spend_frontier(stores)?
+        .map(|f| if start_u32 <= f { start_u32 } else { f + 1 })
+        .unwrap_or(start_u32))
 }
 
 fn scan_utxos(
@@ -905,9 +916,7 @@ fn process_spends<P: SpStorageProfile>(
 ) -> Result<(), receiver::error::Error> {
     let start_u32 = scan.start.to_consensus_u32();
     let end_u32 = scan.end.to_consensus_u32();
-    let spend_start = spend_frontier(scan.stores)?
-        .map(|h| h + 1)
-        .unwrap_or(start_u32);
+    let spend_start = effective_spend_start(scan.stores, start_u32)?;
 
     // Own nothing (or already swept): a future block can only spend an output we
     // own, so the frontier jumps straight to `end` with no fetching.
@@ -969,6 +978,7 @@ fn process_scan<P: SpStorageProfile>(
     scan: &mut ScanContext<P>,
 ) -> Result<(), receiver::error::Error> {
     let start_u32 = scan.start.to_consensus_u32();
+    let end_u32 = scan.end.to_consensus_u32();
 
     if spend_frontier(scan.stores)?.is_none() {
         if let Some(floor) = start_u32.checked_sub(1) {
@@ -977,16 +987,26 @@ fn process_scan<P: SpStorageProfile>(
         }
     }
 
-    #[cfg(feature = "scan-profile")]
-    let recv_t = Instant::now();
-    let (sender, receiver) = channel::bounded(fetch_channel_cap());
-    fetch_blocks(sender, backend, scan);
-    let interrupted = process_blocks(backend, scan, receiver)?;
-    #[cfg(feature = "scan-profile")]
-    profiling::add(&profiling::RECEIVE_WALL_NS, recv_t.elapsed());
-    if interrupted {
-        // Interrupted mid-scan; process_blocks already persisted state.
-        return Ok(());
+    // The two passes resume from their own frontiers, so a stop during the spend
+    // sweep can be resumed at the same tip (receive done, spend still trailing).
+    let receive_has_work = start_u32 <= end_u32;
+    let spend_has_work = effective_spend_start(scan.stores, start_u32)? <= end_u32;
+    if !receive_has_work && !spend_has_work {
+        return Err(receiver::error::Error::InvalidRange(start_u32, end_u32));
+    }
+
+    if receive_has_work {
+        #[cfg(feature = "scan-profile")]
+        let recv_t = Instant::now();
+        let (sender, receiver) = channel::bounded(fetch_channel_cap());
+        fetch_blocks(sender, backend, scan);
+        let interrupted = process_blocks(backend, scan, receiver)?;
+        #[cfg(feature = "scan-profile")]
+        profiling::add(&profiling::RECEIVE_WALL_NS, recv_t.elapsed());
+        if interrupted {
+            // Interrupted mid-scan; process_blocks already persisted state.
+            return Ok(());
+        }
     }
 
     #[cfg(feature = "scan-profile")]
