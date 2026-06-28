@@ -479,6 +479,37 @@ impl<P: OpenFromBackend> Account<P> {
     }
 }
 
+/// Keychain discriminants stored in the statuses value `(status, keychain,
+/// index)`, shared by the writer (`handle_address_tip`) and the reader
+/// (`max_tip_from_statuses`).
+const STATUS_KEYCHAIN_RECEIVE: u32 = 0;
+const STATUS_KEYCHAIN_CHANGE: u32 = 1;
+
+/// Largest receive and change index recorded in the statuses store. Used as a
+/// floor for the restored tip. The statuses store covers the whole watch window
+/// (generated tip plus look-ahead), so the caller subtracts the look-ahead to
+/// get back to the generated tip.
+fn max_tip_from_statuses<S>(statuses: &S) -> (u32, u32)
+where
+    S: Store<Value = (Option<String>, u32, u32)>,
+{
+    let mut max_recv = 0;
+    let mut max_change = 0;
+    match statuses.values() {
+        Ok(values) => {
+            for (_, keychain, index) in values {
+                match keychain {
+                    STATUS_KEYCHAIN_RECEIVE => max_recv = max_recv.max(index),
+                    STATUS_KEYCHAIN_CHANGE => max_change = max_change.max(index),
+                    _ => {}
+                }
+            }
+        }
+        Err(e) => log::error!("max_tip_from_statuses(): failed to read statuses values: {e}"),
+    }
+    (max_recv, max_change)
+}
+
 impl<P: StorageProfile> Account<P> {
     fn from_stores(
         config: Config,
@@ -499,6 +530,16 @@ impl<P: StorageProfile> Account<P> {
             Tip::from_account_store(&*store)
         };
         let Tip { receive, change } = tip;
+        // Floor the tip with the highest index recorded in statuses, so the
+        // regenerated watch window covers every persisted subscribed script even
+        // when the tip rows are missing or stale. The statuses store spans the
+        // whole watch window (generated tip plus look-ahead), so drop the
+        // look-ahead to recover the generated tip. Without this the generated tip
+        // would climb by one look-ahead window on every reopen.
+        let (stat_recv, stat_change) = max_tip_from_statuses(&stores.statuses);
+        let look_ahead = config.look_ahead;
+        let receive = receive.max(stat_recv.saturating_sub(look_ahead));
+        let change = change.max(stat_change.saturating_sub(look_ahead));
         let coin_store = Arc::new(Mutex::new(CoinStore::new(
             config.network,
             config.descriptor.clone(),
@@ -1436,7 +1477,7 @@ fn handle_address_tip<P: StorageProfile>(
         for i in 0..recv {
             let spk = derivator.receive_at(i).script_pubkey();
             if !statuses.contains_key(&spk).unwrap_or(false) {
-                if let Err(e) = statuses.insert(spk.clone(), (None, 0, i)) {
+                if let Err(e) = statuses.insert(spk.clone(), (None, STATUS_KEYCHAIN_RECEIVE, i)) {
                     log::error!("listen_txs(): statuses insert: {e}");
                     continue;
                 }
@@ -1450,7 +1491,7 @@ fn handle_address_tip<P: StorageProfile>(
         for i in 0..change {
             let spk = derivator.change_at(i).script_pubkey();
             if !statuses.contains_key(&spk).unwrap_or(false) {
-                if let Err(e) = statuses.insert(spk.clone(), (None, 1, i)) {
+                if let Err(e) = statuses.insert(spk.clone(), (None, STATUS_KEYCHAIN_CHANGE, i)) {
                     log::error!("listen_txs(): statuses insert: {e}");
                     continue;
                 }
@@ -1847,6 +1888,7 @@ mod tests {
     use bwk_utils::test::{funding_tx, setup_logger, spending_tx};
     use miniscript::bitcoin::{bip32::ChildNumber, Network};
     use std::{path::PathBuf, str::FromStr, sync::mpsc::TryRecvError, time::Duration};
+    use temp_dir::TempDir;
     use {bip39, miniscript::bitcoin::bip32::DerivationPath};
 
     struct CoinStoreMock {
@@ -2536,6 +2578,151 @@ mod tests {
             "tx wrongly promoted to {:?} (expected Unconfirmed)",
             entry.inclusion(),
         );
+    }
+
+    fn persisted_offline_config(dir: &TempDir, look_ahead: u32) -> Config {
+        let mnemonic = Mnemonic::generate(12).unwrap();
+        let mut config = Config::new(
+            Some(mnemonic.to_string()),
+            "acct".to_string(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            dir.path().to_path_buf(),
+            ".bwk".to_string(),
+            true, // persist
+        )
+        .unwrap();
+        config.look_ahead = look_ahead;
+        config.set_offline(true);
+        config
+    }
+
+    #[test]
+    fn restart_restores_deep_change_tip_and_high_index_history_no_panic() {
+        // Regression for the `address_store.rs "must be there"` panic on
+        // wallets whose used range exceeds look_ahead. Drive the change tip
+        // past look_ahead, reopen, then deliver history for a script beyond
+        // the restored window.
+        let dir = TempDir::new().unwrap();
+        let config = persisted_offline_config(&dir, 2);
+        let saved = config.clone();
+
+        let derivator;
+        {
+            let mut account: Account = Account::new(config);
+            for _ in 0..10 {
+                account.new_change_addr();
+            }
+            derivator = account.derivator();
+            assert!(account.change_watch_tip() >= 10);
+            drop(account);
+        }
+
+        // Reopen: the tip must be restored (fix 1), not reset to 0.
+        let account: Account = Account::new(saved);
+        assert!(
+            account.change_watch_tip() >= 10,
+            "change tip must survive restart, got {}",
+            account.change_watch_tip()
+        );
+
+        // History for a change script past the restored window must extend the
+        // store rather than panic (fix 3).
+        let beyond = account.change_watch_tip() + 5;
+        let spk = derivator.change_at(beyond).script_pubkey();
+        {
+            let mut store = account.coin_store.lock().expect("poisoned");
+            let mut map = BTreeMap::new();
+            map.insert(spk.clone(), vec![]);
+            store.handle_history_response(map);
+        }
+        assert!(
+            account.change_watch_tip() > beyond,
+            "store must extend to cover the reported high-index script"
+        );
+        drop(account);
+    }
+
+    #[test]
+    fn tip_restored_from_statuses_when_account_store_empty() {
+        // The watch window must cover persisted subscriptions even when the
+        // tip rows are absent (fix 2): seed statuses with a high-index change
+        // script, write no tip, then open the account.
+        let dir = TempDir::new().unwrap();
+        let config = persisted_offline_config(&dir, 2);
+
+        let account_dir = config.account_dir();
+        {
+            let backend: Arc<dyn PersistenceBackend> =
+                Arc::new(bwk_persist::JsonBackend::open(account_dir).unwrap());
+            let mut statuses = bwk_persist::RamStore::open(
+                backend,
+                bwk_persist::STATUSES_STORE_KEY,
+                crate::profile::encode_status_key,
+                crate::profile::decode_status_key,
+                crate::profile::encode_status_value,
+                crate::profile::decode_status_value,
+            )
+            .unwrap();
+            statuses
+                .insert(ScriptBuf::from_bytes(vec![0x00; 22]), (None, 1, 30))
+                .unwrap();
+            statuses.flush().unwrap();
+        }
+
+        let account: Account = Account::new(config);
+        assert!(
+            account.change_watch_tip() >= 30,
+            "change tip must be floored by the statuses max index, got {}",
+            account.change_watch_tip()
+        );
+        drop(account);
+    }
+
+    #[cfg(feature = "test")]
+    #[test]
+    fn statuses_floor_does_not_inflate_generated_tip() {
+        // The statuses store spans the whole watch window (generated tip plus
+        // look-ahead), so its max index is `generated + look_ahead`. Flooring the
+        // restored tip with that raw max would climb the generated tip by one
+        // look-ahead on every reopen. Seed a change status at the top of the
+        // window for generated tip 10 (look-ahead 2, so index 12) and assert the
+        // restored watch tip is 13 (generated 10 + 2 + 1), not 15 (an inflated
+        // generated tip of 12).
+        let look_ahead = 2u32;
+        let generated = 10u32;
+        let dir = TempDir::new().unwrap();
+        let config = persisted_offline_config(&dir, look_ahead);
+
+        let account_dir = config.account_dir();
+        {
+            let backend: Arc<dyn PersistenceBackend> =
+                Arc::new(bwk_persist::JsonBackend::open(account_dir).unwrap());
+            let mut statuses = bwk_persist::RamStore::open(
+                backend,
+                bwk_persist::STATUSES_STORE_KEY,
+                crate::profile::encode_status_key,
+                crate::profile::decode_status_key,
+                crate::profile::encode_status_value,
+                crate::profile::decode_status_value,
+            )
+            .unwrap();
+            statuses
+                .insert(
+                    ScriptBuf::from_bytes(vec![0x01; 22]),
+                    (None, 1, generated + look_ahead),
+                )
+                .unwrap();
+            statuses.flush().unwrap();
+        }
+
+        let account: Account = Account::new(config);
+        assert_eq!(
+            account.change_watch_tip(),
+            generated + look_ahead + 1,
+            "generated tip must not be inflated by the look-ahead on reopen"
+        );
+        drop(account);
     }
 
     #[test]

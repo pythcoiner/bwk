@@ -1814,7 +1814,6 @@ fn test_sp_address_format_valid() {
     let sp_addr = account.sp_address();
     let addr_str = sp_addr.to_string();
 
-    // 6. Verify address format
     assert!(!addr_str.is_empty(), "SP address should not be empty");
 
     // For regtest/testnet, address should start with "tsp" or "sp"
@@ -1852,7 +1851,6 @@ fn test_sp_address_deterministic() {
     let account1 = bwk_sp::account::Account::new(config1).unwrap();
     let addr1 = account1.sp_address().to_string();
 
-    // 5. Create second Account with same mnemonic
     let dir2 = TempDir::new().unwrap();
     let config2 = Config::new(
         "test-sp-addr-2".to_string(),
@@ -1866,7 +1864,6 @@ fn test_sp_address_deterministic() {
     let account2 = bwk_sp::account::Account::new(config2).unwrap();
     let addr2 = account2.sp_address().to_string();
 
-    // 6. Verify addresses are identical
     assert_eq!(
         addr1, addr2,
         "SP addresses from same mnemonic should be identical"
@@ -1900,7 +1897,6 @@ fn test_sp_address_different_per_mnemonic() {
     let account1 = bwk_sp::account::Account::new(config1).unwrap();
     let addr1 = account1.sp_address().to_string();
 
-    // 5. Create second Account with different mnemonic
     // Use a different valid BIP39 mnemonic
     let different_mnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
 

@@ -1,4 +1,5 @@
 use bwk_descriptor::derivator::SpkDerivator;
+use bwk_persist::Store;
 use bwk_tx::{coin::KeyChain, tx_builder::ChangeTip};
 use miniscript::bitcoin::{self, address::NetworkUnchecked, Script, ScriptBuf, Txid};
 use serde::{Deserialize, Serialize};
@@ -186,6 +187,12 @@ impl<P: StorageProfile> AddressStore<P> {
             self.recv_generated_tip,
             self.change_generated_tip,
         );
+        // Write the tip through the RamStore write-back so it survives a
+        // restart; without this the account store stays dirty in RAM only
+        // and the tip reloads as 0.
+        if let Err(e) = store.flush() {
+            log::error!("AddressStore::update_watch_tip(): account store flush: {e}");
+        }
     }
 
     /// Processes a received coin at the specified script public key.
@@ -193,17 +200,52 @@ impl<P: StorageProfile> AddressStore<P> {
     /// # Parameters
     /// - `spk`: The script public key of the received coin.
     ///
-    /// # Panics
-    /// This function panics if the script public key is not found in the store.
+    /// A coin reported for a script outside the regenerated store (e.g. a
+    /// stale persisted subscription past the restored watch window) extends
+    /// the store to cover that script rather than panicking. A script that is
+    /// not derivable within the recovery window is logged and ignored.
     pub fn recv_coin_at(&mut self, spk: &ScriptBuf) {
-        let AddressEntry { account, index, .. } = self.store.get(spk).expect("must be there");
-        // AddrAccount::Receive => self.update_recv(*index),
-        // AddrAccount::Change => self.update_change(*index),
-        match *account {
-            KeyChain::Receive => self.update_recv(*index),
-            KeyChain::Change => self.update_change(*index),
-            KeyChain::Custom(_) => unimplemented!(),
+        if let Some(AddressEntry { account, index, .. }) = self.store.get(spk) {
+            let (account, index) = (*account, *index);
+            match account {
+                KeyChain::Receive => self.update_recv(index),
+                KeyChain::Change => self.update_change(index),
+                KeyChain::Custom(_) => unimplemented!(),
+            }
+            return;
         }
+        match self.locate_spk(spk) {
+            Some((KeyChain::Receive, index)) => self.update_recv(index),
+            Some((KeyChain::Change, index)) => self.update_change(index),
+            Some((KeyChain::Custom(_), _)) => unimplemented!(),
+            None => log::error!(
+                "AddressStore::recv_coin_at(): spk {spk:?} absent from store and not derivable \
+                 within the recovery window; ignoring"
+            ),
+        }
+    }
+
+    /// Locates the keychain and index of `spk` by deriving past the current
+    /// watch window. Backs [`Self::recv_coin_at`] when a coin is reported for
+    /// a script the store has not generated yet. Bounded by `RECOVER_GAP` so a
+    /// foreign script cannot spin forever.
+    fn locate_spk(&self, spk: &ScriptBuf) -> Option<(KeyChain, u32)> {
+        const RECOVER_GAP: u32 = 10_000;
+        let recv_start = self.recv_watch_tip().saturating_add(1);
+        let recv_end = recv_start.saturating_add(RECOVER_GAP);
+        for i in recv_start..=recv_end {
+            if self.derivator.receive_at(i).script_pubkey() == *spk {
+                return Some((KeyChain::Receive, i));
+            }
+        }
+        let change_start = self.change_watch_tip().saturating_add(1);
+        let change_end = change_start.saturating_add(RECOVER_GAP);
+        for i in change_start..=change_end {
+            if self.derivator.change_at(i).script_pubkey() == *spk {
+                return Some((KeyChain::Change, i));
+            }
+        }
+        None
     }
 
     /// Populates the address store with addresses up to the current watch tips.
@@ -712,6 +754,45 @@ mod tests {
         // Index 1 entry must be present (it would be filtered out by the old
         // buggy `<= change_generated_tip` (0) bound).
         assert!(recv.iter().any(|e| e.index() == 1));
+    }
+
+    #[test]
+    fn recv_coin_at_unknown_spk_does_not_panic() {
+        // A coin reported for a script outside the watch window must extend
+        // the store, and a foreign script must be ignored, never panic.
+        let (tx, _rx) = mpsc::channel();
+        let derivator = test_derivator();
+        let descriptor = derivator.descriptor();
+        let config = test_config(descriptor);
+
+        let mut store = AddressStore::new(derivator.clone(), tx, 0, 0, 2, config);
+
+        let high_index = store.change_watch_tip() + 5;
+        let spk = derivator.change_at(high_index).script_pubkey();
+        assert!(!store.contains_spk(&spk));
+        store.recv_coin_at(&spk);
+        assert!(
+            store.contains_spk(&spk),
+            "store must be extended to cover the reported script"
+        );
+
+        // A script we never derive must be logged and ignored: the store is not
+        // extended for it and neither watch tip moves.
+        let foreign = ScriptBuf::from_bytes(vec![0x00; 22]);
+        assert!(!store.contains_spk(&foreign));
+        let recv_tip_before = store.recv_watch_tip();
+        let change_tip_before = store.change_watch_tip();
+        store.recv_coin_at(&foreign);
+        assert!(
+            !store.contains_spk(&foreign),
+            "foreign spk must not be added to the store"
+        );
+        assert_eq!(
+            store.recv_watch_tip(),
+            recv_tip_before,
+            "watch tip must not move for a foreign spk"
+        );
+        assert_eq!(store.change_watch_tip(), change_tip_before);
     }
 
     #[test]
