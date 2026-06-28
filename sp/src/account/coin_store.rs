@@ -284,6 +284,32 @@ impl<P: SpStorageProfile> SpCoinStore<P> {
             .unwrap_or_default()
     }
 
+    /// Outpoints whose spend can still be detected on chain, each paired with its
+    /// creation height. A coin is watchable while `Unspent` or `Spent { block_hash:
+    /// None }` (our own broadcast awaiting confirmation); a confirmed spend
+    /// (`Spent { block_hash: Some }` / `Mined`) can never be spent again, so the
+    /// spend sweep skips it. This is the sole seed for the sweep's watch set.
+    pub fn watchable(&self) -> Vec<(OutPoint, u32)> {
+        self.store
+            .iter()
+            .ok()
+            .map(|it| {
+                it.filter(|(_, entry)| {
+                    matches!(
+                        entry.status(),
+                        OutputSpendStatus::Unspent
+                            | OutputSpendStatus::Spent {
+                                block_hash: None,
+                                ..
+                            }
+                    )
+                })
+                .map(|(outpoint, entry)| (outpoint, entry.height()))
+                .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn len(&self) -> usize {
         self.store.len().unwrap_or(0)
     }
@@ -755,6 +781,39 @@ mod tests {
         assert_eq!(outpoints.len(), 2);
         assert!(outpoints.contains(&test_outpoint()));
         assert!(outpoints.contains(&test_outpoint_2()));
+    }
+
+    #[test]
+    fn test_coin_store_watchable() {
+        let mut store = SpCoinStore::new();
+
+        // Unspent at height 100 is watchable.
+        store.insert(test_outpoint(), test_owned_output(10000));
+        // Spent { block_hash: None } at height 100 is watchable.
+        store.insert(test_outpoint_2(), test_spent_output(20000));
+        // Spent { block_hash: Some } at height 200 is not watchable.
+        let mut spent_confirmed = test_owned_output(30000);
+        spent_confirmed.blockheight = Height::from_consensus(200).unwrap();
+        spent_confirmed.spend_status = OutputSpendStatus::Spent {
+            txid: [7u8; 32],
+            block_hash: Some([9u8; 32]),
+        };
+        store.insert(test_outpoint_3(), spent_confirmed);
+        // Mined at height 100 is not watchable.
+        let outpoint_4 = OutPoint {
+            txid: Txid::from_byte_array([4u8; 32]),
+            vout: 3,
+        };
+        let mut mined = test_owned_output(40000);
+        mined.spend_status = OutputSpendStatus::Mined([9u8; 32]);
+        store.insert(outpoint_4, mined);
+
+        let mut watchable = store.watchable();
+        watchable.sort();
+        assert_eq!(
+            watchable,
+            vec![(test_outpoint(), 100), (test_outpoint_2(), 100)]
+        );
     }
 
     #[test]
