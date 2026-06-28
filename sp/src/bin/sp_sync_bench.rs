@@ -504,8 +504,8 @@ mod instrumented {
         };
         // Seed one synthetic owned outpoint at the first scanned height so the spend
         // (input) sweep always runs over every block, process_spends short-circuits on an
-        // empty owned set, which would otherwise make the spend phase a no-op. The fake
-        // hash won't hit a real spent filter, so it stays owned and the sweep walks the
+        // empty watchable set, which would otherwise make the spend phase a no-op. The fake
+        // hash won't hit a real spent filter, so it stays watchable and the sweep walks the
         // whole range, giving the spend-phase wall-time alongside the receive scan.
         {
             use bwk_sp::bitcoin::hashes::Hash;

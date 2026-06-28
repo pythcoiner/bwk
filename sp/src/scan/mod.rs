@@ -3,7 +3,7 @@ pub mod profiling;
 pub mod state;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::RangeInclusive,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -254,29 +254,128 @@ fn fetch_block_data_for_height(
 /// the collector just drains and tests each filter as it arrives; the bound applies
 /// backpressure. The pool is dropped here (workers keep draining the queue, then
 /// exit), so this returns immediately after enqueuing.
-fn fetch_spent_filters(
-    sender: channel::Sender<Result<(Height, FilterData), receiver::error::Error>>,
-    backend: &BackendContext,
-    range: RangeInclusive<u32>,
-) {
-    let pool = ThreadPool::new(fetch_concurrency());
-    for height in range {
-        let agent = backend.agent.clone();
-        let url = backend.url.clone();
-        let sender = sender.clone();
-        pool.execute(move || {
-            let blkheight = match Height::from_consensus(height) {
-                Ok(bh) => bh,
-                Err(e) => {
-                    let _ = sender.send(Err(receiver::error::Error::from(e)));
-                    return;
-                }
-            };
-            let res = blindbit::spent_filter(&agent, &url, blkheight, None)
-                .map(|filter| (blkheight, filter))
-                .map_err(receiver::error::Error::from);
-            let _ = sender.send(res);
-        });
+/// In-order source of per-block spend detections for the sweep.
+///
+/// The production impl ([`BlindbitSpendScanner`]) fans spent-filter fetches over a
+/// worker pool, keeping a window of `fetch_concurrency()` heights in flight ahead
+/// of the cursor and matching each filter against the current watch set on the
+/// calling thread. [`SpendScanner::jump_to`] lets the sweep skip a gap of heights
+/// that have no watchable coin without ever fetching them.
+struct SpendsAt {
+    height: u32,
+    block_hash: BlockHash,
+    spent: HashSet<OutPoint>,
+}
+
+trait SpendScanner {
+    /// Detect spends at the current cursor height against `watch`, then advance the
+    /// cursor by one.
+    fn next(&mut self, watch: &HashSet<OutPoint>) -> Result<SpendsAt, receiver::error::Error>;
+
+    /// Resume the next [`SpendScanner::next`] at `to`, discarding work below it.
+    /// Heights between the old position and `to` are never fetched.
+    fn jump_to(&mut self, to: u32);
+}
+
+/// Spent-filter scanner over the blindbit backend. Keeps up to
+/// `fetch_concurrency()` heights in flight in a sliding window ahead of the
+/// cursor; filters arriving ahead of the cursor are buffered, stale ones (below
+/// the cursor, e.g. after a jump) are dropped.
+struct BlindbitSpendScanner {
+    agent: Arc<ureq::Agent>,
+    url: String,
+    pool: ThreadPool,
+    tx: channel::Sender<(u32, Result<FilterData, receiver::error::Error>)>,
+    rx: channel::Receiver<(u32, Result<FilterData, receiver::error::Error>)>,
+    cursor: u32,
+    next_to_fetch: u32,
+    end: u32,
+    window: u32,
+    buf: BTreeMap<u32, FilterData>,
+}
+
+impl BlindbitSpendScanner {
+    fn new(backend: &BackendContext, cursor: u32, end: u32) -> Self {
+        let (tx, rx) = channel::unbounded();
+        let mut scanner = Self {
+            agent: backend.agent.clone(),
+            url: backend.url.clone(),
+            pool: ThreadPool::new(fetch_concurrency()),
+            tx,
+            rx,
+            cursor,
+            next_to_fetch: cursor,
+            end,
+            window: fetch_concurrency() as u32,
+            buf: BTreeMap::new(),
+        };
+        scanner.refill();
+        scanner
+    }
+
+    /// Submit fetches so the window `[cursor, cursor + window)` (clamped to `end`)
+    /// is in flight or buffered. Gap heights below `next_to_fetch` are never
+    /// submitted.
+    fn refill(&mut self) {
+        let limit = self
+            .cursor
+            .saturating_add(self.window)
+            .min(self.end.saturating_add(1));
+        while self.next_to_fetch < limit {
+            let height = self.next_to_fetch;
+            let agent = self.agent.clone();
+            let url = self.url.clone();
+            let tx = self.tx.clone();
+            self.pool.execute(move || {
+                let res = Height::from_consensus(height)
+                    .map_err(receiver::error::Error::from)
+                    .and_then(|bh| {
+                        blindbit::spent_filter(&agent, &url, bh, None)
+                            .map_err(receiver::error::Error::from)
+                    });
+                let _ = tx.send((height, res));
+            });
+            self.next_to_fetch += 1;
+        }
+    }
+}
+
+impl SpendScanner for BlindbitSpendScanner {
+    fn next(&mut self, watch: &HashSet<OutPoint>) -> Result<SpendsAt, receiver::error::Error> {
+        self.refill();
+        let filter = loop {
+            if let Some(f) = self.buf.remove(&self.cursor) {
+                break f;
+            }
+            // We hold `tx`, so the channel never disconnects while we are alive.
+            let (height, res) = self.rx.recv().expect("spend-filter fetchers dropped");
+            if height < self.cursor {
+                continue; // stale (jumped past), discard
+            }
+            let f = res?;
+            if height == self.cursor {
+                break f;
+            }
+            self.buf.insert(height, f);
+        };
+        let blkheight = Height::from_consensus(self.cursor)?;
+        let blkhash = filter.block_hash;
+        let spent = match_inputs_for(&self.agent, &self.url, blkheight, filter, watch)?;
+        let height = self.cursor;
+        self.cursor += 1;
+        self.refill();
+        Ok(SpendsAt {
+            height,
+            block_hash: blkhash,
+            spent,
+        })
+    }
+
+    fn jump_to(&mut self, to: u32) {
+        self.cursor = to;
+        self.next_to_fetch = self.next_to_fetch.max(to);
+        self.buf.retain(|&h, _| h >= to);
+        self.refill();
     }
 }
 
@@ -337,7 +436,6 @@ struct ScanContext<'a, P: SpStorageProfile> {
     start: Height,
     end: Height,
     block_data_observer: Option<BlockDataObserver>,
-    owned: HashSet<OutPoint>,
 }
 
 pub fn scan_blocks<P: SpStorageProfile>(
@@ -383,7 +481,6 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     // per phase and errors if neither phase has work.
     log::info!("start: {} end: {}", start, end);
     let start_time = Instant::now();
-    let owned = stores.coin_store.lock().expect("poisoned").all_outpoints();
     let backend = BackendContext {
         agent,
         url: blindbit_url.to_string(),
@@ -397,7 +494,6 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
         start,
         end,
         block_data_observer,
-        owned,
     };
     process_scan(&backend, &mut scan)?;
     log::info!(
@@ -756,7 +852,8 @@ fn check_block_inputs(
 }
 
 fn match_inputs_for(
-    backend: &BackendContext,
+    agent: &ureq::Agent,
+    url: &str,
     blkheight: Height,
     spent_filter: FilterData,
     owned: &HashSet<OutPoint>,
@@ -772,7 +869,7 @@ fn match_inputs_for(
         input_hashes_map.keys().cloned().collect(),
     )?;
     if matched_inputs {
-        let spent = blindbit::spent_index(&backend.agent, &backend.url, blkheight)?.data;
+        let spent = blindbit::spent_index(agent, url, blkheight)?.data;
         for spent in spent {
             let hex: &[u8] = spent.as_ref();
             if let Some(outpoint) = input_hashes_map.get(hex) {
@@ -821,9 +918,6 @@ fn commit_block<P: SpStorageProfile>(
     done[idx] = true;
     hashes[idx] = Some(blkhash);
     if !outs.is_empty() {
-        for outpoint in outs.keys() {
-            scan.owned.insert(*outpoint);
-        }
         record_outputs(scan.stores, outs)?;
     }
 
@@ -855,6 +949,9 @@ fn commit_block<P: SpStorageProfile>(
 }
 
 const CHECKPOINT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Blocks between spend-sweep progress reports.
+const SPEND_PROGRESS_INTERVAL: u32 = 1000;
 
 /// The crypto stage's per-block verdict for the collector. A no-match (the common
 /// case) carries only progress; a match additionally carries the tweaks the
@@ -998,67 +1095,164 @@ fn process_blocks<P: SpStorageProfile>(
 /// blocking request per block; the input match is ~free, so the collector just
 /// tests each filter as it arrives, advancing the frontier over the contiguous
 /// prefix that has been swept.
+/// The still-watchable SP coins during a spend sweep: the outpoints tested
+/// against each spent filter, plus their creation heights so the sweep can raise
+/// its floor (the lowest watchable coin height) and skip blocks below it.
+struct WatchableSet {
+    outpoints: HashSet<OutPoint>,
+    height_of: HashMap<OutPoint, u32>,
+    by_height: BTreeMap<u32, usize>,
+}
+
+impl WatchableSet {
+    fn new(coins: impl IntoIterator<Item = (OutPoint, u32)>) -> Self {
+        let mut set = Self {
+            outpoints: HashSet::new(),
+            height_of: HashMap::new(),
+            by_height: BTreeMap::new(),
+        };
+        for (outpoint, height) in coins {
+            if set.outpoints.insert(outpoint) {
+                set.height_of.insert(outpoint, height);
+                *set.by_height.entry(height).or_insert(0) += 1;
+            }
+        }
+        set
+    }
+
+    /// The lowest watchable coin height, or `None` when empty. A watchable coin at
+    /// height H can only be spent above H, so blocks at or below `floor` need not
+    /// be examined.
+    fn floor(&self) -> Option<u32> {
+        self.by_height.keys().next().copied()
+    }
+
+    fn outpoints(&self) -> &HashSet<OutPoint> {
+        &self.outpoints
+    }
+
+    /// Drop a coin detected as spent, which may raise the floor.
+    fn remove(&mut self, outpoint: &OutPoint) {
+        if !self.outpoints.remove(outpoint) {
+            return;
+        }
+        if let Some(height) = self.height_of.remove(outpoint) {
+            if let Some(count) = self.by_height.get_mut(&height) {
+                *count -= 1;
+                if *count == 0 {
+                    self.by_height.remove(&height);
+                }
+            }
+        }
+    }
+}
+
+/// Drive a spend sweep to `end` using `scanner` as the in-order source of spend
+/// detections, jumping over height ranges that have no watchable coin. The
+/// frontier is `cursor - 1` (processed in order); a jumped gap is recorded swept
+/// so a resume never re-fetches it.
+fn run_sweep<P: SpStorageProfile, S: SpendScanner>(
+    stores: &ScanStores<P>,
+    stop: &Arc<AtomicBool>,
+    scanner: &mut S,
+    mut watch: WatchableSet,
+    mut cursor: u32,
+    end: Height,
+) -> Result<(), receiver::error::Error> {
+    let end_u32 = end.to_consensus_u32();
+    let mut last_progress = cursor.saturating_sub(1);
+    let mut last_checkpoint = Instant::now();
+
+    while cursor <= end_u32 {
+        if should_interrupt(stop) {
+            record_spend_frontier(stores, Height::from_consensus(cursor - 1)?)?;
+            save_state(stores)?;
+            return Ok(());
+        }
+
+        let SpendsAt {
+            height,
+            block_hash: blkhash,
+            spent,
+        } = scanner.next(watch.outpoints())?;
+        if !spent.is_empty() {
+            for outpoint in &spent {
+                watch.remove(outpoint);
+            }
+            record_inputs(stores, blkhash, Height::from_consensus(height)?, spent)?;
+        }
+        cursor = height + 1;
+
+        if (cursor - 1).saturating_sub(last_progress) >= SPEND_PROGRESS_INTERVAL {
+            record_spend_progress(stores, Height::from_consensus(cursor - 1)?, end)?;
+            last_progress = cursor - 1;
+        }
+        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
+            record_spend_frontier(stores, Height::from_consensus(cursor - 1)?)?;
+            save_state(stores)?;
+            last_checkpoint = Instant::now();
+        }
+
+        // Each iteration, check the lowest still-watchable coin. If it sits
+        // strictly above the cursor, the gap up to it has nothing to watch, so
+        // record that gap swept and jump the scanner to the floor block itself.
+        // The floor block is scanned, not skipped: a coin can be spent in the
+        // same block it was created in.
+        match watch.floor() {
+            None => {
+                record_spend_frontier(stores, end)?;
+                save_state(stores)?;
+                return Ok(());
+            }
+            Some(floor) if floor > cursor => {
+                record_spend_frontier(stores, Height::from_consensus(floor - 1)?)?;
+                save_state(stores)?;
+                cursor = floor;
+                scanner.jump_to(cursor);
+            }
+            _ => {}
+        }
+    }
+
+    record_spend_frontier(stores, end)?;
+    save_state(stores)?;
+    Ok(())
+}
+
 fn process_spends<P: SpStorageProfile>(
     backend: &BackendContext,
-    scan: &mut ScanContext<P>,
+    scan: &ScanContext<P>,
 ) -> Result<(), receiver::error::Error> {
-    let start_u32 = scan.start.to_consensus_u32();
     let end_u32 = scan.end.to_consensus_u32();
-    let spend_start = effective_spend_start(scan.stores, start_u32)?;
+    let watch = WatchableSet::new(scan.stores.coin_store.lock().expect("poisoned").watchable());
 
-    // Own nothing (or already swept): a future block can only spend an output we
-    // own, so the frontier jumps straight to `end` with no fetching.
-    if spend_start > end_u32 || scan.owned.is_empty() {
+    // Nothing watchable -> no coin can be spent in this range; jump the frontier
+    // straight to the tip.
+    let Some(floor) = watch.floor() else {
+        record_spend_frontier(scan.stores, scan.end)?;
+        save_state(scan.stores)?;
+        return Ok(());
+    };
+
+    let resume = effective_spend_start(scan.stores, scan.start.to_consensus_u32())?;
+    // Start at the floor block itself, not one past it: a coin can be spent in
+    // the same block it was created in.
+    let cursor = resume.max(floor);
+    if cursor > end_u32 {
         record_spend_frontier(scan.stores, scan.end)?;
         save_state(scan.stores)?;
         return Ok(());
     }
 
-    let len = (end_u32 - spend_start + 1) as usize;
-    let mut done = vec![false; len];
-    let mut spend_tip = spend_start - 1; // highest contiguous swept height
-    let mut last_progress = spend_start - 1;
-    let mut last_checkpoint = Instant::now();
-
-    let (sender, receiver) = channel::bounded(fetch_channel_cap());
-    fetch_spent_filters(sender, backend, spend_start..=end_u32);
-
-    for msg in receiver {
-        if should_interrupt(scan.stop) {
-            record_spend_frontier(scan.stores, Height::from_consensus(spend_tip)?)?;
-            save_state(scan.stores)?;
-            return Ok(());
-        }
-        let (height, spent_filter) = msg?;
-        let blkhash = spent_filter.block_hash;
-        let ins = match_inputs_for(backend, height, spent_filter, &scan.owned)?;
-        if !ins.is_empty() {
-            for outpoint in &ins {
-                scan.owned.remove(outpoint);
-            }
-            record_inputs(scan.stores, blkhash, height, ins)?;
-        }
-
-        // Advance the frontier over the contiguous swept prefix (filters arrive
-        // out of order), checkpointing periodically for crash recovery.
-        done[(height.to_consensus_u32() - spend_start) as usize] = true;
-        while spend_tip < end_u32 && done[(spend_tip + 1 - spend_start) as usize] {
-            spend_tip += 1;
-        }
-        if spend_tip.saturating_sub(last_progress) >= 1000 {
-            record_spend_progress(scan.stores, Height::from_consensus(spend_tip)?, scan.end)?;
-            last_progress = spend_tip;
-        }
-        if last_checkpoint.elapsed() >= CHECKPOINT_INTERVAL {
-            record_spend_frontier(scan.stores, Height::from_consensus(spend_tip)?)?;
-            save_state(scan.stores)?;
-            last_checkpoint = Instant::now();
-        }
-    }
-
-    record_spend_frontier(scan.stores, scan.end)?;
-    save_state(scan.stores)?;
-    Ok(())
+    let mut scanner = BlindbitSpendScanner::new(backend, cursor, end_u32);
+    run_sweep(
+        scan.stores,
+        scan.stop,
+        &mut scanner,
+        watch,
+        cursor,
+        scan.end,
+    )
 }
 
 fn process_scan<P: SpStorageProfile>(
@@ -1559,6 +1753,226 @@ mod tests {
                 ))
             ),
             "expected MalformedTweak Err, got {err:?}"
+        );
+    }
+
+    use bitcoin::ScriptBuf;
+
+    fn op(n: u8) -> OutPoint {
+        OutPoint {
+            txid: Txid::from_byte_array([n; 32]),
+            vout: 0,
+        }
+    }
+
+    fn owned_unspent(height: u32) -> OwnedOutput {
+        OwnedOutput {
+            blockheight: Height::from_consensus(height).unwrap(),
+            tweak: [0u8; 32],
+            amount: Amount::from_sat(1000),
+            script: ScriptBuf::new(),
+            label: None,
+            spend_status: OutputSpendStatus::Unspent,
+        }
+    }
+
+    fn test_stores(
+        coins: &[(OutPoint, u32)],
+    ) -> (
+        ScanStores<crate::profile::SpRamProfile<crate::profile::DefaultBackend>>,
+        mpsc::Receiver<crate::Notification>,
+    ) {
+        use crate::account::tx_store::SpTxStore;
+        let mut cs = SpCoinStore::new();
+        for &(o, h) in coins {
+            cs.insert(o, owned_unspent(h));
+        }
+        let (tx, rx) = mpsc::channel();
+        let stores = ScanStores {
+            coin_store: Arc::new(Mutex::new(cs)),
+            tx_store: Arc::new(Mutex::new(SpTxStore::new())),
+            scan_state: Arc::new(Mutex::new(ScanState::new(0))),
+            sender: tx,
+            header_store: bwk::header_store::HeaderStore::new_in_memory(bitcoin::Network::Regtest),
+        };
+        (stores, rx)
+    }
+
+    /// In-order fake recording which heights were asked for, reporting a spend set
+    /// per height. `jump_to` resyncs the cursor with `run_sweep`.
+    struct FakeScanner {
+        spends: HashMap<u32, Vec<OutPoint>>,
+        requested: Vec<u32>,
+        cursor: u32,
+    }
+
+    impl SpendScanner for FakeScanner {
+        fn next(&mut self, _watch: &HashSet<OutPoint>) -> Result<SpendsAt, receiver::error::Error> {
+            let h = self.cursor;
+            self.requested.push(h);
+            let spent: HashSet<OutPoint> = self
+                .spends
+                .get(&h)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            self.cursor += 1;
+            Ok(SpendsAt {
+                height: h,
+                block_hash: BlockHash::all_zeros(),
+                spent,
+            })
+        }
+
+        fn jump_to(&mut self, to: u32) {
+            self.cursor = to;
+        }
+    }
+
+    #[test]
+    fn watchable_set_floor_and_remove() {
+        let mut w = WatchableSet::new([(op(1), 100), (op(2), 100), (op(3), 5000)]);
+        assert_eq!(w.floor(), Some(100));
+        w.remove(&op(1));
+        assert_eq!(w.floor(), Some(100)); // op(2) still at 100
+        w.remove(&op(2));
+        assert_eq!(w.floor(), Some(5000)); // floor raised
+        w.remove(&op(3));
+        assert_eq!(w.floor(), None);
+    }
+
+    #[test]
+    fn run_sweep_jumps_gap_after_spend() {
+        let coins = [(op(1), 100), (op(2), 5000)];
+        let (stores, _rx) = test_stores(&coins);
+        let watch = WatchableSet::new(coins.iter().copied());
+        let mut scanner = FakeScanner {
+            spends: HashMap::from([(200u32, vec![op(1)])]),
+            requested: Vec::new(),
+            cursor: 101,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        run_sweep(
+            &stores,
+            &stop,
+            &mut scanner,
+            watch,
+            101,
+            Height::from_consensus(10000).unwrap(),
+        )
+        .unwrap();
+
+        // The gap 201..=4999 (no watchable coin active) is never fetched, but
+        // block 5000, op(2)'s creation block, is swept: a same-block spend there
+        // must not be skipped.
+        assert!(!scanner.requested.iter().any(|&h| (201..=4999).contains(&h)));
+        assert!(scanner.requested.contains(&101));
+        assert!(scanner.requested.contains(&200));
+        assert!(scanner.requested.contains(&5000));
+        assert!(scanner.requested.contains(&10000));
+        assert_eq!(
+            stores.scan_state.lock().unwrap().last_spend_height(),
+            Some(10000)
+        );
+    }
+
+    #[test]
+    fn run_sweep_catches_same_block_spend() {
+        // op(2) is created at 5000 and spent in that same block. After op(1) is
+        // spent at 200 the sweep jumps to 5000 (not 5001), so the same-block
+        // spend is found rather than skipped forever.
+        let coins = [(op(1), 100), (op(2), 5000)];
+        let (stores, _rx) = test_stores(&coins);
+        let watch = WatchableSet::new(coins.iter().copied());
+        let mut scanner = FakeScanner {
+            spends: HashMap::from([(200u32, vec![op(1)]), (5000u32, vec![op(2)])]),
+            requested: Vec::new(),
+            cursor: 101,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        run_sweep(
+            &stores,
+            &stop,
+            &mut scanner,
+            watch,
+            101,
+            Height::from_consensus(10000).unwrap(),
+        )
+        .unwrap();
+
+        // Block 5000 is scanned and op(2)'s spend is caught; once it is removed
+        // nothing above 5000 is watchable, so no height above it is fetched.
+        assert!(scanner.requested.contains(&5000));
+        assert!(!scanner.requested.iter().any(|&h| h > 5000));
+        assert!(
+            !stores
+                .coin_store
+                .lock()
+                .unwrap()
+                .get(&op(2))
+                .unwrap()
+                .is_spendable(),
+            "op(2) must be marked spent after the same-block sweep"
+        );
+    }
+
+    #[test]
+    fn run_sweep_continuous_when_low_coin_unspent() {
+        let coins = [(op(1), 100), (op(2), 5000)];
+        let (stores, _rx) = test_stores(&coins);
+        let watch = WatchableSet::new(coins.iter().copied());
+        let mut scanner = FakeScanner {
+            spends: HashMap::new(),
+            requested: Vec::new(),
+            cursor: 101,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        run_sweep(
+            &stores,
+            &stop,
+            &mut scanner,
+            watch,
+            101,
+            Height::from_consensus(10000).unwrap(),
+        )
+        .unwrap();
+
+        // The low coin stays unspent, so every height is swept (no wrong jump).
+        assert_eq!(scanner.requested.len(), 10000 - 101 + 1);
+        assert!(scanner.requested.contains(&5000));
+        assert_eq!(
+            stores.scan_state.lock().unwrap().last_spend_height(),
+            Some(10000)
+        );
+    }
+
+    #[test]
+    fn run_sweep_jumps_to_end_when_watch_empties() {
+        let coins = [(op(1), 100)];
+        let (stores, _rx) = test_stores(&coins);
+        let watch = WatchableSet::new(coins.iter().copied());
+        let mut scanner = FakeScanner {
+            spends: HashMap::from([(150u32, vec![op(1)])]),
+            requested: Vec::new(),
+            cursor: 101,
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        run_sweep(
+            &stores,
+            &stop,
+            &mut scanner,
+            watch,
+            101,
+            Height::from_consensus(10000).unwrap(),
+        )
+        .unwrap();
+
+        // After the only coin is spent at 150, nothing is watchable -> no fetch above.
+        assert!(!scanner.requested.iter().any(|&h| h > 150));
+        assert_eq!(
+            stores.scan_state.lock().unwrap().last_spend_height(),
+            Some(10000)
         );
     }
 }
