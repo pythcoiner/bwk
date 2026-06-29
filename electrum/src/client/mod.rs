@@ -1,15 +1,16 @@
+mod listener;
+pub mod tx_listener;
 use crate::{
     electrum::{
         request::Request,
         response::{
-            ErrorResponse, ErrorResult, HistoryResult, Response, SHGetHistoryResponse,
-            SHNotification, SHSubscribeResponse, TxBroadcastResponse, TxGetResponse, TxGetResult,
+            ErrorResponse, ErrorResult, Response, SHGetHistoryResponse, TxBroadcastResponse,
+            TxGetResponse, TxGetResult,
         },
         types::ScriptHash,
     },
     raw_client::{self, Client as RawClient},
 };
-use bwk_backoff::Backoff;
 use bwk_utils::short_string;
 use hex_conservative::FromHex;
 use miniscript::bitcoin::{
@@ -17,12 +18,16 @@ use miniscript::bitcoin::{
     OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fmt::{Debug, Display},
     sync::mpsc,
     thread::{self},
     time::{Duration, Instant},
 };
+use tx_listener::listen_txs;
+
+const SEND_MAX_RETRIES: usize = 3;
+const SEND_RETRY_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone)]
 pub enum Error {
@@ -97,13 +102,24 @@ impl CoinRequest {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, thiserror::Error)]
+pub enum CoinError {
+    #[error("failed to send batch request: {0}")]
+    Send(#[source] raw_client::Error),
+    #[error("failed to decode transaction: {0}")]
+    TxDecode(consensus::encode::FromHexError),
+    #[error("server error: {0}")]
+    Server(ErrorResponse),
+    #[error("transport error: {0}")]
+    Transport(#[source] raw_client::Error),
+}
+
 pub enum CoinResponse {
     Status(BTreeMap<ScriptBuf, Option<String>>),
     History(BTreeMap<ScriptBuf, Vec<(Txid, Option<u64> /* height */)>>),
     Txs(Vec<Transaction>),
     Stopped,
-    Error(String),
+    Error(CoinError),
 }
 
 impl Debug for CoinResponse {
@@ -223,294 +239,40 @@ impl Client {
         id
     }
 
-    pub fn listen<RQ, RS>(self) -> (mpsc::Sender<RQ>, mpsc::Receiver<RS>)
+    /// Send `batch`, retrying a bounded number of times on transport error.
+    /// On give-up the error is reported to `send` via `make_err`. Returns
+    /// `false` when the consumer channel is closed, so the caller can stop.
+    fn send_with_retry<RS>(
+        &mut self,
+        batch: &[Request],
+        send: &mpsc::Sender<RS>,
+        make_err: impl Fn(raw_client::Error) -> RS,
+    ) -> bool {
+        let mut retry = 0usize;
+        while let Err(e) = self.inner.try_send_batch(batch.iter().collect()) {
+            retry += 1;
+            if retry > SEND_MAX_RETRIES {
+                return send.send(make_err(e)).is_ok();
+            }
+            thread::sleep(SEND_RETRY_DELAY);
+        }
+        true
+    }
+
+    /// Spawn the tx listener on a background thread. `RQ`/`RS` are generic
+    /// so this listener can be used standalone, outside a bwk/bwk-sp
+    /// `Account`, with the consumer's own wrapper request/response types
+    /// instead of `CoinRequest`/`CoinResponse` directly.
+    pub fn listen_txs<RQ, RS>(self) -> (mpsc::Sender<RQ>, mpsc::Receiver<RS>)
     where
         RQ: Into<CoinRequest> + Debug + Send + 'static,
         RS: From<CoinResponse> + Debug + Send + 'static,
     {
         let (sender, request) = mpsc::channel();
         let (response, receiver) = mpsc::channel();
-        thread::spawn(move || self.listen_txs(response, request));
+        thread::spawn(move || listen_txs(self, response, request));
 
         (sender, receiver)
-    }
-
-    fn listen_txs<RQ, RS>(mut self, send: mpsc::Sender<RS>, recv: mpsc::Receiver<RQ>)
-    where
-        RQ: Into<CoinRequest> + Debug + Send + 'static,
-        RS: From<CoinResponse> + Debug + Send + 'static,
-    {
-        log::debug!("Client::listen_txs()");
-        let mut req_id_spk_map = BTreeMap::new();
-        let mut watched_spks_sh = BTreeMap::<usize /* request_id */, ScriptHash>::new();
-        let mut sh_sbf_map = BTreeMap::<ScriptHash, ScriptBuf>::new();
-
-        // The batch of requests still awaiting a response. electrs streams batch
-        // responses across multiple reads (one JSON line each), so we drain answered
-        // request ids as they arrive and only pull the next consumer request once the
-        // batch is fully answered. `last_sent` drives a resend if it stalls (electrs
-        // empty-responds to a request that arrives while it is still answering).
-        let mut last_request: Option<Vec<Request>> = None;
-        let mut last_sent = Instant::now();
-        // Resend a pending batch electrs never answered after this long.
-        const STALL_RESEND_AFTER: Duration = Duration::from_secs(2);
-
-        let mut backoff = Backoff::new_ms(50);
-
-        loop {
-            let mut received = false;
-            // If a pending batch has gone unanswered too long, electrs likely dropped
-            // a request (empty response while busy); resend the still-pending requests
-            // so the batch can complete instead of stalling forever.
-            if let Some(reqs) = &last_request {
-                if last_sent.elapsed() > STALL_RESEND_AFTER {
-                    let _ = self.inner.try_send_batch(reqs.iter().collect());
-                    last_sent = Instant::now();
-                }
-            }
-            // Handle requests from consumer
-            // NOTE: some server implementation (electrs for instance) will answer by an empty
-            // response if it receive a request while it has not yes sent its previous response
-            // so we need to make sure to not send a request before receiving the previous response
-            if last_request.is_none() {
-                match recv.try_recv() {
-                    Ok(rq) => {
-                        received = true;
-                        let rq: CoinRequest = rq.into();
-                        log::debug!("Client::listen_txs() recv request: {}", rq.summary());
-                        match rq {
-                            CoinRequest::Subscribe(spks) => {
-                                let mut batch = vec![];
-                                for spk in spks {
-                                    let mut sub = Request::subscribe_sh(&spk);
-                                    let id = self.register(&mut sub);
-                                    let sh = ScriptHash::new(&spk);
-                                    watched_spks_sh.insert(id, sh);
-                                    sh_sbf_map.insert(sh, spk);
-                                    batch.push(sub);
-                                }
-                                if !batch.is_empty() {
-                                    log::debug!(
-                                        "Client::listen_txs() last_request = {:?}",
-                                        batch.len()
-                                    );
-                                    last_request = Some(batch.clone());
-                                    last_sent = Instant::now();
-
-                                    let mut retry = 0usize;
-                                    while let Err(e) =
-                                        self.inner.try_send_batch(batch.iter().collect())
-                                    {
-                                        retry += 1;
-                                        if retry > 10 {
-                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).expect("caller dropped");
-                                        }
-                                        thread::sleep(Duration::from_millis(50));
-                                    }
-                                }
-                            }
-                            CoinRequest::History(sbfs) => {
-                                let mut batch = vec![];
-                                for spk in sbfs {
-                                    let mut history = Request::sh_get_history(&spk);
-                                    let id = self.register(&mut history);
-                                    req_id_spk_map.insert(id, spk);
-                                    batch.push(history);
-                                }
-                                if !batch.is_empty() {
-                                    log::debug!(
-                                        "Client::listen_txs() last_request = {:?}",
-                                        batch.len()
-                                    );
-                                    last_request = Some(batch.clone());
-                                    last_sent = Instant::now();
-
-                                    let mut retry = 0usize;
-                                    while let Err(e) =
-                                        self.inner.try_send_batch(batch.iter().collect())
-                                    {
-                                        retry += 1;
-                                        if retry > 10 {
-                                            send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).expect("caller dropped");
-                                        }
-                                        thread::sleep(Duration::from_millis(50));
-                                    }
-                                }
-                            }
-                            CoinRequest::Txs(txids) => {
-                                let mut batch = vec![];
-                                for txid in txids {
-                                    let mut tx = Request::tx_get(txid);
-                                    self.register(&mut tx);
-                                    batch.push(tx);
-                                }
-                                if !batch.is_empty() {
-                                    log::debug!(
-                                        "Client::listen_txs() last_request = {:?}",
-                                        batch.len()
-                                    );
-                                    last_request = Some(batch.clone());
-                                    last_sent = Instant::now();
-
-                                    let mut retry = 0usize;
-                                    while let Err(e) =
-                                        self.inner.try_send_batch(batch.iter().collect())
-                                    {
-                                        retry += 1;
-                                        if retry > 10 && send.send(CoinResponse::Error(format!("electrum::Client::listen_txs() Fail to send bacth request: {e:?}")).into()).is_err() {
-                                        // NOTE: caller has dropped the channel
-                                        // == Close request
-                                        return;
-                                                    }
-                                        thread::sleep(Duration::from_millis(50));
-                                    }
-                                }
-                            }
-                            CoinRequest::Stop => {
-                                let _ = send.send(CoinResponse::Stopped.into());
-                                return;
-                            }
-                        };
-                    }
-                    Err(e) => {
-                        match e {
-                            mpsc::TryRecvError::Empty => {}
-                            mpsc::TryRecvError::Disconnected => {
-                                // NOTE: caller has dropped the channel
-                                // == Close request
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-            // Handle responses from electrum server
-            match self.inner.try_recv(&self.index) {
-                Ok(Some(r)) => {
-                    log::debug!("Client::listen_txs() from electrum: {} responses", r.len());
-                    // Drop from the pending batch each request whose response just
-                    // arrived; the batch is done only once fully drained. electrs
-                    // streams responses across multiple reads, so requiring the whole
-                    // batch in one read (the old behaviour) livelocked on any batch
-                    // larger than one. Notifications carry no id and match nothing
-                    // here, they are handled in the processing below.
-                    if let Some(reqs) = &mut last_request {
-                        let answered: BTreeSet<usize> =
-                            r.iter().filter_map(|resp| resp.id()).collect();
-                        let before = reqs.len();
-                        reqs.retain(|rq| !answered.contains(&rq.id));
-                        if reqs.is_empty() {
-                            last_request = None;
-                        } else if reqs.len() != before {
-                            last_sent = Instant::now();
-                        }
-                    }
-
-                    received = true;
-                    let mut statuses = BTreeMap::new();
-                    let mut txs = Vec::new();
-                    // let mut txid_to_get = Vec::new();
-                    let mut histories = BTreeMap::new();
-                    for r in r {
-                        match r {
-                            Response::SHSubscribe(SHSubscribeResponse { result: status, id }) => {
-                                let Some(sh) = watched_spks_sh.get(&id) else {
-                                    log::warn!("Client::listen_txs() SHSubscribe: unknown id {id}");
-                                    continue;
-                                };
-                                let Some(sbf) = sh_sbf_map.get(sh) else {
-                                    log::warn!("Client::listen_txs() SHSubscribe: unknown sh {sh}");
-                                    continue;
-                                };
-                                statuses.insert(sbf.clone(), status);
-                            }
-                            Response::SHNotification(SHNotification {
-                                status: (sh, status),
-                                ..
-                            }) => {
-                                let Some(sbf) = sh_sbf_map.get(&sh) else {
-                                    log::warn!(
-                                        "Client::listen_txs() SHNotification: unknown sh {sh}"
-                                    );
-                                    continue;
-                                };
-                                statuses.insert(sbf.clone(), status);
-                            }
-                            Response::SHGetHistory(SHGetHistoryResponse { history, id }) => {
-                                let Some(spk) = req_id_spk_map.remove(&id) else {
-                                    log::warn!(
-                                        "Client::listen_txs() SHGetHistory: unknown id {id}"
-                                    );
-                                    continue;
-                                };
-                                let mut spk_hist = vec![];
-                                for tx in history {
-                                    let HistoryResult { txid, height, .. } = tx;
-                                    let height = if height < 1 {
-                                        None
-                                    } else {
-                                        Some(height as u64)
-                                    };
-                                    spk_hist.push((txid, height));
-                                }
-                                histories.insert(spk, spk_hist);
-                            }
-                            Response::TxGet(TxGetResponse {
-                                result: TxGetResult::Raw(raw_tx),
-                                ..
-                            }) => {
-                                let tx: Transaction =
-                            // TODO: do not unwrap
-                                    consensus::encode::deserialize_hex(&raw_tx).unwrap();
-                                txs.push(tx);
-                            }
-                            Response::Error(e) => {
-                                if send
-                                    .send(CoinResponse::Error(e.to_string()).into())
-                                    .is_err()
-                                {
-                                    // NOTE: caller has dropped the channel
-                                    // == Close request
-                                    return;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    if !histories.is_empty() {
-                        let rsp = CoinResponse::History(histories);
-                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
-                        send.send(rsp.into()).unwrap();
-                    }
-                    if !statuses.is_empty() {
-                        let rsp = CoinResponse::Status(statuses);
-                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
-                        send.send(rsp.into()).unwrap();
-                    }
-                    // let mut txs = Vec::new();
-                    if !txs.is_empty() {
-                        let rsp = CoinResponse::Txs(txs);
-                        log::debug!("Client::listen_txs() send response: {}", rsp.summary());
-                        send.send(rsp.into()).unwrap();
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    if send
-                        .send(CoinResponse::Error(e.to_string()).into())
-                        .is_err()
-                    {
-                        // NOTE: caller has dropped the channel
-                        // == Close request
-                        return;
-                    }
-                }
-            }
-            if received {
-                continue;
-            }
-            backoff.snooze();
-        }
     }
 
     /// Try to get a transaction by its txid

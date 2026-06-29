@@ -39,6 +39,8 @@ impl Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
+
 impl From<electrum::Error> for Error {
     fn from(value: electrum::Error) -> Self {
         Error::Electrum(value)

@@ -679,7 +679,7 @@ impl<P: StorageProfile> Account<P> {
             let addr = format!("{addr}:{port}");
             let _ = notification.send(TxListenerNotif::Connected(addr).into());
 
-            let (request, response) = client.listen::<CoinRequest, CoinResponse>();
+            let (request, response) = client.listen_txs::<CoinRequest, CoinResponse>();
 
             listen_txs(
                 coin_store,
@@ -1004,7 +1004,7 @@ fn listen_txs<T, P>(
                         return;
                     }
                     CoinResponse::Error(e) => {
-                        send_notif!(notification, request, TxListenerNotif::Error(e));
+                        send_notif!(notification, request, TxListenerNotif::Error(e.to_string()));
                     }
                 }
             }
