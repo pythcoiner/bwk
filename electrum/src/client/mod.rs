@@ -1,3 +1,4 @@
+pub mod header_listener;
 mod listener;
 pub mod tx_listener;
 use crate::{
@@ -12,8 +13,10 @@ use crate::{
     raw_client::{self, Client as RawClient},
 };
 use bwk_utils::short_string;
-use hex_conservative::FromHex;
+use header_listener::listen_headers;
+use hex_conservative::{FromHex, HexToBytesError};
 use miniscript::bitcoin::{
+    block::Header,
     consensus::{self, encode::serialize_hex, Decodable},
     OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid,
 };
@@ -29,10 +32,14 @@ use tx_listener::listen_txs;
 const SEND_MAX_RETRIES: usize = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_millis(300);
 
+const SHORT_HEX_BYTES: usize = 8;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("transport error: {0}")]
     Transport(#[from] raw_client::Error),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
     #[error("failed to parse the transaction")]
     TxParsing,
     #[error("wrong response from electrum server")]
@@ -43,6 +50,18 @@ pub enum Error {
     TxDoesNotExists,
     #[error("server rejected transaction: {0}")]
     Rejected(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DecodeError {
+    #[error("invalid header hex: {0}")]
+    HeaderHex(#[source] HexToBytesError),
+    #[error("invalid header length: expected {expected}, got {0}", expected = Header::SIZE)]
+    HeaderLength(usize),
+    #[error("invalid headers hex: {0}")]
+    HeadersHex(#[source] HexToBytesError),
+    #[error("headers length {0} is not a multiple of {size}", size = Header::SIZE)]
+    HeadersAlignment(usize),
 }
 
 pub fn short_hash(s: &ScriptBuf) -> String {
@@ -162,6 +181,75 @@ impl CoinResponse {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum HeaderRequest {
+    Subscribe,
+    GetHeaders { start: u32, count: u32 },
+    Stop,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HeaderError {
+    #[error("failed to send subscribe: {0}")]
+    SendSubscribe(#[source] raw_client::Error),
+    #[error("failed to send get_headers: {0}")]
+    SendGetHeaders(#[source] raw_client::Error),
+    #[error(transparent)]
+    Decode(#[from] DecodeError),
+    #[error("server error: {0}")]
+    Server(ErrorResponse),
+    #[error("get_headers starting at {start} failed: {error}")]
+    GetHeaders { start: u32, error: ErrorResponse },
+    #[error("transport error: {0}")]
+    Transport(#[source] raw_client::Error),
+}
+
+pub enum HeaderResponse {
+    Tip {
+        height: u32,
+        raw: [u8; Header::SIZE],
+    },
+    Header {
+        height: u32,
+        raw: [u8; Header::SIZE],
+    },
+    Batch {
+        start: u32,
+        raws: Vec<[u8; Header::SIZE]>,
+    },
+    Stopped,
+    Error(HeaderError),
+}
+
+fn short_hex(raw: &[u8; Header::SIZE]) -> String {
+    hex_conservative::DisplayHex::to_lower_hex_string(&raw[..SHORT_HEX_BYTES])
+}
+
+// We manually impl Debug in order to show only short hashes
+impl Debug for HeaderResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tip { height, raw } => f
+                .debug_struct("Tip")
+                .field("height", height)
+                .field("raw", &short_hex(raw))
+                .finish(),
+            Self::Header { height, raw } => f
+                .debug_struct("Header")
+                .field("height", height)
+                .field("raw", &short_hex(raw))
+                .finish(),
+            Self::Batch { start, raws } => f
+                .debug_struct("Batch")
+                .field("start", start)
+                .field("count", &raws.len())
+                .finish(),
+            Self::Stopped => write!(f, "Stopped"),
+            Self::Error(e) => write!(f, "Error({e})"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Client {
     inner: RawClient,
@@ -256,6 +344,22 @@ impl Client {
         let (sender, request) = mpsc::channel();
         let (response, receiver) = mpsc::channel();
         thread::spawn(move || listen_txs(self, response, request));
+
+        (sender, receiver)
+    }
+
+    /// Spawn the header listener on a background thread. `RQ`/`RS` are
+    /// generic so this listener can be used standalone, outside a bwk/bwk-sp
+    /// `Account`, with the consumer's own wrapper request/response types
+    /// instead of `HeaderRequest`/`HeaderResponse` directly.
+    pub fn listen_headers<RQ, RS>(self) -> (mpsc::Sender<RQ>, mpsc::Receiver<RS>)
+    where
+        RQ: Into<HeaderRequest> + Debug + Send + 'static,
+        RS: From<HeaderResponse> + Debug + Send + 'static,
+    {
+        let (sender, request) = mpsc::channel();
+        let (response, receiver) = mpsc::channel();
+        thread::spawn(move || listen_headers(self, response, request));
 
         (sender, receiver)
     }

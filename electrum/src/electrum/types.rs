@@ -161,14 +161,12 @@ impl TxidRow {
 
 // ***************************************************************************
 
-pub(crate) type SerializedHeaderRow = [u8; HEADER_ROW_SIZE];
+pub(crate) type SerializedHeaderRow = [u8; BlockHeader::SIZE];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct HeaderRow {
     pub(crate) header: BlockHeader,
 }
-
-pub const HEADER_ROW_SIZE: usize = 80;
 
 impl_consensus_encoding!(HeaderRow, header);
 
@@ -178,11 +176,11 @@ impl HeaderRow {
     }
 
     pub(crate) fn to_db_row(&self) -> SerializedHeaderRow {
-        let mut row = [0; HEADER_ROW_SIZE];
+        let mut row = [0; BlockHeader::SIZE];
         let len = self
             .consensus_encode(&mut (&mut row as &mut [u8]))
             .expect("in-memory writers don't error");
-        debug_assert_eq!(len, HEADER_ROW_SIZE);
+        debug_assert_eq!(len, BlockHeader::SIZE);
         row
     }
 
