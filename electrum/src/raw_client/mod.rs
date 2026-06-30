@@ -19,7 +19,7 @@ pub enum Error {
     TcpStream(std::io::Error),
     SocketAddr,
     Tls(native_tls::Error),
-    TlsHandshake(String),
+    TlsHandshake(native_tls::HandshakeError<std::net::TcpStream>),
     Io(std::io::Error),
     Electrum(electrum::Error),
     Mutex,

@@ -131,7 +131,7 @@ impl SslClient {
             .map_err(Error::TcpStream)?;
         let tls = connector
             .connect(&self.url, tcp)
-            .map_err(|e| Error::TlsHandshake(e.to_string()))?;
+            .map_err(Error::TlsHandshake)?;
         let state = Arc::new(Mutex::new(TlsState {
             tls,
             buf: Vec::new(),
