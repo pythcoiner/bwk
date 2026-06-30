@@ -106,8 +106,10 @@ impl ResponseBatch {
 
 macro_rules! parse {
     ($method:ident, $response_type:ty, $raw:expr) => {{
-        let r: $response_type =
-            serde_json::from_str($raw).map_err(|_| Error::ResponseParsing($raw.into()))?;
+        let r: $response_type = serde_json::from_str($raw).map_err(|e| {
+            log::debug!("failed to parse response: {}", $raw);
+            Error::ResponseParsing(e)
+        })?;
         Ok(Self::$method(r))
     }};
 }
@@ -138,8 +140,10 @@ impl Response {
         }
 
         // the we handle the case we need to match request/response id
-        let rr: RawResponse = serde_json::from_str(raw)
-            .map_err(|e| Error::RawResponseParsing(format!("Fail to parse `{raw}`: {e:?}")))?;
+        let rr: RawResponse = serde_json::from_str(raw).map_err(|e| {
+            log::debug!("failed to parse raw response: {raw}");
+            Error::RawResponseParsing(e)
+        })?;
         let request = index.get(&rr.id).ok_or(Error::ResponseId(rr.id))?;
         match request.method {
             Method::Ping => parse!(Ping, PingResponse, raw),
@@ -201,8 +205,10 @@ pub struct SHNotification {
 impl FromStr for SHNotification {
     type Err = Error;
     fn from_str(value: &str) -> Result<Self, Error> {
-        let notif: Self =
-            serde_json::from_str(value).map_err(|_| Error::ResponseParsing(value.into()))?;
+        let notif: Self = serde_json::from_str(value).map_err(|e| {
+            log::debug!("failed to parse notification: {value}");
+            Error::ResponseParsing(e)
+        })?;
         if let Method::ScriptHashSubscribe = notif.method {
             Ok(notif)
         } else {

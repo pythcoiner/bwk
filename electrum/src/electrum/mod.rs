@@ -8,8 +8,8 @@ pub mod types;
 pub enum Error {
     InvalidParam,
     MethodNotFound,
-    ResponseParsing(String),
-    RawResponseParsing(String),
+    ResponseParsing(serde_json::Error),
+    RawResponseParsing(serde_json::Error),
     ResponseId(usize),
     BatchParsing,
     WrongMethod,
