@@ -138,10 +138,11 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `ConfigError::InvalidKey` if:
-    /// - `scan_sk` is not exactly 64 hex characters
-    /// - `spend_key` is not exactly 64 or 66 hex characters
-    /// - Either key contains invalid hex characters
+    /// Returns a key-validation error if:
+    /// - `scan_sk` is not exactly 64 hex characters ([`ConfigError::ScanSkLength`])
+    /// - `spend_key` is not exactly 64 or 66 hex characters ([`ConfigError::SpendKeyLength`])
+    /// - Either key contains invalid hex characters ([`ConfigError::ScanSkHex`] /
+    ///   [`ConfigError::SpendKeyHex`])
     pub fn from_keys(
         account_name: String,
         network: Network,
@@ -152,21 +153,15 @@ impl Config {
     ) -> Result<Self, ConfigError> {
         // Validate scan_sk is valid hex (64 chars = 32 bytes secret key)
         if scan_sk.len() != 64 {
-            return Err(ConfigError::InvalidKey(
-                "scan_sk must be 64 hex chars".to_string(),
-            ));
+            return Err(ConfigError::ScanSkLength);
         }
-        hex::decode(&scan_sk)
-            .map_err(|_| ConfigError::InvalidKey("scan_sk is not valid hex".to_string()))?;
+        hex::decode(&scan_sk).map_err(ConfigError::ScanSkHex)?;
 
         // Validate spend_key is valid hex (64 chars = secret key, 66 chars = compressed pubkey)
         if spend_key.len() != 64 && spend_key.len() != 66 {
-            return Err(ConfigError::InvalidKey(
-                "spend_key must be 64 or 66 hex chars".to_string(),
-            ));
+            return Err(ConfigError::SpendKeyLength);
         }
-        hex::decode(&spend_key)
-            .map_err(|_| ConfigError::InvalidKey("spend_key is not valid hex".to_string()))?;
+        hex::decode(&spend_key).map_err(ConfigError::SpendKeyHex)?;
 
         Ok(Self {
             account_name,
@@ -298,22 +293,22 @@ impl Config {
         kind: SubAccountKind,
         sub_account_mnemonic: Option<String>,
     ) -> Result<(), ConfigError> {
-        let signer = HotSigner::new_from_mnemonics(self.network, mnemonic)
-            .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+        let signer =
+            HotSigner::new_from_mnemonics(self.network, mnemonic).map_err(ConfigError::Signer)?;
         let account = ChildNumber::from_hardened_idx(0).expect("hardcoded account index");
         let descriptor = match kind {
             SubAccountKind::Segwit => {
                 let path = bwk_descriptor::wpkh_path(self.network, account)
-                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+                    .map_err(ConfigError::DescriptorPath)?;
                 bwk_descriptor::SpkDerivator::new_wpkh(signer.xpub(&path), self.network)
-                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?
+                    .map_err(ConfigError::Derivator)?
                     .descriptor()
             }
             SubAccountKind::Taproot => {
                 let path = bwk_descriptor::tr_path(self.network, account)
-                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?;
+                    .map_err(ConfigError::DescriptorPath)?;
                 bwk_descriptor::SpkDerivator::new_tr(signer.xpub(&path), self.network)
-                    .map_err(|e| ConfigError::Derivation(format!("{e:?}")))?
+                    .map_err(ConfigError::Derivator)?
                     .descriptor()
             }
         };
@@ -406,21 +401,26 @@ impl Config {
 /// Errors that can occur when loading or parsing Config.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// IO error (file not found, permission denied, etc.)
     #[error("io error: {0}")]
     Io(String),
-    /// JSON parsing error
     #[error("parse error: {0}")]
     Parse(String),
-    /// Invalid key format or value
-    #[error("invalid key: {0}")]
-    InvalidKey(String),
-    /// Default sub-accounts require this config to contain mnemonic signer material.
+    #[error("scan_sk must be 64 hex chars")]
+    ScanSkLength,
+    #[error("spend_key must be 64 or 66 hex chars")]
+    SpendKeyLength,
+    #[error("scan_sk is not valid hex: {0}")]
+    ScanSkHex(hex::FromHexError),
+    #[error("spend_key is not valid hex: {0}")]
+    SpendKeyHex(hex::FromHexError),
     #[error("missing mnemonic")]
     MissingMnemonic,
-    /// Descriptor derivation failed
-    #[error("derivation error: {0}")]
-    Derivation(String),
+    #[error("signer error: {0}")]
+    Signer(bwk_sign::Error),
+    #[error("descriptor path error: {0}")]
+    DescriptorPath(#[source] bwk_descriptor::descriptor::Error),
+    #[error("derivator error: {0}")]
+    Derivator(#[source] bwk_descriptor::derivator::Error),
 }
 
 #[cfg(test)]
@@ -611,12 +611,7 @@ mod tests {
             PathBuf::from("/tmp/bwk-test"),
         );
 
-        assert!(result.is_err());
-        if let Err(ConfigError::InvalidKey(msg)) = result {
-            assert!(msg.contains("scan_sk must be 64 hex chars"));
-        } else {
-            panic!("expected InvalidKey error");
-        }
+        assert!(matches!(result, Err(ConfigError::ScanSkLength)));
     }
 
     #[test]
@@ -630,12 +625,7 @@ mod tests {
             PathBuf::from("/tmp/bwk-test"),
         );
 
-        assert!(result.is_err());
-        if let Err(ConfigError::InvalidKey(msg)) = result {
-            assert!(msg.contains("scan_sk is not valid hex"));
-        } else {
-            panic!("expected InvalidKey error");
-        }
+        assert!(matches!(result, Err(ConfigError::ScanSkHex(_))));
     }
 
     #[test]
@@ -649,12 +639,7 @@ mod tests {
             PathBuf::from("/tmp/bwk-test"),
         );
 
-        assert!(result.is_err());
-        if let Err(ConfigError::InvalidKey(msg)) = result {
-            assert!(msg.contains("spend_key must be 64 or 66 hex chars"));
-        } else {
-            panic!("expected InvalidKey error");
-        }
+        assert!(matches!(result, Err(ConfigError::SpendKeyLength)));
     }
 
     #[test]
@@ -668,12 +653,7 @@ mod tests {
             PathBuf::from("/tmp/bwk-test"),
         );
 
-        assert!(result.is_err());
-        if let Err(ConfigError::InvalidKey(msg)) = result {
-            assert!(msg.contains("spend_key is not valid hex"));
-        } else {
-            panic!("expected InvalidKey error");
-        }
+        assert!(matches!(result, Err(ConfigError::SpendKeyHex(_))));
     }
 
     #[test]
@@ -851,10 +831,9 @@ mod tests {
         assert!(msg.contains("parse error"));
         assert!(msg.contains("invalid json"));
 
-        // Test InvalidKey error variant
-        let err = ConfigError::InvalidKey("bad key format".to_string());
+        // Test a key-validation error variant
+        let err = ConfigError::ScanSkLength;
         let msg = err.to_string();
-        assert!(msg.contains("invalid key"));
-        assert!(msg.contains("bad key format"));
+        assert!(msg.contains("scan_sk must be 64 hex chars"));
     }
 }
