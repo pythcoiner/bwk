@@ -471,7 +471,7 @@ fn test_account_error_display() {
     let err = AccountError::MissingBlindbitUrl;
     assert!(err.to_string().contains("blindbit_url"));
 
-    let err = AccountError::Scan("test scan error".to_string());
+    let err = AccountError::Scan(bwk_sp::receiver::error::Error::SeedDerivation);
     assert!(err.to_string().contains("scan failed"));
 
     let err = AccountError::Network("test network error".to_string());
@@ -483,8 +483,8 @@ fn test_account_error_display() {
     let err = AccountError::ScannerAlreadyRunning;
     assert!(err.to_string().contains("already running"));
 
-    let err = AccountError::Transaction("test tx error".to_string());
-    assert!(err.to_string().contains("transaction error"));
+    let err = AccountError::Tweak(bitcoin::secp256k1::Error::InvalidTweak);
+    assert!(err.to_string().contains("tweak"));
 }
 
 /// Test Notification Debug and Clone.

@@ -1421,10 +1421,9 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             return Ok(());
         }
 
-        let start = Height::from_consensus(start_height)
-            .map_err(|e| AccountError::Scan(format!("invalid start height: {e}")))?;
-        let end = Height::from_consensus(end_height)
-            .map_err(|e| AccountError::Scan(format!("invalid end height: {e}")))?;
+        let start =
+            Height::from_consensus(start_height).map_err(|e| AccountError::Scan(e.into()))?;
+        let end = Height::from_consensus(end_height).map_err(|e| AccountError::Scan(e.into()))?;
 
         let dust_limit = self.config.dust_limit.map(Amount::from_sat);
 
@@ -1450,7 +1449,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             dust_limit,
             with_cutthrough,
         )
-        .map_err(|e| AccountError::Scan(e.to_string()))?;
+        .map_err(AccountError::Scan)?;
 
         let _ = self
             .sender

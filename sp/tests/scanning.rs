@@ -1732,5 +1732,5 @@ fn test_broadcast_requires_electrum_endpoint() {
     let err = account
         .broadcast(&tx)
         .expect_err("broadcast without endpoint must fail");
-    assert!(matches!(err, AccountError::Broadcast(_)));
+    assert!(matches!(err, AccountError::NoElectrumEndpoint));
 }

@@ -88,25 +88,29 @@ pub enum AccountError {
     MissingSpendKey,
     #[error("failed to create SpReceiver: {0}")]
     SpReceiver(crate::receiver::error::Error),
-    /// Scan operation failed
     #[error("scan failed: {0}")]
-    Scan(String),
-    /// Network/backend communication error
+    Scan(crate::receiver::error::Error),
+    // String is deliberate: foreign backend errors are surfaced as text, not typed.
     #[error("network error: {0}")]
     Network(String),
-    /// Signing requested but no keys available
     #[error("signing failed: no keys")]
     NoKeys,
-    /// Scanner thread is already running
     #[error("scanner already running")]
     ScannerAlreadyRunning,
-    /// Transaction building failed
-    #[error("transaction error: {0}")]
-    Transaction(String),
-    /// Broadcasting a transaction failed
+    #[error("failed to finalize psbt: {0:?}")]
+    Finalize(Vec<miniscript::psbt::Error>),
+    #[error("signing error: {0}")]
+    Signing(crate::receiver::error::Error),
+    #[error("failed to generate aux randomness: {0}")]
+    AuxRand(getrandom::Error),
+    #[error("sighash computation failed: {0}")]
+    Sighash(bitcoin::sighash::TaprootError),
+    #[error("invalid input tweak: {0}")]
+    Tweak(bitcoin::secp256k1::Error),
+    #[error("no electrum endpoint configured")]
+    NoElectrumEndpoint,
     #[error("broadcast error: {0}")]
-    Broadcast(String),
-    /// Persistence backend or store-open failure (e.g. directory already locked).
+    Broadcast(#[from] bwk::bwk_electrum::client::Error),
     #[error("persistence error: {0}")]
     Persist(String),
 }
@@ -1062,17 +1066,16 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Broadcast a signed spend via Electrum and, on success, inject it into
     /// local state as unconfirmed (see [`Account::record_unconfirmed_spend`]).
     ///
-    /// Returns `AccountError::Broadcast` if no Electrum endpoint is configured or
-    /// the send fails; nothing is injected unless the broadcast succeeds.
+    /// Returns `AccountError::NoElectrumEndpoint` if no Electrum endpoint is
+    /// configured, or `AccountError::Broadcast` if the send fails; nothing is
+    /// injected unless the broadcast succeeds.
     pub fn broadcast(&self, tx: &bitcoin::Transaction) -> Result<Txid, AccountError> {
-        let (url, port) = self.config.electrum_endpoint().ok_or_else(|| {
-            AccountError::Broadcast("no electrum endpoint configured".to_string())
-        })?;
-        let mut client = bwk::bwk_electrum::client::Client::new(url, port)
-            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
-        client
-            .broadcast_tx(tx)
-            .map_err(|e| AccountError::Broadcast(e.to_string()))?;
+        let (url, port) = self
+            .config
+            .electrum_endpoint()
+            .ok_or(AccountError::NoElectrumEndpoint)?;
+        let mut client = bwk::bwk_electrum::client::Client::new(url, port)?;
+        client.broadcast_tx(tx)?;
         self.record_unconfirmed_spend(tx)
     }
 
@@ -1119,9 +1122,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Finalize a signed PSBT into a broadcast-ready transaction.
     fn finalize(psbt: &mut bitcoin::Psbt) -> Result<bitcoin::Transaction, AccountError> {
         let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        PsbtExt::finalize_mut(psbt, &secp).map_err(|errors| {
-            AccountError::Transaction(format!("failed to finalize: {errors:?}"))
-        })?;
+        PsbtExt::finalize_mut(psbt, &secp).map_err(AccountError::Finalize)?;
         Ok(psbt.clone().extract_tx_unchecked_fee_rate())
     }
 
@@ -1134,7 +1135,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         let b_spend = self
             .sp_receiver
             .try_get_secret_spend_key()
-            .map_err(|e| AccountError::Transaction(e.to_string()))?;
+            .map_err(AccountError::Signing)?;
 
         let secp = Secp256k1::new();
         let hash_ty = TapSighashType::Default;
@@ -1154,8 +1155,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         let coin_store = self.coin_store.lock().expect("poisoned");
 
         let mut aux_rand = [0u8; 32];
-        getrandom::getrandom(&mut aux_rand)
-            .map_err(|e| AccountError::Transaction(format!("random bytes: {e}")))?;
+        getrandom::getrandom(&mut aux_rand).map_err(AccountError::AuxRand)?;
 
         for (i, input) in psbt.unsigned_tx.input.iter().enumerate() {
             let Some(entry) = coin_store.get(&input.previous_output) else {
@@ -1165,14 +1165,13 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
 
             let sighash = cache
                 .taproot_key_spend_signature_hash(i, &Prevouts::All(&prevouts), hash_ty)
-                .map_err(|e| AccountError::Transaction(format!("sighash: {e}")))?;
+                .map_err(AccountError::Sighash)?;
 
             let msg = Message::from_digest(sighash.to_byte_array());
-            let tweak = SecretKey::from_slice(entry.tweak())
-                .map_err(|e| AccountError::Transaction(format!("tweak: {e}")))?;
+            let tweak = SecretKey::from_slice(entry.tweak()).map_err(AccountError::Tweak)?;
             let sk = b_spend
                 .add_tweak(&tweak.into())
-                .map_err(|e| AccountError::Transaction(format!("add_tweak: {e}")))?;
+                .map_err(AccountError::Tweak)?;
 
             let keypair = Keypair::from_secret_key(&secp, &sk);
             // SP outputs use dangerous_assume_tweaked() — no taproot tweak on the
@@ -1408,7 +1407,7 @@ mod tests {
         let err = AccountError::MissingBlindbitUrl;
         assert!(err.to_string().contains("blindbit_url"));
 
-        let err = AccountError::Scan("scan error".to_string());
+        let err = AccountError::Scan(crate::receiver::error::Error::SeedDerivation);
         assert!(err.to_string().contains("scan failed"));
 
         let err = AccountError::Network("network error".to_string());
