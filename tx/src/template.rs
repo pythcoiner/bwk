@@ -56,30 +56,22 @@ pub struct TxSimulation {
 /// Error returned by the [`TxRequest`]-driven account helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum TxRequestError {
-    /// The address string for an output failed to parse.
     #[error("invalid address '{address}': {source}")]
     InvalidAddress {
-        /// The unparseable address as the user supplied it.
         address: String,
-        /// The underlying parse error.
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// More than one output had `max = true`.
     #[error("only one output can have max=true")]
     MultipleMaxOutputs,
-    /// A manually-listed outpoint is not present in the wallet.
     #[error("coin {0} not found in wallet")]
     CoinNotFound(bitcoin::OutPoint),
-    /// A manually-listed outpoint is present but already spent or in-flight.
     #[error("coin {0} is not spendable")]
     CoinNotSpendable(bitcoin::OutPoint),
-    /// Coin selection ran out of funds.
     #[error("insufficient funds")]
     InsufficientFunds,
-    /// The underlying [`crate::TxBuilder`] surfaced an error.
     #[error("builder error: {0}")]
-    Builder(String),
+    Builder(#[source] crate::transaction::Error),
 }
 
 impl From<crate::transaction::Error> for TxRequestError {
@@ -89,7 +81,7 @@ impl From<crate::transaction::Error> for TxRequestError {
     fn from(err: crate::transaction::Error) -> Self {
         match err {
             crate::transaction::Error::CoinSelection => TxRequestError::InsufficientFunds,
-            other => TxRequestError::Builder(format!("{other:?}")),
+            other => TxRequestError::Builder(other),
         }
     }
 }

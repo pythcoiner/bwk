@@ -12,36 +12,56 @@ use crate::{
     Coin, DUST_AMOUNT,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum Error {
+    #[error("failed to satisfy an input")]
     Satisfaction,
+    #[error("fee is zero")]
     FeesNull,
+    #[error("transaction has no inputs")]
     NoInputs,
+    #[error("transaction has no outputs")]
     NoOutputs,
+    #[error("only one output can drain the wallet")]
     SingleMax,
+    #[error("address network mismatch")]
     AddressNetwork,
+    #[error("failed to add an input")]
     AddInput,
+    #[error("not enough funds to pay the fee")]
     NotEnoughForFee,
+    #[error("derivator error")]
     Derivator,
+    #[error("descriptor error")]
     Descriptor,
+    #[error("invalid input")]
     Input,
+    #[error("invalid output")]
     Output,
+    #[error("coin selection failed")]
     CoinSelection,
+    #[error("coin selection failed to cover the fee")]
     CoinSelectionFee,
-    /// Auto coin selection was requested (no inputs + a selector supplied) but
-    /// the fee is absolute (`Fees::Sats`); selection needs a per-vB feerate.
+    // Auto coin selection was requested (no inputs + a selector supplied) but
+    // the fee is absolute (`Fees::Sats`); selection needs a per-vB feerate.
+    #[error("auto coin selection requires a per-vB feerate")]
     CoinSelectionRequiresFeerate,
+    #[error("no silent payment provider")]
     NoSpProvider,
+    #[error("failed to compute silent payment partial secret")]
     SpPartialSecret,
+    #[error("change output already added")]
     ChangeAlreadyAdded,
+    #[error("pay to anchor is not supported")]
     PayToAnchor,
-    /// Recipient passed to finalize() with change does not return true from is_change()
+    #[error("recipient passed as change is not a change output")]
     NotChange,
-    /// Change should have been added but wasn't - funds would be lost to fees
-    MissingChange {
-        excess: u64,
-    },
-    /// Fees exceed both percentage threshold and absolute threshold
+    #[error("missing change output, {excess} sats would be lost to fees")]
+    MissingChange { excess: u64 },
+    #[error(
+        "disproportionate fee: {fee} sats for {paid_outputs} sats of outputs \
+         exceeds both {max_percent}% and {max_amount} sats"
+    )]
     DisproportionateFees {
         fee: u64,
         paid_outputs: u64,
