@@ -82,12 +82,9 @@ fn test_account_new_invalid_no_keys() {
     config.scan_sk = None;
 
     let result = Account::new(config);
-    assert!(result.is_err());
     match result {
-        Err(AccountError::Config(msg)) => {
-            assert!(msg.contains("mnemonic or scan_sk"));
-        }
-        Err(other) => panic!("expected Config error, got {other:?}"),
+        Err(AccountError::MissingKeys) => {}
+        Err(other) => panic!("expected MissingKeys error, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -107,12 +104,9 @@ fn test_account_new_invalid_bad_mnemonic() {
     .enable_persist(false);
 
     let result = Account::new(config);
-    assert!(result.is_err());
     match result {
-        Err(AccountError::Config(msg)) => {
-            assert!(msg.contains("invalid mnemonic"));
-        }
-        Err(other) => panic!("expected Config error about mnemonic, got {other:?}"),
+        Err(AccountError::InvalidMnemonic(_)) => {}
+        Err(other) => panic!("expected InvalidMnemonic error, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -151,12 +145,9 @@ fn test_account_new_invalid_empty_url() {
     .enable_persist(false);
 
     let result = Account::new(config);
-    assert!(result.is_err());
     match result {
-        Err(AccountError::Config(msg)) => {
-            assert!(msg.contains("blindbit_url"));
-        }
-        Err(other) => panic!("expected Config error about blindbit_url, got {other:?}"),
+        Err(AccountError::MissingBlindbitUrl) => {}
+        Err(other) => panic!("expected MissingBlindbitUrl error, got {other:?}"),
         Ok(_) => panic!("expected error, got Ok"),
     }
 }
@@ -477,8 +468,8 @@ fn test_concurrent_writes_different_stores() {
 /// Test AccountError display messages.
 #[test]
 fn test_account_error_display() {
-    let err = AccountError::Config("test config error".to_string());
-    assert!(err.to_string().contains("config invalid"));
+    let err = AccountError::MissingBlindbitUrl;
+    assert!(err.to_string().contains("blindbit_url"));
 
     let err = AccountError::Scan("test scan error".to_string());
     assert!(err.to_string().contains("scan failed"));

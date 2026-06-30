@@ -68,9 +68,26 @@ type Stores = (
 /// Errors that can occur in Account operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
-    /// Configuration is invalid
-    #[error("config invalid: {0}")]
-    Config(String),
+    #[error("either mnemonic or scan_sk must be provided")]
+    MissingKeys,
+    #[error("blindbit_url is required")]
+    MissingBlindbitUrl,
+    #[error("invalid mnemonic: {0}")]
+    InvalidMnemonic(bip39::Error),
+    #[error("invalid scan_sk hex: {0}")]
+    ScanSkHex(hex::FromHexError),
+    #[error("invalid scan_sk: {0}")]
+    InvalidScanSk(bitcoin::secp256k1::Error),
+    #[error("invalid spend_key hex: {0}")]
+    SpendKeyHex(hex::FromHexError),
+    #[error("invalid spend_key: {0}")]
+    InvalidSpendKey(bitcoin::secp256k1::Error),
+    #[error("spend_key must be 32 or 33 bytes")]
+    SpendKeyLength,
+    #[error("spend_key is required when using scan_sk")]
+    MissingSpendKey,
+    #[error("failed to create SpReceiver: {0}")]
+    SpReceiver(crate::receiver::error::Error),
     /// Scan operation failed
     #[error("scan failed: {0}")]
     Scan(String),
@@ -200,9 +217,9 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     ///
     /// # Errors
     ///
-    /// Returns `AccountError::Config` if:
-    /// - Neither mnemonic nor scan_sk is provided
-    /// - blindbit_url is empty
+    /// Returns a configuration error if:
+    /// - Neither mnemonic nor scan_sk is provided ([`AccountError::MissingKeys`])
+    /// - blindbit_url is empty ([`AccountError::MissingBlindbitUrl`])
     pub fn new(config: Config) -> Result<Self, AccountError> {
         Self::with_config_store(config, Arc::new(NoopConfigStore::<Config>::default()))
     }
@@ -217,12 +234,10 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     ) -> Result<Self, AccountError> {
         // Validate config
         if config.mnemonic.is_none() && config.scan_sk.is_none() {
-            return Err(AccountError::Config(
-                "either mnemonic or scan_sk must be provided".to_string(),
-            ));
+            return Err(AccountError::MissingKeys);
         }
         if config.blindbit_url.is_empty() {
-            return Err(AccountError::Config("blindbit_url is required".to_string()));
+            return Err(AccountError::MissingBlindbitUrl);
         }
 
         // Create SpReceiver
@@ -321,48 +336,40 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     /// Create SpReceiver from config.
     fn create_sp_receiver(config: &Config) -> Result<SpReceiver, AccountError> {
         if let Some(ref mnemonic) = config.mnemonic {
-            let mnemonic = bip39::Mnemonic::parse(mnemonic)
-                .map_err(|e| AccountError::Config(format!("invalid mnemonic: {e}")))?;
+            let mnemonic =
+                bip39::Mnemonic::parse(mnemonic).map_err(AccountError::InvalidMnemonic)?;
             SpReceiver::new_from_mnemonic(mnemonic, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpReceiver: {e}")))
+                .map_err(AccountError::SpReceiver)
         } else if let Some(ref scan_sk_hex) = config.scan_sk {
             // Create from raw keys
-            let scan_sk_bytes = hex::decode(scan_sk_hex)
-                .map_err(|e| AccountError::Config(format!("invalid scan_sk hex: {e}")))?;
+            let scan_sk_bytes = hex::decode(scan_sk_hex).map_err(AccountError::ScanSkHex)?;
             let scan_sk = bitcoin::secp256k1::SecretKey::from_slice(&scan_sk_bytes)
-                .map_err(|e| AccountError::Config(format!("invalid scan_sk: {e}")))?;
+                .map_err(AccountError::InvalidScanSk)?;
 
             let spend_key = if let Some(ref spend_key_hex) = config.spend_key {
-                let spend_key_bytes = hex::decode(spend_key_hex)
-                    .map_err(|e| AccountError::Config(format!("invalid spend_key hex: {e}")))?;
+                let spend_key_bytes =
+                    hex::decode(spend_key_hex).map_err(AccountError::SpendKeyHex)?;
 
                 if spend_key_bytes.len() == 32 {
                     // Secret key
                     let sk = bitcoin::secp256k1::SecretKey::from_slice(&spend_key_bytes)
-                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
+                        .map_err(AccountError::InvalidSpendKey)?;
                     crate::receiver::SpendKey::Secret(sk)
                 } else if spend_key_bytes.len() == 33 {
                     // Public key
                     let pk = bitcoin::secp256k1::PublicKey::from_slice(&spend_key_bytes)
-                        .map_err(|e| AccountError::Config(format!("invalid spend_key: {e}")))?;
+                        .map_err(AccountError::InvalidSpendKey)?;
                     crate::receiver::SpendKey::Public(pk)
                 } else {
-                    return Err(AccountError::Config(
-                        "spend_key must be 32 or 33 bytes".to_string(),
-                    ));
+                    return Err(AccountError::SpendKeyLength);
                 }
             } else {
-                return Err(AccountError::Config(
-                    "spend_key required when using scan_sk".to_string(),
-                ));
+                return Err(AccountError::MissingSpendKey);
             };
 
-            SpReceiver::new(scan_sk, spend_key, config.network)
-                .map_err(|e| AccountError::Config(format!("failed to create SpReceiver: {e}")))
+            SpReceiver::new(scan_sk, spend_key, config.network).map_err(AccountError::SpReceiver)
         } else {
-            Err(AccountError::Config(
-                "either mnemonic or scan_sk must be provided".to_string(),
-            ))
+            Err(AccountError::MissingKeys)
         }
     }
 
@@ -1398,8 +1405,8 @@ mod tests {
 
     #[test]
     fn test_account_error_display() {
-        let err = AccountError::Config("test error".to_string());
-        assert!(err.to_string().contains("config invalid"));
+        let err = AccountError::MissingBlindbitUrl;
+        assert!(err.to_string().contains("blindbit_url"));
 
         let err = AccountError::Scan("scan error".to_string());
         assert!(err.to_string().contains("scan failed"));
@@ -1552,12 +1559,7 @@ mod tests {
         config.scan_sk = None;
 
         let result = Account::new(config);
-        assert!(result.is_err());
-        if let Err(AccountError::Config(msg)) = result {
-            assert!(msg.contains("mnemonic or scan_sk"));
-        } else {
-            panic!("expected Config error");
-        }
+        assert!(matches!(result, Err(AccountError::MissingKeys)));
     }
 
     #[test]
@@ -1566,12 +1568,7 @@ mod tests {
         config.blindbit_url = String::new();
 
         let result = Account::new(config);
-        assert!(result.is_err());
-        if let Err(AccountError::Config(msg)) = result {
-            assert!(msg.contains("blindbit_url"));
-        } else {
-            panic!("expected Config error");
-        }
+        assert!(matches!(result, Err(AccountError::MissingBlindbitUrl)));
     }
 
     #[test]
@@ -1583,12 +1580,7 @@ mod tests {
             "https://blindbit.example.com".to_string(),
             PathBuf::from("/tmp/bwk-sp-test-from-mnemonic"),
         );
-        assert!(result.is_err());
-        if let Err(AccountError::Config(msg)) = result {
-            assert!(msg.contains("invalid mnemonic"));
-        } else {
-            panic!("expected Config error for invalid mnemonic");
-        }
+        assert!(matches!(result, Err(AccountError::InvalidMnemonic(_))));
     }
 
     #[test]
@@ -1600,12 +1592,7 @@ mod tests {
             String::new(),
             PathBuf::from("/tmp/bwk-sp-test-from-mnemonic-2"),
         );
-        assert!(result.is_err());
-        if let Err(AccountError::Config(msg)) = result {
-            assert!(msg.contains("blindbit_url"));
-        } else {
-            panic!("expected Config error for empty blindbit_url");
-        }
+        assert!(matches!(result, Err(AccountError::MissingBlindbitUrl)));
     }
 
     // Note: Full Account creation tests require a working blindbit backend
