@@ -1755,7 +1755,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn simple_reorg() {
+    fn simple_reorg_e2e() {
         // setup_logger();
         let (url, port, mut electrsd, bitcoind) = bootstrap_electrs();
         generate(&bitcoind, 110);
