@@ -470,10 +470,10 @@ pub struct TxGetResponse {
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct GetMerkleResult {
-    merkle: Vec<String>,
-    block_height: usize,
+    pub merkle: Vec<String>,
+    pub block_height: usize,
     #[serde(rename = "pos")]
-    tx_pos: usize,
+    pub tx_pos: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]

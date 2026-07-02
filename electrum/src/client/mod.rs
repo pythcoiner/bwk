@@ -32,6 +32,7 @@ use tx_listener::listen_txs;
 const SEND_MAX_RETRIES: usize = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_millis(300);
 
+const MERKLE_HASH_BYTES: usize = 32;
 const SHORT_HEX_BYTES: usize = 8;
 
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +63,14 @@ pub enum DecodeError {
     HeadersHex(#[source] HexToBytesError),
     #[error("headers length {0} is not a multiple of {size}", size = Header::SIZE)]
     HeadersAlignment(usize),
+    #[error("invalid merkle hex at index {index}: {source}")]
+    MerkleHex {
+        index: usize,
+        #[source]
+        source: HexToBytesError,
+    },
+    #[error("invalid merkle hash length at index {index}: expected {expected}, got {got}", expected = MERKLE_HASH_BYTES)]
+    MerkleHashLength { index: usize, got: usize },
 }
 
 pub fn short_hash(s: &ScriptBuf) -> String {
@@ -74,6 +83,7 @@ pub enum CoinRequest {
     Subscribe(Vec<ScriptBuf>),
     History(Vec<ScriptBuf>),
     Txs(Vec<Txid>),
+    GetTxMerkle { txid: Txid, height: u32 },
     Stop,
 }
 
@@ -89,6 +99,11 @@ impl Debug for CoinRequest {
                 f.debug_tuple("History").field(&hashes).finish()
             }
             Self::Txs(arg0) => f.debug_tuple("Txs").field(arg0).finish(),
+            Self::GetTxMerkle { txid, height } => f
+                .debug_struct("GetTxMerkle")
+                .field("txid", &short_string(txid.to_string(), 10))
+                .field("height", height)
+                .finish(),
             Self::Stop => write!(f, "Stop"),
         }
     }
@@ -101,6 +116,7 @@ impl CoinRequest {
             Self::Subscribe(v) => format!("Subscribe({})", v.len()),
             Self::History(v) => format!("History({})", v.len()),
             Self::Txs(v) => format!("Txs({})", v.len()),
+            Self::GetTxMerkle { .. } => "GetTxMerkle".to_string(),
             Self::Stop => "Stop".to_string(),
         }
     }
@@ -112,6 +128,18 @@ pub enum CoinError {
     Send(#[source] raw_client::Error),
     #[error("failed to decode transaction: {0}")]
     TxDecode(consensus::encode::FromHexError),
+    #[error("merkle decode failed for {txid}@{height}: {source}")]
+    MerkleDecode {
+        txid: Txid,
+        height: u32,
+        source: DecodeError,
+    },
+    #[error("merkle fetch failed for {txid}@{height}: {error}")]
+    MerkleFetch {
+        txid: Txid,
+        height: u32,
+        error: ErrorResponse,
+    },
     #[error("server error: {0}")]
     Server(ErrorResponse),
     #[error("transport error: {0}")]
@@ -122,6 +150,12 @@ pub enum CoinResponse {
     Status(BTreeMap<ScriptBuf, Option<String>>),
     History(BTreeMap<ScriptBuf, Vec<(Txid, Option<u64> /* height */)>>),
     Txs(Vec<Transaction>),
+    TxMerkle {
+        txid: Txid,
+        height: u32,
+        branch: Vec<[u8; MERKLE_HASH_BYTES]>,
+        pos: u32,
+    },
     Stopped,
     Error(CoinError),
 }
@@ -162,6 +196,11 @@ impl Debug for CoinResponse {
                     .collect();
                 f.debug_tuple("History").field(&map).finish()
             }
+            Self::TxMerkle { txid, height, .. } => f
+                .debug_struct("TxMerkle")
+                .field("txid", &short_string(txid.to_string(), 10))
+                .field("height", height)
+                .finish(),
             Self::Stopped => write!(f, "Stopped"),
             Self::Error(e) => write!(f, "Error({e})"),
         }
@@ -175,6 +214,7 @@ impl CoinResponse {
             Self::Status(m) => format!("Status({})", m.len()),
             Self::History(m) => format!("History({} scripts)", m.len()),
             Self::Txs(v) => format!("Txs({})", v.len()),
+            Self::TxMerkle { .. } => "TxMerkle".to_string(),
             Self::Stopped => "Stopped".to_string(),
             Self::Error(e) => format!("Error({e})"),
         }
@@ -583,5 +623,83 @@ impl Client {
     /// A `u16` containing the port of the electrum server.
     pub fn port(&self) -> u16 {
         self.port
+    }
+}
+
+fn decode_tx_merkle_branch(merkle: &[String]) -> Result<Vec<[u8; MERKLE_HASH_BYTES]>, DecodeError> {
+    let mut out = Vec::with_capacity(merkle.len());
+    for (idx, hex) in merkle.iter().enumerate() {
+        let bytes = Vec::<u8>::from_hex(hex)
+            .map_err(|source| DecodeError::MerkleHex { index: idx, source })?;
+        if bytes.len() != MERKLE_HASH_BYTES {
+            return Err(DecodeError::MerkleHashLength {
+                index: idx,
+                got: bytes.len(),
+            });
+        }
+        let mut raw = [0u8; MERKLE_HASH_BYTES];
+        raw.copy_from_slice(&bytes);
+        // Electrum reports siblings as display-order (big-endian) hex.
+        // Reverse to internal (little-endian) order here, so consumers feed
+        // the branch straight into merkle verification.
+        raw.reverse();
+        out.push(raw);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::electrum::response::TxGetMerkleResponse;
+
+    #[test]
+    fn decode_tx_merkle_branch_sample() {
+        // Sample from electrum/src/electrum/response.rs::tests::tx_get_merkle.
+        let response = r#"{"jsonrpc": "2.0", "result": {"block_height": 200000, "merkle": ["ffa0267c8f2af736858894d6f3e5081a05e2ec16dc98f78a80f376ce35077491", "d0039b6be844e631698f57fa02bbfbfb5e8b680f3ebb17646631e6ec9f91f6e6", "bbe3063ce3d04c2e3f18e494a287867f81ad1182b62a1ecb3e1ea2686edcea20", "1d15a2423f52d4aa281a2ac389c0a5a601ed08bdf814494ddf7697196860b801", "b63e58ec9f5ee2e268f1540af8bb0e5b8fd0ce7cd6877a174e6178c676d6b574", "7407724b98c77cdbf070f3fe297839de2bef50fead98b452883f0f3a4643cde2", "d029f17725e71e3c025bd7d0505006dc859af5450d0b6dd092ee88c0d98f9a25", "e4df974d81ab4fdf35f635024a01f20aa88af9f520215708b339dbc5bceddf63", "20f4202f18666483306f175e1c9c521741845afcf2710f0b0d42602ac72c5fd6"], "pos": 2}, "id": 0}"#;
+        let resp: TxGetMerkleResponse = serde_json::from_str(response).unwrap();
+        let merkle = resp.result.merkle;
+        assert_eq!(merkle.len(), 9);
+        let branch = decode_tx_merkle_branch(&merkle).unwrap();
+        assert_eq!(branch.len(), 9);
+        for h in &branch {
+            assert_eq!(h.len(), 32);
+        }
+        // The decoder returns internal (little-endian) order: each sibling is
+        // the byte-reverse of its display-order hex above.
+        let first_hex = hex_conservative::DisplayHex::to_lower_hex_string(&branch[0][..]);
+        assert_eq!(
+            first_hex,
+            "91740735ce76f3808af798dc16ece2051a08e5f3d694888536f72a8f7c26a0ff"
+        );
+        let last_hex = hex_conservative::DisplayHex::to_lower_hex_string(&branch[8][..]);
+        assert_eq!(
+            last_hex,
+            "d65f2cc72a60420d0b0f71f2fc5a844117529c1c5e176f30836466182f20f420"
+        );
+    }
+
+    #[test]
+    fn decode_tx_merkle_branch_bad_length() {
+        // 30 bytes (60 hex chars) instead of 32.
+        let merkle = vec!["ab".repeat(30)];
+        let err = decode_tx_merkle_branch(&merkle).unwrap_err();
+        match err {
+            DecodeError::MerkleHashLength { index, got } => {
+                assert_eq!(index, 0);
+                assert_eq!(got, 30);
+            }
+            e => panic!("unexpected error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_tx_merkle_branch_bad_hex() {
+        let merkle = vec!["zz".repeat(32)];
+        let err = decode_tx_merkle_branch(&merkle).unwrap_err();
+        match err {
+            DecodeError::MerkleHex { index, .. } => assert_eq!(index, 0),
+            e => panic!("unexpected error: {e:?}"),
+        }
     }
 }

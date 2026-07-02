@@ -1009,6 +1009,7 @@ fn listen_txs<T, P>(
                         let mut store = coin_store.lock().expect("poisoned");
                         store.handle_txs_response(txs);
                     }
+                    CoinResponse::TxMerkle { .. } => {}
                     CoinResponse::Stopped => {
                         send_notif!(notification, request, TxListenerNotif::Stopped);
                         let _ = request.send(CoinRequest::Stop);
