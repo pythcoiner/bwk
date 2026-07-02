@@ -74,20 +74,17 @@ pub fn calculate_input_hash(
     A_sum: PublicKey,
 ) -> Result<Scalar, Error> {
     if outpoints_data.is_empty() {
-        return Err(Error::GenericError("No outpoints provided".to_owned()));
+        return Err(Error::NoOutpointsProvided);
     }
 
     let mut outpoints: Vec<[u8; 36]> = Vec::with_capacity(outpoints_data.len());
 
     // should probably just use an OutPoints type properly at some point
     for (txid, vout) in outpoints_data {
-        let mut bytes: Vec<u8> = hex::decode(txid.as_str())?;
+        let mut bytes: Vec<u8> = hex::decode(txid.as_str()).map_err(Error::InvalidTxidHex)?;
 
         if bytes.len() != 32 {
-            return Err(Error::GenericError(format!(
-                "Invalid outpoint hex representation: {}",
-                txid
-            )));
+            return Err(Error::TxidLength(bytes.len()));
         }
 
         // txid in string format is big endian and we need little endian
@@ -107,8 +104,6 @@ pub fn calculate_input_hash(
         Ok(InputsHash::from_outpoint_and_A_sum(smallest_outpoint, A_sum).to_scalar())
     } else {
         // This should never happen
-        Err(Error::GenericError(
-            "Unexpected empty outpoints vector".to_owned(),
-        ))
+        Err(Error::EmptyOutpoints)
     }
 }

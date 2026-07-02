@@ -85,9 +85,7 @@ impl TryFrom<&str> for Label {
         // Is it valid hex?
         let bytes = hex::decode(s)?;
         // Is it 32B long?
-        let bytes: [u8; 32] = bytes.try_into().map_err(|_| {
-            Error::InvalidLabel("Label must be 32 bytes (256 bits) long".to_owned())
-        })?;
+        let bytes: [u8; 32] = bytes.try_into().map_err(|_| Error::LabelLength)?;
         // Is it on the curve? If yes, push it on our labels list
         Ok(Label::from(Scalar::from_be_bytes(bytes)?))
     }
@@ -276,9 +274,7 @@ impl Receiver {
 
         // Check version, we just refuse anything other than 0 for now
         if version != 0 {
-            return Err(Error::GenericError(
-                "Can't have other version than 0 for now".to_owned(),
-            ));
+            return Err(Error::UnsupportedVersion(version));
         }
 
         let mut receiver = Receiver {

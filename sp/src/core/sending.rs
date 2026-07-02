@@ -134,7 +134,7 @@ pub fn calculate_ecdh_shared_secret(B_scan: &PublicKey, partial_secret: &SecretK
 
 fn get_a_sum_secret_keys(input: &[(SecretKey, bool)]) -> Result<SecretKey, Error> {
     if input.is_empty() {
-        return Err(Error::GenericError("No input provided".to_owned()));
+        return Err(Error::NoInputProvided);
     }
 
     let secp = crate::core::secp256k1::Secp256k1::new();

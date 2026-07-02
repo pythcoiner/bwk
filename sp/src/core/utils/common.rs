@@ -98,9 +98,7 @@ impl SilentPaymentAddress {
         version: u8,
     ) -> Result<Self, Error> {
         if version != 0 {
-            return Err(Error::GenericError(
-                "Can't have other version than 0 for now".to_owned(),
-            ));
+            return Err(Error::UnsupportedVersion(version as u32));
         }
 
         Ok(SilentPaymentAddress {
@@ -137,7 +135,7 @@ impl TryFrom<&str> for SilentPaymentAddress {
         let (hrp, data, _variant) = bech32::decode(addr)?;
 
         if data.len() != 107 {
-            return Err(Error::GenericError("Address length is wrong".to_owned()));
+            return Err(Error::WrongAddressLength(data.len()));
         }
 
         let version = data[0].to_u8();
@@ -146,12 +144,7 @@ impl TryFrom<&str> for SilentPaymentAddress {
             "sp" => Network::Mainnet,
             "tsp" => Network::Testnet,
             "sprt" => Network::Regtest,
-            _ => {
-                return Err(Error::InvalidAddress(format!(
-                    "Wrong prefix, expected \"sp\", \"tsp\", or \"sprt\", got \"{}\"",
-                    &hrp
-                )))
-            }
+            _ => return Err(Error::WrongHrp(hrp.to_string())),
         };
 
         let data = Vec::<u8>::from_base32(&data[1..])?;
