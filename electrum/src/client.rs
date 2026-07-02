@@ -196,7 +196,7 @@ impl Client {
         })
     }
 
-    /// Create a new local electrum client: SSL certificate validation id disabled in
+    /// Create a new local electrum client: SSL certificate validation is disabled in
     ///   order to be used with self-signed certificates.
     ///
     /// # Arguments
@@ -527,7 +527,7 @@ impl Client {
     ///   - fail to send the request
     ///   - parsing response fails
     ///   - the response is not of expected type
-    ///   - the transaction does not exists
+    ///   - the transaction does not exist
     pub fn get_tx(&mut self, txid: Txid) -> Result<Transaction, Error> {
         let request = Request::tx_get(txid).id(self.id());
         self.inner.try_send(&request)?;
