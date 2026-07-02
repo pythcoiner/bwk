@@ -170,12 +170,6 @@ pub struct Client {
     port: u16,
 }
 
-impl Clone for Client {
-    fn clone(&self) -> Self {
-        Client::new(&self.url, self.port).unwrap()
-    }
-}
-
 impl Client {
     /// Create a new electrum client.
     ///
