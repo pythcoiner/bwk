@@ -68,7 +68,12 @@ Notification::CoinUpdate ──► Account consumer
 
 - `TxStore`: Source of truth for transactions. Persisted to JSON.
 - `CoinStore`: Generated cache from TxStore. Tracks UTXOs and their status
-  (Unconfirmed/Confirmed/Spent).
+  (Unconfirmed/ConfirmedUnverified/Confirmed/Spent). A confirmed coin follows
+  the inclusion lifecycle Unconfirmed -> ConfirmedUnverified (server reports a
+  height, its header is known) -> Verified (a merkle proof checks against that
+  header). A CTA pass that mutates tx state emits `Notification::HeaderStoreUpdated`;
+  a failed merkle proof or a header store that fails its own validation emits
+  `Notification::ValidationFailed`.
 - `AddressStore`: Tracks generated addresses (recv/change tips + look_ahead).
   Notifies Electrum thread when new addresses need watching.
 - `LabelStore`: User labels keyed by OutPoint or Txid.

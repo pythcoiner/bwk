@@ -422,10 +422,13 @@ mod tests {
         assert_eq!(e.block_hash(), None);
     }
 
+    const DUMMY_HASH_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
     #[test]
     fn inclusion_json_round_trip_unconfirmed() {
         let v = Inclusion::Unconfirmed;
         let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(s, "\"Unconfirmed\"");
         let back: Inclusion = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
     }
@@ -437,6 +440,10 @@ mod tests {
             block_hash: dummy_block_hash(),
         };
         let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            s,
+            format!("{{\"ConfirmedUnverified\":{{\"height\":12345,\"block_hash\":\"{DUMMY_HASH_HEX}\"}}}}")
+        );
         let back: Inclusion = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
     }
@@ -448,6 +455,10 @@ mod tests {
             block_hash: dummy_block_hash(),
         };
         let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            s,
+            format!("{{\"Verified\":{{\"height\":99,\"block_hash\":\"{DUMMY_HASH_HEX}\"}}}}")
+        );
         let back: Inclusion = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
     }
@@ -459,6 +470,10 @@ mod tests {
             block_hash: dummy_block_hash(),
         };
         let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(
+            s,
+            format!("{{\"VerifyFailed\":{{\"height\":99,\"block_hash\":\"{DUMMY_HASH_HEX}\"}}}}")
+        );
         let back: Inclusion = serde_json::from_str(&s).unwrap();
         assert_eq!(v, back);
     }

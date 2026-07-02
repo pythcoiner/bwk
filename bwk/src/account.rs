@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Mutex, MutexGuard,
     },
     thread::{self, JoinHandle},
 };
@@ -12,21 +12,21 @@ use std::{
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
 use bwk_electrum::client::{CoinError, CoinRequest, CoinResponse};
-use bwk_persist::{
-    ConfigStore, NoopBackend, NoopConfigStore, PersistError, PersistenceBackend, Store,
-};
+use bwk_persist::{ConfigStore, NoopConfigStore, PersistError, PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
 
 use miniscript::{
-    bitcoin::{self, OutPoint, ScriptBuf, Txid},
+    bitcoin::{self, BlockHash, OutPoint, ScriptBuf, TxMerkleNode, Txid},
     Descriptor, DescriptorPublicKey,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
-    coin_store::{ClaimAt, CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType},
+    coin_store::{
+        ChainUpdateOutcome, ClaimAt, CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType,
+    },
     config::{Config, Tip},
     header_store::{HeaderStore, InvalidCause},
     label_store::{LabelKey, LabelStore},
@@ -93,7 +93,8 @@ pub enum Notification {
     InvalidLookAhead,
     Stopped,
     Error(Error),
-    /// A CTA pass mutated tx state in response to a HeaderStore update.
+    /// A chain-tip-advance (CTA) pass mutated tx state in response to a
+    /// HeaderStore update.
     HeaderStoreUpdated,
     /// A merkle proof failed verification, or the header store itself
     /// failed validation; the affected entry was refused promotion.
@@ -203,8 +204,10 @@ pub enum TxListenerError {
 }
 
 pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
-    coin_store: Arc<Mutex<CoinStore<P>>>,
-    label_store: Arc<Mutex<LabelStore<P>>>,
+    /// `None` only while the account is stopped (its stores dropped to
+    /// release the backend dir lock, e.g. mid-`restart_electrum`).
+    coin_store: Option<Arc<Mutex<CoinStore<P>>>>,
+    label_store: Option<Arc<Mutex<LabelStore<P>>>>,
     receiver: Option<mpsc::Receiver<Notification>>,
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,
@@ -216,7 +219,7 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     /// host-supplied closures, or any other [`ConfigStore`] impl.
     config_store: Arc<dyn ConfigStore<Config>>,
     electrum_stop: Option<Arc<AtomicBool>>,
-    signing_manager: SigningManager<P::SignerStore>,
+    signing_manager: Option<SigningManager<P::SignerStore>>,
     /// Owned by the Electrum listener thread once it spawns; `take()`-n
     /// in `start_listen_txs` and moved into `listen_txs`.
     statuses_store: Option<P::StatusesStore>,
@@ -430,24 +433,13 @@ impl<P: OpenFromBackend> Account<P> {
         let config_store = self.config_store.clone();
 
         // The persistence backend holds an exclusive lock on the account
-        // directory, so the old Account (and every Arc clone it and its
-        // listener thread hold of that backend) must be fully dropped
-        // before `try_new_inner` reopens the same path. Swap in a
-        // throwaway NoopBackend-backed account to force that drop now,
-        // instead of at the reassignment below (too late: by then
-        // `try_new_inner` has already tried, and failed, to reopen it).
-        let noop: Arc<dyn PersistenceBackend> = Arc::new(NoopBackend);
-        let placeholder_stores = P::open(noop.clone(), noop)?;
-        let (placeholder_sender, _placeholder_receiver) = mpsc::channel();
-        let mut placeholder_config = config.clone();
-        placeholder_config.set_offline(true);
-        *self = Self::from_stores(
-            placeholder_config,
-            header_store.clone(),
-            placeholder_sender,
-            config_store.clone(),
-            placeholder_stores,
-        );
+        // directory, so every Arc clone of that backend must be dropped
+        // before `try_new_inner` can reopen the same path. Stop and join
+        // the listener (dropping its clones), then drop the store fields in
+        // place. If the reopen below fails the account is left in this
+        // stopped, store-less state and the error bubbles up: no NoopBackend
+        // stand-in to silently swallow writes.
+        self.stop_stores();
 
         let (sender, receiver) = mpsc::channel();
         let mut new_account = Self::try_new_inner(config, header_store, sender, config_store)?;
@@ -461,11 +453,25 @@ impl<P: OpenFromBackend> Account<P> {
         if let (Some(url), Some(port)) =
             (self.config.electrum_url.clone(), self.config.electrum_port)
         {
-            if let Err(e) = self.header_store.restart(url, port) {
-                log::warn!("Account::restart_electrum: header store restart failed: {e}");
-            }
+            self.header_store.restart(url, port)?;
         }
         Ok(())
+    }
+
+    /// Stop the listener and drop the backend-holding stores in place,
+    /// releasing the account directory's exclusive lock. Leaves the account
+    /// inert (its store slots `None`) until a reopen repopulates them.
+    fn stop_stores(&mut self) {
+        if let Some(stop) = self.electrum_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Some(handle) = self.tx_listener.take() {
+            let _ = handle.join();
+        }
+        self.coin_store = None;
+        self.label_store = None;
+        self.statuses_store = None;
+        self.signing_manager = None;
     }
 }
 
@@ -506,15 +512,15 @@ impl<P: StorageProfile> Account<P> {
         }
         let _ = account_store; // owned by CoinStore→AddressStore; not stored on Account
         let mut account = Account {
-            coin_store,
-            label_store,
+            coin_store: Some(coin_store),
+            label_store: Some(label_store),
             tx_listener: None,
             electrum_stop: None,
             receiver: None,
             sender,
             config,
             config_store,
-            signing_manager,
+            signing_manager: Some(signing_manager),
             statuses_store: Some(stores.statuses),
             header_store,
         };
@@ -534,6 +540,20 @@ impl<P: StorageProfile> Account<P> {
         if let Err(e) = self.config_store.save(&self.config.for_persistence()) {
             log::warn!("config save failed: {e}");
         }
+    }
+
+    /// The account's coin store. Panics only if called on a stopped
+    /// account (`coin_store` taken to release the backend dir lock).
+    fn coin_store(&self) -> &Arc<Mutex<CoinStore<P>>> {
+        self.coin_store.as_ref().expect("account stopped")
+    }
+
+    fn label_store(&self) -> &Arc<Mutex<LabelStore<P>>> {
+        self.label_store.as_ref().expect("account stopped")
+    }
+
+    fn signing_manager(&self) -> &SigningManager<P::SignerStore> {
+        self.signing_manager.as_ref().expect("account stopped")
     }
 }
 
@@ -569,20 +589,20 @@ impl<P: StorageProfile> Account<P> {
     }
 
     pub fn coin_source(&self) -> CoinStoreSource<P> {
-        CoinStoreSource::<P>::new(self.coin_store.clone())
+        CoinStoreSource::<P>::new(self.coin_store().clone())
     }
 
     pub fn sign(&self, psbt: String) {
-        self.signing_manager.sign(psbt);
+        self.signing_manager().sign(psbt);
     }
 
     pub fn sign_psbt(&self, psbt: &mut bitcoin::Psbt) {
-        self.signing_manager.sign_psbt(psbt);
+        self.signing_manager().sign_psbt(psbt);
     }
 
     /// Returns master xprivs from all BIP32 hot signers, keyed by fingerprint.
     pub fn master_xprivs(&self) -> BTreeMap<bitcoin::bip32::Fingerprint, bitcoin::bip32::Xpriv> {
-        self.signing_manager.master_xprivs()
+        self.signing_manager().master_xprivs()
     }
 }
 
@@ -590,13 +610,13 @@ impl<P: StorageProfile> Account<P> {
 impl<P: StorageProfile> Account<P> {
     pub fn tx_builder(&self) -> TxBuilder {
         let tip_updater =
-            ChangeTipUpdater::new(self.coin_store.lock().expect("poisoned").address_store());
+            ChangeTipUpdater::new(self.coin_store().lock().expect("poisoned").address_store());
         let change_provider = Box::new(ChangeRecipientProvider::new_with_updater(
             tip_updater,
             self.descriptor(),
             self.network(),
         ));
-        let coin_source = Box::new(CoinStoreSource::new(self.coin_store.clone()));
+        let coin_source = Box::new(CoinStoreSource::new(self.coin_store().clone()));
         TxBuilder::new(change_provider).coin_source(coin_source)
     }
 
@@ -615,12 +635,12 @@ impl<P: StorageProfile> Account<P> {
     ///
     /// A `BTreeMap` of `OutPoint` to `CoinEntry`.
     pub fn coins(&self) -> BTreeMap<OutPoint, CoinEntry> {
-        self.coin_store.lock().expect("poisoned").coins()
+        self.coin_store().lock().expect("poisoned").coins()
     }
 
     /// Returns the coin matching the given outpoint if found, else None.
     pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
-        self.coin_store
+        self.coin_store()
             .lock()
             .expect("poisoned")
             .get(outpoint)
@@ -629,12 +649,15 @@ impl<P: StorageProfile> Account<P> {
 
     /// Returns spendable coins for the account.
     pub fn spendable_coins(&self) -> CoinState {
-        self.coin_store.lock().expect("poisoned").spendable_coins()
+        self.coin_store()
+            .lock()
+            .expect("poisoned")
+            .spendable_coins()
     }
 
     /// Returns a list of all historical transactions
     pub fn tx_history(&self) -> Vec<TxEntry> {
-        self.coin_store.lock().expect("poisoned").tx_history()
+        self.coin_store().lock().expect("poisoned").tx_history()
     }
 
     /// Returns a list of all historical payments
@@ -651,18 +674,18 @@ impl<P: StorageProfile> Account<P> {
     pub fn update_coin_label(&self, outpoint: String, label: String) {
         if let Ok(outpoint) = bitcoin::OutPoint::from_str(&outpoint) {
             if !label.is_empty() {
-                self.label_store
+                self.label_store()
                     .lock()
                     .expect("poisoned")
                     .edit(LabelKey::OutPoint(outpoint), Some(label));
             } else {
-                self.label_store
+                self.label_store()
                     .lock()
                     .expect("poisoned")
                     .remove(LabelKey::OutPoint(outpoint));
             }
         }
-        if let Ok(mut store) = self.coin_store.try_lock() {
+        if let Ok(mut store) = self.coin_store().try_lock() {
             store.generate();
         }
     }
@@ -674,7 +697,7 @@ impl<P: StorageProfile> Account<P> {
     /// A boxed `AddressEntry` instance.
     pub fn new_addr(&mut self) -> AddressEntry {
         let addr = self.new_recv_addr();
-        let index = self.coin_store.lock().expect("poisoned").recv_tip();
+        let index = self.coin_store().lock().expect("poisoned").recv_tip();
         AddressEntry {
             status: AddressStatus::NotUsed,
             address: addr.as_unchecked().clone(),
@@ -685,11 +708,14 @@ impl<P: StorageProfile> Account<P> {
         }
     }
     fn new_recv_addr(&mut self) -> bitcoin::Address {
-        self.coin_store.lock().expect("poisoned").new_recv_addr()
+        self.coin_store().lock().expect("poisoned").new_recv_addr()
     }
     #[allow(unused)]
     fn new_change_addr(&mut self) -> bitcoin::Address {
-        self.coin_store.lock().expect("poisoned").new_change_addr()
+        self.coin_store()
+            .lock()
+            .expect("poisoned")
+            .new_change_addr()
     }
 }
 
@@ -701,11 +727,11 @@ impl<P: StorageProfile> Account<P> {
     ///
     /// A `Derivator` instance.
     pub fn derivator(&self) -> SpkDerivator {
-        self.coin_store.lock().expect("poisoned").derivator()
+        self.coin_store().lock().expect("poisoned").derivator()
     }
     #[allow(unused)] // Internal usage only
     fn recv_at(&self, index: u32) -> bitcoin::Address {
-        self.coin_store
+        self.coin_store()
             .lock()
             .expect("poisoned")
             .derivator_ref()
@@ -714,7 +740,7 @@ impl<P: StorageProfile> Account<P> {
 
     #[allow(unused)] // Internal usage only
     fn change_at(&self, index: u32) -> bitcoin::Address {
-        self.coin_store
+        self.coin_store()
             .lock()
             .expect("poisoned")
             .derivator_ref()
@@ -727,7 +753,7 @@ impl<P: StorageProfile> Account<P> {
     ///
     /// The receiving watch tip index as a `u32`.
     pub fn recv_watch_tip(&self) -> u32 {
-        self.coin_store.lock().expect("poisoned").recv_watch_tip()
+        self.coin_store().lock().expect("poisoned").recv_watch_tip()
     }
 
     /// Returns the current change watch tip index.
@@ -736,7 +762,10 @@ impl<P: StorageProfile> Account<P> {
     ///
     /// The change watch tip index as a `u32`.
     pub fn change_watch_tip(&self) -> u32 {
-        self.coin_store.lock().expect("poisoned").change_watch_tip()
+        self.coin_store()
+            .lock()
+            .expect("poisoned")
+            .change_watch_tip()
     }
 
     pub fn generated_addresses(
@@ -745,7 +774,7 @@ impl<P: StorageProfile> Account<P> {
         Vec<AddressEntry>, /* receive */
         Vec<AddressEntry>, /* change*/
     ) {
-        self.coin_store
+        self.coin_store()
             .lock()
             .expect("poisoned")
             .address_store()
@@ -758,7 +787,7 @@ impl<P: StorageProfile> Account<P> {
     /// (receive + change, all derivation indices). Cloned, so the
     /// caller doesn't hold any lock.
     pub fn address_entries(&self) -> Vec<AddressEntry> {
-        self.coin_store
+        self.coin_store()
             .lock()
             .expect("poisoned")
             .address_store()
@@ -772,7 +801,7 @@ impl<P: StorageProfile> Account<P> {
 impl<P: StorageProfile> Account<P> {
     /// Re-generate coin_store from tx_store
     pub fn generate_coins(&mut self) {
-        self.coin_store.lock().expect("poisoned").generate();
+        self.coin_store().lock().expect("poisoned").generate();
     }
     pub fn electrum_url(&self) -> String {
         self.config.electrum_url()
@@ -803,7 +832,7 @@ impl<P: StorageProfile> Account<P> {
     ) -> (mpsc::Sender<AddressTip>, Arc<AtomicBool>) {
         log::debug!("Account::start_poll_txs()");
         let (sender, address_tip) = mpsc::channel();
-        let coin_store = self.coin_store.clone();
+        let coin_store = self.coin_store().clone();
         let notification = self.sender.clone();
         let derivator = self.derivator();
         let stop = Arc::new(AtomicBool::new(false));
@@ -880,7 +909,10 @@ impl<P: StorageProfile> Account<P> {
             self.config.electrum_port,
         ) {
             let (tx_listener, electrum_stop) = self.start_listen_txs(addr, port);
-            self.coin_store.lock().expect("poisoned").init(tx_listener);
+            self.coin_store()
+                .lock()
+                .expect("poisoned")
+                .init(tx_listener);
             self.electrum_stop = Some(electrum_stop);
             if self.config.offline() {
                 self.config.set_offline(false);
@@ -1087,7 +1119,23 @@ fn listen_txs<P>(
                             &notification,
                         );
                     }
-                    CoinResponse::TxMerkle { .. } => {}
+                    CoinResponse::TxMerkle {
+                        txid,
+                        height,
+                        branch,
+                        pos,
+                    } => {
+                        handle_tx_merkle(
+                            &coin_store,
+                            &header_store,
+                            &request,
+                            &notification,
+                            txid,
+                            height,
+                            branch,
+                            pos,
+                        );
+                    }
                     CoinResponse::Stopped => {
                         send_notif!(notification, request, TxListenerNotif::Stopped);
                         let _ = request.send(CoinRequest::Stop);
@@ -1156,6 +1204,45 @@ fn signal_stopped(
         let _ = request.send(CoinRequest::Stop);
     }
     ControlFlow::Break(())
+}
+
+/// Gate every claim-promotion pass on header validation: `true` when the
+/// store is validated, otherwise notify `ValidationFailed(HeaderStore(_))`
+/// (when the store rejected its own replay) and return `false` so the
+/// caller refuses to promote against an unvalidated header.
+fn header_store_ready<P: StorageProfile>(
+    header_store: &HeaderStore<P::HeaderStore>,
+    notification: &mpsc::Sender<Notification>,
+) -> bool {
+    if header_store.is_validated() {
+        return true;
+    }
+    if let Some(reason) = header_store.validation_failed_reason() {
+        let _ = notification.send(Notification::ValidationFailed(
+            ValidationFailure::HeaderStore(reason),
+        ));
+    }
+    false
+}
+
+/// Apply a resolved [`ChainUpdateOutcome`]: persist and regenerate when it
+/// changed state, release the coin-store lock, dispatch the queued merkle
+/// fetches, and notify `HeaderStoreUpdated` on a change.
+fn apply_chain_update<P: StorageProfile>(
+    mut store: MutexGuard<'_, CoinStore<P>>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+    outcome: ChainUpdateOutcome,
+) {
+    if outcome.changed {
+        store.tx_store_mut().persist();
+        store.generate();
+    }
+    drop(store);
+    queue_merkle_fetches(request, outcome.to_fetch);
+    if outcome.changed {
+        let _ = notification.send(Notification::HeaderStoreUpdated);
+    }
 }
 
 /// Grow the watched spk set for an `AddressTip`: register the new receive/change
@@ -1297,14 +1384,28 @@ fn handle_history_response_msg<P: StorageProfile>(
     {
         return signal_stopped(request, notification);
     }
+    // Folding the history above is unconditional; promoting the reported
+    // heights against an unvalidated header is not. When the store is not
+    // validated, persist any folded height changes but skip promotion.
+    if !header_store_ready::<P>(header_store, notification) {
+        if outcome.height_updated {
+            store.tx_store_mut().persist();
+            store.generate();
+        }
+        return ControlFlow::Continue(());
+    }
     // Promote (or queue) heights now that the history is folded into the tx store.
     let promo = store.resolve_reported_heights(header_store, &outcome.reported);
-    if outcome.height_updated || promo.changed {
-        store.tx_store_mut().persist();
-        store.generate();
-    }
-    drop(store);
-    queue_merkle_fetches(request, promo.to_fetch);
+    let changed = outcome.height_updated || promo.changed;
+    apply_chain_update(
+        store,
+        request,
+        notification,
+        ChainUpdateOutcome {
+            to_fetch: promo.to_fetch,
+            changed,
+        },
+    );
     ControlFlow::Continue(())
 }
 
@@ -1322,18 +1423,162 @@ fn handle_txs_response_msg<P: StorageProfile>(
 ) {
     let mut store = coin_store.lock().expect("poisoned");
     store.handle_txs_response(txs);
-    if !header_store.is_validated() {
+    if !header_store_ready::<P>(header_store, notification) {
         return;
     }
     let promote = store.resolve_pending_claims(header_store);
-    if promote.changed {
+    apply_chain_update(store, request, notification, promote);
+}
+
+/// Verify a `TxMerkle` response and promote the entry to `Verified`, or mark it
+/// terminally `VerifyFailed` on a hard proof mismatch.
+fn handle_tx_merkle<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+    txid: Txid,
+    height: u32,
+    branch: Vec<[u8; 32]>,
+    pos: u32,
+) {
+    // A TxMerkle response means the in-flight fetch resolved, whatever the
+    // outcome; free the re-queue slot before anything else so a superseded
+    // or dropped fetch can be re-issued by a later CTA pass.
+    coin_store
+        .lock()
+        .expect("poisoned")
+        .clear_merkle_in_flight(&txid);
+
+    if !header_store_ready::<P>(header_store, notification) {
+        return;
+    }
+    let Some(target) = resolve_tx_merkle_target(coin_store, header_store, txid, height) else {
+        return;
+    };
+    apply_tx_merkle(coin_store, request, notification, target, &branch, pos);
+}
+
+/// The verified target of a `TxMerkle` response: the entry is
+/// `ConfirmedUnverified` at exactly `height`, its stored hash still matches
+/// the header there, and `expected_root` is that header's merkle root.
+struct MerkleTarget {
+    txid: Txid,
+    height: u32,
+    block_hash: BlockHash,
+    expected_root: TxMerkleNode,
+}
+
+/// Guard a `TxMerkle` response against stale or mismatched state and return
+/// the target to verify, or `None` (with a debug log) when it must be skipped.
+fn resolve_tx_merkle_target<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    txid: Txid,
+    height: u32,
+) -> Option<MerkleTarget> {
+    // Read header data first (without holding the coin_store lock). If
+    // headers were pruned by a recent reorg between request and response,
+    // the CTA re-fetch pass (`reverify_remined_entries`) re-queues the
+    // proof once a header is present at this height again.
+    let (expected_root, block_hash) = match header_store.merkle_root_and_hash(height) {
+        Some(v) => v,
+        None => {
+            log::debug!(
+                "handle_tx_merkle(): TxMerkle for {txid}@{height} but no header in header_store; skipping"
+            );
+            return None;
+        }
+    };
+
+    let mut store = coin_store.lock().expect("poisoned");
+    let current = match store.tx_store_mut().get(&txid) {
+        Some(entry) => entry.inclusion().clone(),
+        None => {
+            log::debug!("handle_tx_merkle(): TxMerkle for unknown txid {txid}; skipping");
+            return None;
+        }
+    };
+    let (entry_height, entry_hash) = match current {
+        Inclusion::ConfirmedUnverified { height, block_hash } => (height, block_hash),
+        _ => {
+            log::debug!(
+                "handle_tx_merkle(): TxMerkle for {txid} not in ConfirmedUnverified state ({current:?}); skipping"
+            );
+            return None;
+        }
+    };
+    // Only verify the proof against the height the entry is actually
+    // claimed at; a stale response for a different height must not promote.
+    if entry_height != height {
+        log::debug!(
+            "handle_tx_merkle(): TxMerkle height {height} != entry height {entry_height} for {txid}; skipping"
+        );
+        return None;
+    }
+    // The entry's stored hash no longer matches the header at this height:
+    // a reorg raced the merkle fetch. This is not a lying server, so stay
+    // silent; the reorg re-queue (reverify_remined_entries) owns recovery.
+    if entry_hash != block_hash {
+        log::debug!(
+            "handle_tx_merkle(): TxMerkle for {txid}@{height} stored hash {entry_hash} != current hash {block_hash}; reorg race, skipping"
+        );
+        return None;
+    }
+    Some(MerkleTarget {
+        txid,
+        height,
+        block_hash,
+        expected_root,
+    })
+}
+
+/// Verify the branch against `target` and update the entry: `Verified` via the
+/// shared CTA apply on a good proof, else terminal `VerifyFailed` with a
+/// one-shot `ValidationFailed(MerkleProof)` notification.
+fn apply_tx_merkle<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+    target: MerkleTarget,
+    branch: &[[u8; 32]],
+    pos: u32,
+) {
+    let MerkleTarget {
+        txid,
+        height,
+        block_hash,
+        expected_root,
+    } = target;
+    let mut store = coin_store.lock().expect("poisoned");
+    // The branch arrives in internal (little-endian) order from
+    // `decode_tx_merkle_branch`, so it feeds `verify_merkle_branch` directly.
+    if crate::header_store::verify_merkle_branch(txid, branch, pos, expected_root) {
+        store
+            .tx_store_mut()
+            .update_inclusion(&txid, Inclusion::Verified { height, block_hash });
+        apply_chain_update(
+            store,
+            request,
+            notification,
+            ChainUpdateOutcome {
+                to_fetch: Vec::new(),
+                changed: true,
+            },
+        );
+    } else {
+        // Hard proof mismatch: mark the entry terminally VerifyFailed so it is
+        // not re-fetched every tick, and surface the failure exactly once.
+        // reverify_remined_entries clears it only if the header hash changes.
+        store
+            .tx_store_mut()
+            .update_inclusion(&txid, Inclusion::VerifyFailed { height, block_hash });
         store.tx_store_mut().persist();
         store.generate();
-    }
-    drop(store);
-    queue_merkle_fetches(request, promote.to_fetch);
-    if promote.changed {
-        let _ = notification.send(Notification::HeaderStoreUpdated);
+        drop(store);
+        let _ = notification.send(Notification::ValidationFailed(
+            ValidationFailure::MerkleProof { txid, height },
+        ));
     }
 }
 
@@ -1344,12 +1589,7 @@ fn on_chain_update<P: StorageProfile>(
     electrum_req: &mpsc::Sender<CoinRequest>,
     notification: &mpsc::Sender<Notification>,
 ) {
-    if !header_store.is_validated() {
-        if let Some(reason) = header_store.validation_failed_reason() {
-            let _ = notification.send(Notification::ValidationFailed(
-                ValidationFailure::HeaderStore(reason),
-            ));
-        }
+    if !header_store_ready::<P>(header_store, notification) {
         return;
     }
 
@@ -1361,18 +1601,12 @@ fn on_chain_update<P: StorageProfile>(
     let mut to_fetch = reverify.to_fetch;
     to_fetch.extend(promote.to_fetch);
 
-    if changed {
-        // `generate()` itself emits the `CoinUpdate` notification.
-        store.tx_store_mut().persist();
-        store.generate();
-    }
-    drop(store);
-
-    queue_merkle_fetches(electrum_req, to_fetch);
-
-    if changed {
-        let _ = notification.send(Notification::HeaderStoreUpdated);
-    }
+    apply_chain_update(
+        store,
+        electrum_req,
+        notification,
+        ChainUpdateOutcome { to_fetch, changed },
+    );
 }
 
 /// Dispatch the collected merkle-proof fetches outside the CoinStore lock.
@@ -1383,10 +1617,8 @@ fn queue_merkle_fetches(electrum_req: &mpsc::Sender<CoinRequest>, to_fetch: Vec<
 }
 
 /// Re-queue a `GetTxMerkle` fetch for every `ConfirmedUnverified` entry on
-/// every listener (re)connect. A merkle fetch is single-attempt, so a
-/// transient failure or a dropped connection would otherwise strand the
-/// entry unverified until the next reorg re-stamps its hash; reconnect is
-/// the retry boundary.
+/// listener (re)connect, covering entries stranded while the listener was
+/// down; between reconnects the CTA re-fetch pass retries them.
 fn requeue_confirmed_unverified<P: StorageProfile>(
     coin_store: &Mutex<CoinStore<P>>,
     electrum_req: &mpsc::Sender<CoinRequest>,
@@ -1548,6 +1780,577 @@ mod tests {
         fn stop(&self) {
             self.stop.store(true, Ordering::Relaxed);
         }
+    }
+
+    // Build a bare `CoinStore` (no listener thread) for testing the
+    // CTA helpers directly.
+    fn bare_coin_store() -> (Arc<Mutex<CoinStore>>, SpkDerivator) {
+        let (notif_sender, _notif_recv) = mpsc::channel();
+        let mnemo = Mnemonic::generate(12).unwrap();
+        let dummy_config = Config::new(
+            Some(mnemo.to_string()),
+            "dummy".into(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            PathBuf::default(),
+            String::new(),
+            false,
+        )
+        .unwrap();
+        let signer =
+            HotSigner::new_from_mnemonics(bitcoin::Network::Regtest, &mnemo.to_string()).unwrap();
+        let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1").unwrap());
+        let descriptor = wpkh(xpub);
+        let derivator = SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
+        let label_store = Arc::new(Mutex::new(LabelStore::new()));
+        let backend: Arc<dyn bwk_persist::PersistenceBackend> = Arc::new(NoopBackend);
+        let account_store = Arc::new(Mutex::new(bwk_persist::RamStore::empty(
+            backend,
+            bwk_persist::ACCOUNT_STORE_KEY,
+            crate::profile::encode_account_key,
+            crate::profile::encode_account_value,
+        )));
+        let coin_store = Arc::new(Mutex::new(CoinStore::new(
+            bitcoin::Network::Regtest,
+            descriptor,
+            notif_sender,
+            0,
+            0,
+            20,
+            TxStore::new(),
+            label_store,
+            dummy_config,
+            account_store,
+        )));
+        (coin_store, derivator)
+    }
+
+    /// Build a regtest header chain of `len` blocks (heights `0..len`),
+    /// returning the (height -> raw) map and the tip block hash.
+    fn build_header_map(len: u32) -> (BTreeMap<u32, [u8; 80]>, miniscript::bitcoin::BlockHash) {
+        use miniscript::bitcoin::{
+            block::{Header, Version},
+            hashes::Hash,
+            BlockHash, CompactTarget, TxMerkleNode,
+        };
+        let bits = CompactTarget::from_consensus(0x207fffff);
+        let mut map = BTreeMap::new();
+        let mut prev = BlockHash::all_zeros();
+        let mut tip = prev;
+        for h in 0..len {
+            let hdr = Header {
+                version: Version::ONE,
+                prev_blockhash: prev,
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: 1_700_000_000 + h,
+                bits,
+                nonce: h,
+            };
+            prev = hdr.block_hash();
+            tip = prev;
+            let bytes = miniscript::bitcoin::consensus::serialize(&hdr);
+            let mut arr = [0u8; 80];
+            arr.copy_from_slice(&bytes);
+            map.insert(h, arr);
+        }
+        (map, tip)
+    }
+
+    // Regression: after a deep reorg re-confirms a tx at a height
+    // M different from the originally-claimed height N, the stale
+    // `(N, txid)` entry must not linger in `pending_claims`.
+    #[test]
+    fn deep_reorg_clears_stale_pending_claims() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        // Seed a tx that is Verified at height M = 7.
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let m: u32 = 7;
+
+        // Build a HeaderStore holding a header at M. `on_chain_update`
+        // never demotes, so the Verified-at-M claim is left untouched; the
+        // header is present so the seeded state is internally consistent.
+        let (map, hash_at_m) = build_header_map(m + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::Verified {
+                    height: m,
+                    block_hash: hash_at_m,
+                },
+            );
+        }
+
+        // Stale pending claim at the OLD height N = 4 (pre-reorg).
+        let n: u32 = 4;
+        coin_store
+            .lock()
+            .unwrap()
+            .insert_pending_claim(ClaimAt { txid, height: n });
+
+        let (req_tx, _req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        // The stale (N, txid) entry must have been swept (tx is Verified
+        // at M != N).
+        let snapshot = coin_store.lock().unwrap().pending_claims_snapshot();
+        assert!(
+            snapshot.get(&n).map(|s| !s.contains(&txid)).unwrap_or(true),
+            "stale pending claim at N={n} was not cleared: {snapshot:?}",
+        );
+    }
+
+    // Regression: a claim whose tx is still in flight (History folded, Txs
+    // response not yet) must survive a CTA pass. Dropping it as "removed
+    // from the chain" wedges the tx Unconfirmed forever once it folds.
+    #[test]
+    fn pending_claim_survives_tx_fetch_in_flight() {
+        use crate::header_store::HeaderStore;
+
+        let (coin_store, derivator) = bare_coin_store();
+
+        let spk = derivator.receive_at(0).script_pubkey();
+        let tx = funding_tx(spk.clone(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 6;
+
+        let (map, hash_at_h) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        let (req_tx, req_rx) = mpsc::channel::<CoinRequest>();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        // History reports the confirmed tx before its bytes are known: the
+        // update stays incomplete and the claim is queued, not promoted.
+        {
+            let mut store = coin_store.lock().unwrap();
+            let mut hist = BTreeMap::new();
+            hist.insert(spk, vec![(txid, Some(h as u64))]);
+            let outcome = store.handle_history_response(hist);
+            assert_eq!(outcome.missing_txs, vec![txid], "tx bytes must be missing");
+            let promo = store.resolve_reported_heights(&header_store, &outcome.reported);
+            assert!(promo.to_fetch.is_empty(), "nothing to fetch yet");
+        }
+
+        // CTA fires while the Txs response is still in flight: the claim
+        // must survive (the txid is referenced by an incomplete update).
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        {
+            let store = coin_store.lock().unwrap();
+            let snapshot = store.pending_claims_snapshot();
+            assert!(
+                snapshot.get(&h).map(|s| s.contains(&txid)).unwrap_or(false),
+                "in-flight claim was dropped: {snapshot:?}",
+            );
+        }
+
+        // The Txs response folds the tx, then the next CTA promotes it.
+        coin_store.lock().unwrap().handle_txs_response(vec![tx]);
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            assert_eq!(
+                entry.inclusion(),
+                &Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+                "claim was not promoted after the tx folded",
+            );
+        }
+        match req_rx.try_recv() {
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) => {
+                assert_eq!(t, txid);
+                assert_eq!(height, h);
+            }
+            other => panic!("expected GetTxMerkle, got {other:?}"),
+        }
+    }
+
+    // Regression: history re-reports EVERY confirmed tx, not just the ones
+    // whose height changed. An already-Verified tx re-reported at its SAME
+    // height must stay Verified (the pass is promote-only); it must not be
+    // demoted to ConfirmedUnverified nor trigger a fresh GetTxMerkle.
+    #[test]
+    fn re_report_does_not_demote_verified() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 6;
+
+        // HeaderStore holds a real header at H, so the seeded Verified state
+        // is internally consistent.
+        let (map, hash_at_h) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::Verified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+            );
+        }
+
+        let (req_tx, req_rx) = mpsc::channel::<CoinRequest>();
+
+        // Server re-reports the same tx at the same height.
+        {
+            let mut store = coin_store.lock().unwrap();
+            let promo =
+                store.resolve_reported_heights(&header_store, &[ClaimAt { txid, height: h }]);
+            queue_merkle_fetches(&req_tx, promo.to_fetch);
+        }
+
+        // The entry is STILL Verified at H (not demoted).
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            match entry.inclusion() {
+                Inclusion::Verified {
+                    height, block_hash, ..
+                } => {
+                    assert_eq!(*height, h, "height changed");
+                    assert_eq!(*block_hash, hash_at_h, "block_hash changed");
+                }
+                other => panic!("expected Verified{{H}}, got {other:?}"),
+            }
+        }
+
+        // No GetTxMerkle was queued.
+        assert!(
+            matches!(req_rx.try_recv(), Err(TryRecvError::Empty)),
+            "GetTxMerkle wrongly queued for a re-reported Verified tx",
+        );
+    }
+
+    // A ConfirmedUnverified entry whose stored hash still matches the header
+    // (its single-shot merkle fetch was dropped or errored) must be
+    // re-queued by the CTA pass, without mutating state or notifying.
+    #[test]
+    fn stuck_confirmed_unverified_refetched_by_cta() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 5;
+
+        let (map, hash_at_h) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+            );
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        // Exactly one re-queued fetch.
+        assert!(matches!(
+            req_rx.try_recv().unwrap(),
+            CoinRequest::GetTxMerkle { txid: t, height } if t == txid && height == h
+        ));
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        // No state change: entry untouched, nothing notified.
+        assert!(matches!(notif_rx.try_recv(), Err(TryRecvError::Empty)));
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(matches!(
+            entry.inclusion(),
+            Inclusion::ConfirmedUnverified { height, block_hash }
+                if *height == h && *block_hash == hash_at_h
+        ));
+    }
+
+    // A Verified entry whose stored hash matches the header must NOT be
+    // re-fetched by the CTA pass.
+    #[test]
+    fn verified_with_matching_hash_not_refetched_by_cta() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 5;
+
+        let (map, hash_at_h) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::Verified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+            );
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        assert!(
+            matches!(req_rx.try_recv(), Err(TryRecvError::Empty)),
+            "GetTxMerkle wrongly queued for a Verified entry with a matching hash",
+        );
+    }
+
+    // Same-height reorg re-verification: a tx left `Verified` at height H
+    // against a now-stale `block_hash` (the server re-mined it at the SAME
+    // height in a DIFFERENT block, so the scripthash status is unchanged and
+    // the history path never demotes it). `on_chain_update` must notice the
+    // stored hash no longer matches the HeaderStore header at H, reset the
+    // entry to `ConfirmedUnverified { H, B_new }`, and queue a fresh
+    // `GetTxMerkle { H }`. It must NOT push the entry to `Unconfirmed`.
+    #[test]
+    fn same_height_reorg_reverifies_stale_block_hash() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+        use miniscript::bitcoin::hashes::Hash;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 5;
+
+        // Build a HeaderStore whose header at H has block hash B_new,
+        // distinct from the B_old we seed the tx with below.
+        let (map, b_new) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        // A clearly different (stale) block hash B_old, distinct from B_new.
+        let b_old = miniscript::bitcoin::BlockHash::from_byte_array([0x7au8; 32]);
+        assert_ne!(b_old, b_new);
+
+        // Seed the tx Verified at H with the stale hash B_old.
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::Verified {
+                    height: h,
+                    block_hash: b_old,
+                },
+            );
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        // The entry was reset to ConfirmedUnverified at the SAME height with
+        // the NEW block hash (re-verification, not demotion).
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            match entry.inclusion() {
+                Inclusion::ConfirmedUnverified { height, block_hash } => {
+                    assert_eq!(*height, h, "height changed");
+                    assert_eq!(*block_hash, b_new, "block_hash not updated to B_new");
+                }
+                other => panic!("expected ConfirmedUnverified{{H,B_new}}, got {other:?}"),
+            }
+        }
+
+        // A GetTxMerkle for (txid, H) must have been queued.
+        let mut saw_merkle = false;
+        while let Ok(req) = req_rx.try_recv() {
+            if let CoinRequest::GetTxMerkle { txid: t, height } = req {
+                if t == txid && height == h {
+                    saw_merkle = true;
+                }
+            }
+        }
+        assert!(saw_merkle, "GetTxMerkle{{H}} was not queued");
+    }
+
+    #[test]
+    fn chain_update_waits_for_header_validation_then_retries_pending_claim() {
+        use crate::header_store::{HeaderStore, HeaderValidationState};
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 4;
+
+        let (map, block_hash) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+        header_store.set_validation_state_for_test(HeaderValidationState::Validating);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(&txid, Inclusion::Unconfirmed);
+        }
+        coin_store
+            .lock()
+            .unwrap()
+            .insert_pending_claim(ClaimAt { txid, height: h });
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(
+            req_rx.try_recv().is_err(),
+            "validation-gated update queued merkle proof too early"
+        );
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            assert!(matches!(entry.inclusion(), Inclusion::Unconfirmed));
+        }
+
+        header_store.set_validation_state_for_test(HeaderValidationState::Valid);
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        let req = req_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("validation recovery should queue merkle proof");
+        assert!(matches!(
+            req,
+            CoinRequest::GetTxMerkle { txid: t, height } if t == txid && height == h
+        ));
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(matches!(
+            entry.inclusion(),
+            Inclusion::ConfirmedUnverified { height, block_hash: bh }
+                if *height == h && *bh == block_hash
+        ));
+    }
+
+    // Regression for the stale-pending-claim wedge: a tx queued at an OLD
+    // height N_old (whose header IS present) must not be promoted to N_old
+    // after a reorg re-reports it at N_new. `resolve_reported_heights` must
+    // drop the stale `(N_old, txid)` claim before queueing `(N_new, txid)`,
+    // so the subsequent `on_chain_update` cannot promote the tx to the
+    // wrong (N_old) height and wedge it ConfirmedUnverified forever.
+    #[test]
+    fn re_report_purges_stale_pending_claim() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let n_old: u32 = 4;
+        let n_new: u32 = 9;
+
+        // HeaderStore holds headers 0..=n_old only. Height n_new has NO
+        // header yet, so the re-report at n_new takes the queue branch
+        // while n_old IS reachable (the dangerous case).
+        let (map, _tip) = build_header_map(n_old + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+
+        // Seed the tx as Unconfirmed (post-reorg history reset state).
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(&txid, Inclusion::Unconfirmed);
+        }
+
+        // Pre-existing stale pending claim at the OLD height N_old.
+        coin_store.lock().unwrap().insert_pending_claim(ClaimAt {
+            txid,
+            height: n_old,
+        });
+
+        let (req_tx, _req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        // History re-reports the tx at N_new (its new post-reorg height).
+        {
+            let mut store = coin_store.lock().unwrap();
+            store.resolve_reported_heights(
+                &header_store,
+                &[ClaimAt {
+                    txid,
+                    height: n_new,
+                }],
+            );
+        }
+
+        // The stale (N_old, txid) entry is gone; only (N_new, txid) remains.
+        {
+            let snapshot = coin_store.lock().unwrap().pending_claims_snapshot();
+            assert!(
+                snapshot
+                    .get(&n_old)
+                    .map(|s| !s.contains(&txid))
+                    .unwrap_or(true),
+                "stale pending claim at N_old={n_old} not purged: {snapshot:?}",
+            );
+            assert!(
+                snapshot
+                    .get(&n_new)
+                    .map(|s| s.contains(&txid))
+                    .unwrap_or(false),
+                "new pending claim at N_new={n_new} not queued: {snapshot:?}",
+            );
+        }
+
+        // A subsequent CTA must NOT promote the tx to N_old (its header is
+        // reachable, but the stale claim is gone). The tx stays Unconfirmed.
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(
+            matches!(entry.inclusion(), Inclusion::Unconfirmed),
+            "tx wrongly promoted to {:?} (expected Unconfirmed)",
+            entry.inclusion(),
+        );
     }
 
     #[test]
@@ -1817,78 +2620,73 @@ mod tests {
         assert_eq!(coin.height(), None);
     }
 
-    // Build a bare `CoinStore` (no listener thread) for testing the
-    // CTA helpers directly.
-    fn bare_coin_store() -> (Arc<Mutex<CoinStore>>, SpkDerivator) {
-        let (notif_sender, _notif_recv) = mpsc::channel();
-        let mnemo = Mnemonic::generate(12).unwrap();
-        let dummy_config = Config::new(
-            Some(mnemo.to_string()),
-            "dummy".into(),
-            Network::Regtest,
-            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
-            PathBuf::default(),
-            String::new(),
-            false,
-        )
-        .unwrap();
-        let signer =
-            HotSigner::new_from_mnemonics(bitcoin::Network::Regtest, &mnemo.to_string()).unwrap();
-        let xpub = signer.xpub(&DerivationPath::from_str("m/84'/0'/0'/1").unwrap());
-        let descriptor = wpkh(xpub);
-        let derivator = SpkDerivator::new(descriptor.clone(), bitcoin::Network::Regtest).unwrap();
-        let label_store = Arc::new(Mutex::new(LabelStore::new()));
-        let backend: Arc<dyn bwk_persist::PersistenceBackend> = Arc::new(NoopBackend);
-        let account_store = Arc::new(Mutex::new(bwk_persist::RamStore::empty(
-            backend,
-            bwk_persist::ACCOUNT_STORE_KEY,
-            crate::profile::encode_account_key,
-            crate::profile::encode_account_value,
-        )));
-        let coin_store = Arc::new(Mutex::new(CoinStore::new(
-            bitcoin::Network::Regtest,
-            descriptor,
-            notif_sender,
-            0,
-            0,
-            20,
-            TxStore::new(),
-            label_store,
-            dummy_config,
-            account_store,
-        )));
-        (coin_store, derivator)
-    }
+    // Deterministic demotion: a tx seeded as `Inclusion::Verified` at height H
+    // is reset to `Inclusion::Unconfirmed` when the server re-reports it at a
+    // DIFFERENT height. This is the history-owned path
+    // (`update_spk_history` resets `diff.changed` txids), distinct from the
+    // same-height hash-change case (`Verified -> ConfirmedUnverified`).
+    #[test]
+    fn reported_height_change_demotes_verified_to_unconfirmed() {
+        use crate::tx_store::TxEntry;
 
-    /// Build a regtest header chain of `len` blocks (heights `0..len`),
-    /// returning the (height -> raw) map and the tip block hash.
-    fn build_header_map(len: u32) -> (BTreeMap<u32, [u8; 80]>, miniscript::bitcoin::BlockHash) {
-        use miniscript::bitcoin::{
-            block::{Header, Version},
-            hashes::Hash,
-            BlockHash, CompactTarget, TxMerkleNode,
-        };
-        let bits = CompactTarget::from_consensus(0x207fffff);
-        let mut map = BTreeMap::new();
-        let mut prev = BlockHash::all_zeros();
-        let mut tip = prev;
-        for h in 0..len {
-            let hdr = Header {
-                version: Version::ONE,
-                prev_blockhash: prev,
-                merkle_root: TxMerkleNode::all_zeros(),
-                time: 1_700_000_000 + h,
-                bits,
-                nonce: h,
-            };
-            prev = hdr.block_hash();
-            tip = prev;
-            let bytes = miniscript::bitcoin::consensus::serialize(&hdr);
-            let mut arr = [0u8; 80];
-            arr.copy_from_slice(&bytes);
-            map.insert(h, arr);
+        let (coin_store, derivator) = bare_coin_store();
+
+        let spk = derivator.receive_spk_at(0);
+        let tx = funding_tx(spk.clone(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 5;
+
+        // A concrete block hash at height H so the seeded Verified state is
+        // internally consistent.
+        let (_map, hash_at_h) = build_header_map(h + 1);
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::Verified {
+                    height: h,
+                    block_hash: hash_at_h,
+                },
+            );
         }
-        (map, tip)
+
+        // Prime the spk history at the seeded height: the tx lands in
+        // `diff.added`, which never resets inclusion, so Verified survives.
+        coin_store
+            .lock()
+            .unwrap()
+            .update_spk_history(spk.clone(), vec![(txid, Some(h as u64))]);
+        {
+            let mut store = coin_store.lock().unwrap();
+            let entry = store.tx_store_mut().get(&txid).expect("tx present");
+            assert!(
+                matches!(
+                    entry.inclusion(),
+                    Inclusion::Verified { height, block_hash }
+                        if *height == h && *block_hash == hash_at_h
+                ),
+                "priming report must not demote; got {:?}",
+                entry.inclusion(),
+            );
+        }
+
+        // Server re-reports the SAME tx at a DIFFERENT height: the txid lands
+        // in `diff.changed`, which resets it to Unconfirmed.
+        coin_store
+            .lock()
+            .unwrap()
+            .update_spk_history(spk.clone(), vec![(txid, Some((h + 3) as u64))]);
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert_eq!(
+            *entry.inclusion(),
+            Inclusion::Unconfirmed,
+            "reported-height change must demote Verified -> Unconfirmed",
+        );
     }
 
     // Refusal path: when the HeaderStore itself is Invalid, `on_chain_update`
@@ -1988,74 +2786,6 @@ mod tests {
     // FIX B: a pending claim whose txid was removed from the tx store (a
     // reorg dropped it) must be dropped by `resolve_pending_claims` rather
     // than left queued forever.
-    // Regression: a claim whose tx is still in flight (History folded, Txs
-    // response not yet) must survive a CTA pass. Dropping it as "removed
-    // from the chain" wedges the tx Unconfirmed forever once it folds.
-    #[test]
-    fn pending_claim_survives_tx_fetch_in_flight() {
-        use crate::header_store::HeaderStore;
-
-        let (coin_store, derivator) = bare_coin_store();
-
-        let spk = derivator.receive_at(0).script_pubkey();
-        let tx = funding_tx(spk.clone(), 0.1);
-        let txid = tx.compute_txid();
-        let h: u32 = 6;
-
-        let (map, hash_at_h) = build_header_map(h + 1);
-        let header_store = HeaderStore::from_map(Network::Regtest, map);
-
-        let (req_tx, req_rx) = mpsc::channel::<CoinRequest>();
-        let (notif_tx, _notif_rx) = mpsc::channel();
-
-        // History reports the confirmed tx before its bytes are known: the
-        // update stays incomplete and the claim is queued, not promoted.
-        {
-            let mut store = coin_store.lock().unwrap();
-            let mut hist = BTreeMap::new();
-            hist.insert(spk, vec![(txid, Some(h as u64))]);
-            let outcome = store.handle_history_response(hist);
-            assert_eq!(outcome.missing_txs, vec![txid], "tx bytes must be missing");
-            let promo = store.resolve_reported_heights(&header_store, &outcome.reported);
-            assert!(promo.to_fetch.is_empty(), "nothing to fetch yet");
-        }
-
-        // CTA fires while the Txs response is still in flight: the claim
-        // must survive (the txid is referenced by an incomplete update).
-        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
-        {
-            let store = coin_store.lock().unwrap();
-            let snapshot = store.pending_claims_snapshot();
-            assert!(
-                snapshot.get(&h).map(|s| s.contains(&txid)).unwrap_or(false),
-                "in-flight claim was dropped: {snapshot:?}",
-            );
-        }
-
-        // The Txs response folds the tx, then the next CTA promotes it.
-        coin_store.lock().unwrap().handle_txs_response(vec![tx]);
-        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
-        {
-            let mut store = coin_store.lock().unwrap();
-            let entry = store.tx_store_mut().get(&txid).expect("tx present");
-            assert_eq!(
-                entry.inclusion(),
-                &Inclusion::ConfirmedUnverified {
-                    height: h,
-                    block_hash: hash_at_h,
-                },
-                "claim was not promoted after the tx folded",
-            );
-        }
-        match req_rx.try_recv() {
-            Ok(CoinRequest::GetTxMerkle { txid: t, height }) => {
-                assert_eq!(t, txid);
-                assert_eq!(height, h);
-            }
-            other => panic!("expected GetTxMerkle, got {other:?}"),
-        }
-    }
-
     #[test]
     fn resolve_pending_claims_drops_removed_txid() {
         let (coin_store, _deriv) = bare_coin_store();
@@ -2076,6 +2806,146 @@ mod tests {
         assert!(
             store.pending_claims_snapshot().is_empty(),
             "stale claim for a removed txid must be dropped"
+        );
+    }
+
+    // Refusal path: a tampered merkle branch against a header whose hash
+    // still matches the entry's stored hash must notify
+    // `ValidationFailed(MerkleProof)` and move the entry to the terminal
+    // `VerifyFailed` state so it is not re-fetched every tick.
+    #[test]
+    fn handle_tx_merkle_tampered_branch_notifies() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 3;
+
+        let (map, _tip) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+        let block_hash = header_store.block_hash(h).expect("header at h present");
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash,
+                },
+            );
+        }
+
+        let (req_tx, _req_rx) = mpsc::channel();
+        let (notif_tx, notif_rx) = mpsc::channel();
+        // A sibling that does not fold to the header's (all-zero) merkle
+        // root: the proof fails verification.
+        handle_tx_merkle(
+            &coin_store,
+            &header_store,
+            &req_tx,
+            &notif_tx,
+            txid,
+            h,
+            vec![[0x11u8; 32]],
+            0,
+        );
+
+        let notif = notif_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("refusal must notify ValidationFailed");
+        assert!(
+            matches!(
+                notif,
+                Notification::ValidationFailed(ValidationFailure::MerkleProof { txid: t, height })
+                    if t == txid && height == h
+            ),
+            "expected ValidationFailed(MerkleProof), got {notif:?}"
+        );
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(
+            matches!(
+                entry.inclusion(),
+                Inclusion::VerifyFailed { height, block_hash: b }
+                    if *height == h && *b == block_hash
+            ),
+            "entry not moved to VerifyFailed: {:?}",
+            entry.inclusion(),
+        );
+    }
+
+    // Reorg race: the entry's stored hash no longer matches the header at
+    // its height (a reorg landed between the fetch and the response). This
+    // must stay silent, no notification and no state change; the reorg
+    // re-queue (reverify_remined_entries) owns recovery.
+    #[test]
+    fn handle_tx_merkle_hash_mismatch_stays_silent() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+        use miniscript::bitcoin::hashes::Hash;
+
+        let (coin_store, _derivator) = bare_coin_store();
+
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 3;
+
+        let (map, _tip) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+        let stale_hash = bitcoin::BlockHash::all_zeros();
+        assert_ne!(
+            header_store.block_hash(h).expect("header at h present"),
+            stale_hash
+        );
+
+        {
+            let mut store = coin_store.lock().unwrap();
+            let tx_store = store.tx_store_mut();
+            tx_store.update(TxEntry::for_test(tx.clone()));
+            tx_store.update_inclusion(
+                &txid,
+                Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash: stale_hash,
+                },
+            );
+        }
+
+        let (req_tx, _req_rx) = mpsc::channel();
+        let (notif_tx, notif_rx) = mpsc::channel();
+        handle_tx_merkle(
+            &coin_store,
+            &header_store,
+            &req_tx,
+            &notif_tx,
+            txid,
+            h,
+            Vec::new(),
+            0,
+        );
+
+        assert!(
+            notif_rx.try_recv().is_err(),
+            "reorg race must stay silent, got a notification"
+        );
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).expect("tx present");
+        assert!(
+            matches!(
+                entry.inclusion(),
+                Inclusion::ConfirmedUnverified { height, block_hash: b }
+                    if *height == h && *b == stale_hash
+            ),
+            "entry state changed on hash mismatch: {:?}",
+            entry.inclusion(),
         );
     }
 }
@@ -2820,7 +3690,7 @@ mod sqlite_signer_exclusion {
         ));
         let account: Account = Account::with_config_store(cfg.clone(), config_store);
         account.persist_config();
-        account.label_store.lock().expect("poisoned").persist();
+        account.label_store().lock().expect("poisoned").persist();
         drop(account);
 
         assert!(account_dir.exists(), "account dir created");

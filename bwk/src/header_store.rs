@@ -683,6 +683,15 @@ where
         self.header(h).map(|hdr| hdr.merkle_root)
     }
 
+    /// Merkle root and block hash at `h`, read under a single lock so the
+    /// two cannot tear against a concurrent append/prune between calls.
+    pub fn merkle_root_and_hash(&self, h: u32) -> Option<(TxMerkleNode, BlockHash)> {
+        let inner = self.inner.lock().expect("poisoned");
+        let raw = inner.store.get(&h).ok().flatten()?;
+        let hdr = deserialize::<Header>(&raw).ok()?;
+        Some((hdr.merkle_root, hdr.block_hash()))
+    }
+
     /// Register a listener notified (via an empty `()`) on every chain
     /// update. Drop the returned receiver to deregister.
     pub fn register(&self) -> mpsc::Receiver<()> {
@@ -2623,8 +2632,8 @@ mod tests {
     // step: a merkle proof that does not fold to the block's merkle root
     // returns false, which is exactly the condition under which the
     // listener emits `Notification::ValidationFailed` and makes no state
-    // change. (The notification emission itself is covered by the live
-    // e2e merkle path; honest electrs never serves a bad proof.)
+    // change. The notification emission itself is covered by
+    // `account::tests::handle_tx_merkle_tampered_branch_notifies`.
     #[test]
     fn malformed_merkle_proof_fails_verification() {
         let txid = Txid::from_byte_array([0x42; 32]);
