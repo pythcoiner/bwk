@@ -19,7 +19,7 @@ use miniscript::bitcoin::{
 };
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt::{Debug, Display},
+    fmt::Debug,
     sync::mpsc,
     thread::{self},
     time::{Duration, Instant},
@@ -29,35 +29,20 @@ use tx_listener::listen_txs;
 const SEND_MAX_RETRIES: usize = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_millis(300);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
-    Electrum(String),
+    #[error("transport error: {0}")]
+    Transport(#[from] raw_client::Error),
+    #[error("failed to parse the transaction")]
     TxParsing,
+    #[error("wrong response from electrum server")]
     WrongResponse,
+    #[error("requested outpoint did not exist")]
     WrongOutPoint,
+    #[error("requested transaction did not exist")]
     TxDoesNotExists,
+    #[error("server rejected transaction: {0}")]
     Rejected(String),
-}
-
-impl Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Electrum(e) => write!(f, "{e:?}"),
-            Error::TxParsing => write!(f, "Fail to parse the transaction"),
-            Error::WrongResponse => write!(f, "Wrong response from electrum server"),
-            Error::WrongOutPoint => write!(f, "Requested outpoint did not exists"),
-            Error::TxDoesNotExists => write!(f, "Requested transaction did not exists"),
-            Error::Rejected(msg) => write!(f, "server rejected transaction: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<raw_client::Error> for Error {
-    fn from(value: raw_client::Error) -> Self {
-        Error::Electrum(format!("{value:?}"))
-    }
 }
 
 pub fn short_hash(s: &ScriptBuf) -> String {

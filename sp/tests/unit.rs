@@ -487,9 +487,9 @@ fn test_account_error_display() {
     assert!(err.to_string().contains("tweak"));
 }
 
-/// Test Notification Debug and Clone.
+/// Test Notification Debug.
 #[test]
-fn test_notification_debug_clone() {
+fn test_notification_debug() {
     let notif = Notification::Sp(SpNotification::ScanReceiveProgress {
         current: 100,
         end: 200,
@@ -497,15 +497,6 @@ fn test_notification_debug_clone() {
     let debug = format!("{notif:?}");
     assert!(debug.contains("ScanReceiveProgress"));
     assert!(debug.contains("100"));
-
-    let cloned = notif.clone();
-    match cloned {
-        Notification::Sp(SpNotification::ScanReceiveProgress { current, end }) => {
-            assert_eq!(current, 100);
-            assert_eq!(end, 200);
-        }
-        _ => panic!("clone failed"),
-    }
 }
 
 /// Test Payment and PaymentType structures.

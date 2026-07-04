@@ -10,7 +10,7 @@ use std::{
 
 use bwk_backoff::Backoff;
 use bwk_descriptor::derivator::SpkDerivator;
-use bwk_electrum::client::{CoinRequest, CoinResponse};
+use bwk_electrum::client::{CoinError, CoinRequest, CoinResponse};
 use bwk_persist::{ConfigStore, NoopConfigStore, PersistError, PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
@@ -78,7 +78,7 @@ pub enum SpNotification {
 }
 
 /// Notifications sent by an Account to signal events.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Notification {
     Electrum(TxListenerNotif),
     AddressTipChanged,
@@ -153,12 +153,23 @@ impl From<PersistError> for OpenError {
 }
 
 /// Represents notifications related to transaction listeners.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum TxListenerNotif {
     Started,
     Connected(String),
-    Error(String),
+    Error(TxListenerError),
     Stopped,
+}
+
+/// Errors surfaced through [`TxListenerNotif::Error`].
+#[derive(Debug, thiserror::Error)]
+pub enum TxListenerError {
+    #[error("failed to create electrum client: {0}")]
+    Client(#[from] bwk_electrum::client::Error),
+    #[error(transparent)]
+    Coin(#[from] CoinError),
+    #[error("address store disconnected")]
+    AddressStoreDisconnected,
 }
 
 pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
@@ -671,7 +682,7 @@ impl<P: StorageProfile> Account<P> {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("start_listen_txs(): fail to create electrum client {e}");
-                    let _ = notification.send(TxListenerNotif::Error(e.to_string()).into());
+                    let _ = notification.send(TxListenerNotif::Error(e.into()).into());
                     return;
                 }
             };
@@ -907,7 +918,7 @@ fn listen_txs<T, P>(
                     send_notif!(
                         notification,
                         request,
-                        TxListenerNotif::Error("AddressStore disconnected".to_string())
+                        TxListenerNotif::Error(TxListenerError::AddressStoreDisconnected)
                     );
                     // FIXME: what should we do there?
                     // it's AddressStore being dropped, but she should keep upating
@@ -1004,7 +1015,7 @@ fn listen_txs<T, P>(
                         return;
                     }
                     CoinResponse::Error(e) => {
-                        send_notif!(notification, request, TxListenerNotif::Error(e.to_string()));
+                        send_notif!(notification, request, TxListenerNotif::Error(e.into()));
                     }
                 }
             }
