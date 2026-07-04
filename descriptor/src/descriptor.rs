@@ -11,9 +11,11 @@ use miniscript::{
 
 use crate::SpkDerivator;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum Error {
+    #[error("account derivation must be hardened")]
     UnhardenedAccount,
+    #[error("not implemented")]
     NotImplemented,
 }
 

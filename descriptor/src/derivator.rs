@@ -7,12 +7,17 @@ use miniscript::{
 
 use crate::{tr, wpkh};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("descriptor is not a multipath xpub")]
     NotMultiXpub,
+    #[error("descriptor network mismatch")]
     WrongNetwork,
+    #[error("unexpected number of derivation paths")]
     MultiPathCount,
+    #[error("invalid multipath descriptor")]
     MultiPath,
+    #[error("descriptor is missing a wildcard")]
     Wildcard,
 }
 

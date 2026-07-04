@@ -11,3 +11,4 @@ readme.workspace = true
 [dependencies]
 bwk-keys.workspace = true
 miniscript.workspace = true
+thiserror.workspace = true
