@@ -72,6 +72,12 @@ Notification::CoinUpdate ──► Account consumer
 - `AddressStore`: Tracks generated addresses (recv/change tips + look_ahead).
   Notifies Electrum thread when new addresses need watching.
 - `LabelStore`: User labels keyed by OutPoint or Txid.
+- `HeaderStore`: Shared validated chain-header store used to verify merkle
+  proofs and track reorgs across accounts.
+
+Stores wrap the typed `bwk-persist::Store` abstraction. Serialization lives in
+store-local encode/decode helpers; file or database layout details live in
+`PersistenceBackend` implementations.
 
 ## Address Generation
 

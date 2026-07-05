@@ -30,6 +30,20 @@ Don't state the obvious. No "returns the name" on `fn name() -> &str`.
 Extract helpers for repeated logic. Avoid duplicating code across tests or
 modules — shared helpers make maintenance easier and reduce rewrite effort.
 
+## Store Implementation Pattern
+
+Domain stores must wrap the typed `Store` abstraction from `bwk-persist`
+instead of owning ad hoc maps plus direct `PersistenceBackend` calls.
+
+- Define explicit encode/decode helpers beside the domain store.
+- Provide `new` or `new_in_memory`, `from_store`, and backend-loading helpers.
+- Mutate through `Store::{insert, remove, modify}` and persist with `flush`.
+- Add a `StorageProfile` associated type when the store is account-scoped.
+- Keep backend-specific layout rules inside a backend implementation.
+
+Bypass `Store` only when the trait cannot express a required invariant, and
+document that exception at the call site.
+
 ## Dependencies
 
 Keep dependencies minimal. Don't add new crates unless strictly necessary.
