@@ -2,9 +2,11 @@
 //!
 //! Stores (tx, label, coin, scan state, etc.) in `bwk` and `bwk-sp` do not
 //! write files themselves — they hand their serialized bytes to a
-//! [`PersistenceBackend`]. Two backends are provided:
+//! [`PersistenceBackend`]. The main backends are:
 //!
 //! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`HeaderBackend`]: one binary fixed-record file for the validated
+//!   header chain.
 //! - [`SqliteBackend`] — a single SQLite file per account, behind the
 //!   `sqlite` Cargo feature.
 //!
@@ -54,7 +56,7 @@ pub mod storage;
 
 #[cfg(feature = "sqlite")]
 pub use backend::SqliteBackend;
-pub use backend::{JsonBackend, NoopBackend, PersistenceBackend};
+pub use backend::{HeaderBackend, JsonBackend, NoopBackend, PersistenceBackend};
 pub use config_store::{CallbackConfigStore, ConfigStore, FileConfigStore, NoopConfigStore};
 pub use storage::{RamStore, Store};
 
@@ -75,7 +77,12 @@ pub const DB_VERSION: u32 = 1;
 pub const ACCOUNT_STORE_KEY: &str = "account";
 
 /// Logical store name for the bwk (Electrum) transaction store.
-pub const TRANSACTIONS_STORE_KEY: &str = "transactions";
+///
+/// Named `transactions.v2` to break the on-disk format when `TxEntry`
+/// gained the `Inclusion` enum (replacing `height` / `merkle`). Old
+/// `transactions.json` files are simply not read; no migration is
+/// performed.
+pub const TRANSACTIONS_STORE_KEY: &str = "transactions.v2";
 
 /// Logical store name for user-facing labels (used by both bwk and bwk-sp).
 pub const LABELS_STORE_KEY: &str = "labels";
@@ -98,6 +105,13 @@ pub const TXS_STORE_KEY: &str = "txs";
 /// `labels.json`, etc.
 pub const SIGNERS_STORE_KEY: &str = "signers";
 
+/// Logical store name for the bwk validated header chain.
+///
+/// The header chain uses a binary fixed-record cache keyed by block height.
+/// Domain code still reaches it through the typed [`Store`] layer; the
+/// binary layout is isolated inside [`HeaderBackend`].
+pub const HEADERS_STORE_KEY: &str = "headers";
+
 /// The complete set of logical store names the bwk ecosystem uses.
 ///
 /// [`PersistenceBackend::validate_store_name`] consults this list to
@@ -112,13 +126,14 @@ pub const KNOWN_STORES: &[&str] = &[
     COINS_STORE_KEY,
     TXS_STORE_KEY,
     SIGNERS_STORE_KEY,
+    HEADERS_STORE_KEY,
 ];
 
 /// Row key in the `account` store holding the stamped [`DB_VERSION`].
 pub const VERSION_ROW_KEY: &str = "version";
 
 /// Errors returned by [`PersistenceBackend`] implementations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PersistError {
     #[error("io error: {0}")]
     Io(String),

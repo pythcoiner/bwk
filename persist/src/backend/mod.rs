@@ -8,6 +8,8 @@
 //! Concrete backends ship in their own submodule:
 //! - [`NoopBackend`] — discards all writes, reads as absent.
 //! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`HeaderBackend`]: one binary fixed-record file for validated
+//!   headers.
 //! - [`SqliteBackend`] — a single SQLite file per account (requires the
 //!   `sqlite` Cargo feature).
 
@@ -22,6 +24,9 @@ pub use noop::NoopBackend;
 
 mod json;
 pub use json::JsonBackend;
+
+mod headers;
+pub use headers::HeaderBackend;
 
 #[cfg(feature = "sqlite")]
 mod sqlite;
