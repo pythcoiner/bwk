@@ -202,6 +202,12 @@ pub trait OpenFromBackend:
         backend: Arc<dyn PersistenceBackend>,
         secrets_backend: Arc<dyn PersistenceBackend>,
     ) -> Result<Stores<Self>, PersistError>;
+
+    /// Reopen just the statuses store from `backend`, the recovery fallback
+    /// when a panicked listener thread cannot hand its store back.
+    fn open_statuses(
+        backend: Arc<dyn PersistenceBackend>,
+    ) -> Result<Self::StatusesStore, PersistError>;
 }
 
 impl OpenFromBackend for RamProfile<DefaultBackend> {
@@ -217,6 +223,19 @@ impl OpenFromBackend for RamProfile<DefaultBackend> {
             account: ram.account,
             signers: ram.signers,
         })
+    }
+
+    fn open_statuses(
+        backend: Arc<dyn PersistenceBackend>,
+    ) -> Result<Self::StatusesStore, PersistError> {
+        RamStore::open(
+            backend,
+            bwk_persist::STATUSES_STORE_KEY,
+            encode_status_key,
+            decode_status_key,
+            encode_status_value,
+            decode_status_value,
+        )
     }
 }
 

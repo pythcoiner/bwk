@@ -593,9 +593,7 @@ fn restart_requeues_stranded_merkle_fetch() {
     let (new_url, new_port, _new_electrsd) = restart_electrs(electrsd, &bitcoind);
 
     account.set_electrum_config(Some(new_url), Some(new_port));
-    account
-        .restart_electrum()
-        .expect("reconnect after electrs restart");
+    account.restart_electrum();
 
     // A few more confirmations so the verifier has a stable header to
     // validate the (re-queued) merkle proof against.

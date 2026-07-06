@@ -142,6 +142,7 @@ pub enum Error {
     PoolMissing,
     WrongKeyType,
     Satisfaction,
+    HeaderStoreRestart,
 }
 
 /// Error returned when opening an [`Account`]'s stores from disk.
@@ -201,13 +202,22 @@ pub enum TxListenerError {
     Coin(#[from] CoinError),
     #[error("address store disconnected")]
     AddressStoreDisconnected,
+    #[error("statuses store unavailable")]
+    StatusesUnavailable,
+}
+
+/// How a freshly spawned listener thread obtains the statuses store: either
+/// handed in directly (fresh or idle account), or received from the previous
+/// listener's handback channel once that listener winds down. Resolving it
+/// inside the thread keeps a stop and restart from blocking the caller.
+enum StatusesSource<P: StorageProfile> {
+    Direct(P::StatusesStore),
+    Handback(mpsc::Receiver<P::StatusesStore>),
 }
 
 pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
-    /// `None` only while the account is stopped (its stores dropped to
-    /// release the backend dir lock, e.g. mid-`restart_electrum`).
-    coin_store: Option<Arc<Mutex<CoinStore<P>>>>,
-    label_store: Option<Arc<Mutex<LabelStore<P>>>>,
+    coin_store: Arc<Mutex<CoinStore<P>>>,
+    label_store: Arc<Mutex<LabelStore<P>>>,
     receiver: Option<mpsc::Receiver<Notification>>,
     sender: mpsc::Sender<Notification>,
     tx_listener: Option<JoinHandle<()>>,
@@ -219,13 +229,27 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     /// host-supplied closures, or any other [`ConfigStore`] impl.
     config_store: Arc<dyn ConfigStore<Config>>,
     electrum_stop: Option<Arc<AtomicBool>>,
-    signing_manager: Option<SigningManager<P::SignerStore>>,
-    /// Owned by the Electrum listener thread once it spawns; `take()`-n
-    /// in `start_listen_txs` and moved into `listen_txs`.
+    signing_manager: SigningManager<P::SignerStore>,
+    /// Holds the statuses store while no listener owns it (fresh or idle
+    /// account). `take()`-n in `start_listen_txs` for the `Direct` source; once
+    /// a listener has run, the store travels through `statuses_rx` instead.
     statuses_store: Option<P::StatusesStore>,
+    /// Handback channel of the current or last listener. A stopping listener
+    /// sends its statuses store here, so the next start reclaims it without the
+    /// caller blocking on a thread join.
+    statuses_rx: Option<mpsc::Receiver<P::StatusesStore>>,
     /// Validated header chain. Shared across Accounts; the Account
     /// reads `block_hash` / `tip` on every CTA to promote claims.
     header_store: Arc<HeaderStore<P::HeaderStore>>,
+    /// Live offline flag, shared with the Electrum listener thread. The
+    /// listener clears it on `Connected`; `stop_electrum` sets it. Single
+    /// runtime source for `electrum_offline()` and the persisted view.
+    offline: Arc<AtomicBool>,
+    /// Reopen the statuses store from the backend, the fallback when a panicked
+    /// listener cannot hand its store back. Cloned into the listener thread,
+    /// which resolves the store itself. `None` for stores-only (test)
+    /// construction with no backend.
+    reopen_statuses: Option<Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync>>,
 }
 
 impl<P: StorageProfile> std::fmt::Debug for Account<P> {
@@ -272,6 +296,7 @@ impl Account<RamProfile<DefaultBackend>> {
                 account: ram.account,
                 signers: ram.signers,
             },
+            None,
         )
     }
 }
@@ -416,6 +441,9 @@ impl<P: OpenFromBackend> Account<P> {
             } else {
                 backend.clone()
             };
+        let reopen_backend = backend.clone();
+        let reopen_statuses: Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync> =
+            Arc::new(move || P::open_statuses(reopen_backend.clone()));
         let stores = P::open(backend, secrets_backend)?;
         Ok(Self::from_stores(
             config,
@@ -423,55 +451,30 @@ impl<P: OpenFromBackend> Account<P> {
             sender,
             config_store,
             stores,
+            Some(reopen_statuses),
         ))
     }
 
-    /// Recreate the Account with the same config, online.
-    pub fn restart_electrum(&mut self) -> Result<(), OpenError> {
-        let config = self.config.clone();
-        let header_store = self.header_store.clone();
-        let config_store = self.config_store.clone();
-
-        // The persistence backend holds an exclusive lock on the account
-        // directory, so every Arc clone of that backend must be dropped
-        // before `try_new_inner` can reopen the same path. Stop and join
-        // the listener (dropping its clones), then drop the store fields in
-        // place. If the reopen below fails the account is left in this
-        // stopped, store-less state and the error bubbles up: no NoopBackend
-        // stand-in to silently swallow writes.
-        self.stop_stores();
-
-        let (sender, receiver) = mpsc::channel();
-        let mut new_account = Self::try_new_inner(config, header_store, sender, config_store)?;
-        new_account.receiver = Some(receiver);
-        new_account.config.set_offline(false);
-        new_account.persist_config();
-        *self = new_account;
-        // The previous connection died with the old Account; the shared
-        // HeaderStore worker still holds the same dead socket, so reconnect
-        // it too or `Verified` promotions would stall.
+    /// Restart the Electrum listener in place, keeping the `Account` and all
+    /// its channels alive. On a normal reconnect the offline flag is driven by
+    /// the listener, which clears it once connected; with no endpoint configured
+    /// nothing starts and `start_electrum` marks the account offline.
+    pub fn restart_electrum(&mut self) {
+        self.stop_listener();
+        self.start_electrum();
+        // The previous connection died; the shared HeaderStore worker still
+        // holds the same dead socket, so reconnect it too or `Verified`
+        // promotions would stall.
         if let (Some(url), Some(port)) =
             (self.config.electrum_url.clone(), self.config.electrum_port)
         {
-            self.header_store.restart(url, port)?;
+            if let Err(e) = self.header_store.restart(url, port) {
+                log::error!("restart_electrum(): header store restart failed: {e}");
+                let _ = self
+                    .sender
+                    .send(Notification::Error(Error::HeaderStoreRestart));
+            }
         }
-        Ok(())
-    }
-
-    /// Stop the listener and drop the backend-holding stores in place,
-    /// releasing the account directory's exclusive lock. Leaves the account
-    /// inert (its store slots `None`) until a reopen repopulates them.
-    fn stop_stores(&mut self) {
-        if let Some(stop) = self.electrum_stop.take() {
-            stop.store(true, Ordering::Relaxed);
-        }
-        if let Some(handle) = self.tx_listener.take() {
-            let _ = handle.join();
-        }
-        self.coin_store = None;
-        self.label_store = None;
-        self.statuses_store = None;
-        self.signing_manager = None;
     }
 }
 
@@ -482,6 +485,9 @@ impl<P: StorageProfile> Account<P> {
         sender: mpsc::Sender<Notification>,
         config_store: Arc<dyn ConfigStore<Config>>,
         stores: Stores<P>,
+        reopen_statuses: Option<
+            Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync>,
+        >,
     ) -> Self {
         let tx_store = TxStore::from_store(stores.tx);
         let label_store = Arc::new(Mutex::new(LabelStore::from_store(stores.label)));
@@ -511,20 +517,24 @@ impl<P: StorageProfile> Account<P> {
             signing_manager.register_bip32_descriptor(config.descriptor.clone());
         }
         let _ = account_store; // owned by CoinStore→AddressStore; not stored on Account
+        let offline = Arc::new(AtomicBool::new(config.offline()));
         let mut account = Account {
-            coin_store: Some(coin_store),
-            label_store: Some(label_store),
+            coin_store,
+            label_store,
             tx_listener: None,
             electrum_stop: None,
             receiver: None,
             sender,
             config,
             config_store,
-            signing_manager: Some(signing_manager),
+            signing_manager,
             statuses_store: Some(stores.statuses),
+            statuses_rx: None,
             header_store,
+            offline,
+            reopen_statuses,
         };
-        if !account.config.offline() {
+        if !account.offline.load(Ordering::Relaxed) {
             account.start_electrum();
         }
         account
@@ -537,23 +547,23 @@ impl<P: StorageProfile> Account<P> {
     /// Under [`bwk_persist::PersistenceKind::Sqlite`] the saved view has
     /// signer material stripped via [`Config::for_persistence`].
     fn persist_config(&self) {
-        if let Err(e) = self.config_store.save(&self.config.for_persistence()) {
+        let mut cfg = self.config.for_persistence();
+        cfg.set_offline(self.offline.load(Ordering::Relaxed));
+        if let Err(e) = self.config_store.save(&cfg) {
             log::warn!("config save failed: {e}");
         }
     }
 
-    /// The account's coin store. Panics only if called on a stopped
-    /// account (`coin_store` taken to release the backend dir lock).
     fn coin_store(&self) -> &Arc<Mutex<CoinStore<P>>> {
-        self.coin_store.as_ref().expect("account stopped")
+        &self.coin_store
     }
 
     fn label_store(&self) -> &Arc<Mutex<LabelStore<P>>> {
-        self.label_store.as_ref().expect("account stopped")
+        &self.label_store
     }
 
     fn signing_manager(&self) -> &SigningManager<P::SignerStore> {
-        self.signing_manager.as_ref().expect("account stopped")
+        &self.signing_manager
     }
 }
 
@@ -837,31 +847,78 @@ impl<P: StorageProfile> Account<P> {
         let derivator = self.derivator();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_request = stop.clone();
-        let statuses_store = self
-            .statuses_store
-            .take()
-            .expect("statuses store available when starting Electrum listener");
+        // A fresh account still holds the store directly; once a listener has
+        // run, the store returns through the previous listener's handback
+        // channel. Resolving it inside the thread keeps the caller unblocked.
+        let source = match (self.statuses_store.take(), self.statuses_rx.take()) {
+            (Some(store), _) => StatusesSource::<P>::Direct(store),
+            (None, Some(rx)) => StatusesSource::Handback(rx),
+            (None, None) => {
+                // Unreachable in normal flow (one of the two always holds); route
+                // it through the in-thread unavailable path rather than panic.
+                let (_, rx) = mpsc::channel::<P::StatusesStore>();
+                StatusesSource::Handback(rx)
+            }
+        };
+        let (handback_tx, handback_rx) = mpsc::channel();
+        self.statuses_rx = Some(handback_rx);
         let header_store = self.header_store.clone();
         // Register a fresh CTA receiver and hand it straight to the
         // listener thread; the Account never needs to hold it.
         let chain_rx = self.header_store.register();
+        // Shared with the thread so it can mark the account online once the
+        // connection is up, instead of the caller claiming it optimistically.
+        let offline = self.offline.clone();
+        let config_store = self.config_store.clone();
+        let config = self.config.clone();
+        // Fallback for a panicked previous listener that could not hand its
+        // store back: the thread reopens it from disk rather than giving up.
+        let reopen_statuses = self.reopen_statuses.clone();
 
         let poller = thread::spawn(move || {
+            let statuses_store = match source {
+                StatusesSource::Direct(store) => store,
+                StatusesSource::Handback(rx) => match rx.recv() {
+                    Ok(store) => store,
+                    Err(_) => match reopen_statuses.as_ref().map(|reopen| reopen()) {
+                        Some(Ok(store)) => store,
+                        other => {
+                            if let Some(Err(e)) = other {
+                                log::error!("start_listen_txs(): reopen statuses failed: {e}");
+                            }
+                            log::error!(
+                                "start_listen_txs(): statuses store unavailable, listener not started"
+                            );
+                            let _ = notification.send(
+                                TxListenerNotif::Error(TxListenerError::StatusesUnavailable).into(),
+                            );
+                            return;
+                        }
+                    },
+                },
+            };
             let client = match bwk_electrum::client::Client::new(&addr, port) {
                 Ok(c) => c,
                 Err(e) => {
                     log::error!("start_listen_txs(): fail to create electrum client {e}");
                     let _ = notification.send(TxListenerNotif::Error(e.into()).into());
+                    let _ = handback_tx.send(statuses_store);
                     return;
                 }
             };
 
             let addr = format!("{addr}:{port}");
             let _ = notification.send(TxListenerNotif::Connected(addr).into());
+            offline.store(false, Ordering::Relaxed);
+            let mut cfg = config.for_persistence();
+            cfg.set_offline(false);
+            if let Err(e) = config_store.save(&cfg) {
+                log::warn!("start_listen_txs(): config save failed: {e}");
+            }
 
             let (request, response) = client.listen_txs::<CoinRequest, CoinResponse>();
 
-            listen_txs(
+            let statuses_store = listen_txs(
                 coin_store,
                 derivator,
                 notification,
@@ -873,6 +930,7 @@ impl<P: StorageProfile> Account<P> {
                 header_store,
                 chain_rx,
             );
+            let _ = handback_tx.send(statuses_store);
         });
         self.tx_listener = Some(poller);
         (sender, stop)
@@ -903,37 +961,51 @@ impl<P: StorageProfile> Account<P> {
 
     /// Starts the Electrum listener for the account.
     pub fn start_electrum(&mut self) {
-        if let (None, Some(addr), Some(port)) = (
-            &self.tx_listener,
-            self.config.electrum_url.clone(),
-            self.config.electrum_port,
-        ) {
-            let (tx_listener, electrum_stop) = self.start_listen_txs(addr, port);
-            self.coin_store()
-                .lock()
-                .expect("poisoned")
-                .init(tx_listener);
-            self.electrum_stop = Some(electrum_stop);
-            if self.config.offline() {
-                self.config.set_offline(false);
+        // A listener that already finished (e.g. failed to connect at startup)
+        // still occupies `tx_listener`; reclaim it so this retry can restart.
+        if self.tx_listener.as_ref().is_some_and(|h| h.is_finished()) {
+            self.stop_listener();
+        }
+        match (self.config.electrum_url.clone(), self.config.electrum_port) {
+            (Some(addr), Some(port)) if self.tx_listener.is_none() => {
+                let (tx_listener, electrum_stop) = self.start_listen_txs(addr, port);
+                self.coin_store()
+                    .lock()
+                    .expect("poisoned")
+                    .init(tx_listener);
+                self.electrum_stop = Some(electrum_stop);
+            }
+            (None, _) | (_, None) => {
+                // No endpoint to connect to: nothing can listen, so report
+                // offline honestly instead of leaving a stale online flag.
+                self.offline.store(true, Ordering::Relaxed);
                 self.persist_config();
             }
+            _ => {}
         }
     }
 
-    /// Stops the Electrum listener for the account.
-    pub fn stop_electrum(&mut self) {
+    /// Signal the listener to stop and detach it, without blocking. The
+    /// listener winds down on its own and hands its statuses store back through
+    /// `statuses_rx`, which the next start reclaims. Mechanical only: leaves the
+    /// offline flag and persisted config untouched.
+    fn stop_listener(&mut self) {
         if let Some(stop) = self.electrum_stop.as_mut() {
             stop.store(true, Ordering::Relaxed);
         }
         self.electrum_stop = None;
         self.tx_listener = None;
-        self.config.set_offline(true);
+    }
+
+    /// Stops the Electrum listener for the account and marks it offline.
+    pub fn stop_electrum(&mut self) {
+        self.stop_listener();
+        self.offline.store(true, Ordering::Relaxed);
         self.persist_config();
     }
 
     pub fn electrum_offline(&self) -> bool {
-        self.config.offline()
+        self.offline.load(Ordering::Relaxed)
     }
 
     /// Test-only accessor for the account's `HeaderStore` handle, used to
@@ -976,22 +1048,24 @@ impl<P: StorageProfile> Account<P> {
 //     account.boxed()
 // }
 
+// On a dead channel the listener bails out and hands `$statuses` back to the
+// caller (so a later restart can reuse it), mirroring the normal return paths.
 macro_rules! send_notif {
-    ($notification:expr, $request:expr, $msg:expr) => {
+    ($notification:expr, $request:expr, $statuses:expr, $msg:expr) => {
         let res = $notification.send($msg.into());
         if res.is_err() {
             // stop detached client
             let _ = $request.send(CoinRequest::Stop);
-            return;
+            return $statuses;
         }
     };
 }
 
 macro_rules! send_electrum {
-    ($request:expr, $notification:expr, $msg:expr) => {
+    ($request:expr, $notification:expr, $statuses:expr, $msg:expr) => {
         if $request.send($msg).is_err() {
-            send_notif!($notification, $request, TxListenerNotif::Stopped);
-            return;
+            send_notif!($notification, $request, $statuses, TxListenerNotif::Stopped);
+            return $statuses;
         }
     };
 }
@@ -1019,11 +1093,12 @@ fn listen_txs<P>(
     mut statuses: P::StatusesStore,
     header_store: Arc<HeaderStore<P::HeaderStore>>,
     chain_rx: mpsc::Receiver<()>,
-) where
+) -> P::StatusesStore
+where
     P: StorageProfile,
 {
     log::info!("listen_txs(): started");
-    send_notif!(notification, request, TxListenerNotif::Started);
+    send_notif!(notification, request, statuses, TxListenerNotif::Started);
 
     requeue_confirmed_unverified(&coin_store, &request);
 
@@ -1035,7 +1110,12 @@ fn listen_txs<P>(
         }
     };
     if !initial_keys.is_empty() {
-        send_electrum!(request, notification, CoinRequest::Subscribe(initial_keys));
+        send_electrum!(
+            request,
+            notification,
+            statuses,
+            CoinRequest::Subscribe(initial_keys)
+        );
     }
 
     refresh_unconfirmed_history(&coin_store, &request);
@@ -1044,9 +1124,9 @@ fn listen_txs<P>(
     loop {
         // stop request from consumer side
         if stop_request.load(Ordering::Relaxed) {
-            send_notif!(notification, request, TxListenerNotif::Stopped);
+            send_notif!(notification, request, statuses, TxListenerNotif::Stopped);
             let _ = request.send(CoinRequest::Stop);
-            return;
+            return statuses;
         }
 
         let mut received = false;
@@ -1059,7 +1139,7 @@ fn listen_txs<P>(
                 if handle_address_tip::<P>(tip, &derivator, &mut statuses, &request, &notification)
                     .is_break()
                 {
-                    return;
+                    return statuses;
                 }
             }
             Err(e) => match e {
@@ -1069,6 +1149,7 @@ fn listen_txs<P>(
                     send_notif!(
                         notification,
                         request,
+                        statuses,
                         TxListenerNotif::Error(TxListenerError::AddressStoreDisconnected)
                     );
                     // FIXME: what should we do there?
@@ -1094,7 +1175,7 @@ fn listen_txs<P>(
                         )
                         .is_break()
                         {
-                            return;
+                            return statuses;
                         }
                     }
                     CoinResponse::History(map) => {
@@ -1107,7 +1188,7 @@ fn listen_txs<P>(
                         )
                         .is_break()
                         {
-                            return;
+                            return statuses;
                         }
                     }
                     CoinResponse::Txs(txs) => {
@@ -1137,12 +1218,17 @@ fn listen_txs<P>(
                         );
                     }
                     CoinResponse::Stopped => {
-                        send_notif!(notification, request, TxListenerNotif::Stopped);
+                        send_notif!(notification, request, statuses, TxListenerNotif::Stopped);
                         let _ = request.send(CoinRequest::Stop);
-                        return;
+                        return statuses;
                     }
                     CoinResponse::Error(e) => {
-                        send_notif!(notification, request, TxListenerNotif::Error(e.into()));
+                        send_notif!(
+                            notification,
+                            request,
+                            statuses,
+                            TxListenerNotif::Error(e.into())
+                        );
                     }
                 }
             }
@@ -1151,9 +1237,9 @@ fn listen_txs<P>(
                 mpsc::TryRecvError::Disconnected => {
                     // NOTE: here the electrum client is dropped, we cannot continue
                     log::error!("listen_txs() electrum client stopped unexpectedly");
-                    send_notif!(notification, request, TxListenerNotif::Stopped);
+                    send_notif!(notification, request, statuses, TxListenerNotif::Stopped);
                     let _ = request.send(CoinRequest::Stop);
-                    return;
+                    return statuses;
                 }
             },
         }
