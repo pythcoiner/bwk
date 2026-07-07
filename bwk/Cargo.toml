@@ -20,7 +20,7 @@ bwk-backoff.workspace = true
 bwk-keys.workspace = true
 bwk-descriptor.workspace = true
 bwk-persist.workspace = true
-bwk-sign.workspace = true
+bwk-sign = { workspace = true, default-features = false, features = ["sp"] }
 bwk-utils.workspace = true
 bwk-tx.workspace = true
 
@@ -46,5 +46,6 @@ libc.workspace = true
 [features]
 default = []
 sp = []
+hwi = ["bwk-sign/hwi"]
 sqlite = ["bwk-persist/sqlite"]
 test = ["bwk-utils/test", "bwk-sign/test", "bwk-tx/test", "bwk-persist/test"]

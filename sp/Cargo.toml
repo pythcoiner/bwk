@@ -23,6 +23,7 @@ default = ["mnemonic"]
 # Enable usage of bip39 mnemonics.
 mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
+hwi = ["bwk/hwi", "bwk-sign/hwi"]
 # Per-phase scan timing hooks (bench instrumentation only).
 scan-profile = []
 # Builds the sp_sync_bench binary driving the real Account scan. Pulls in scan-profile
@@ -36,7 +37,7 @@ bench-spdk = ["dep:spdk-core", "dep:spdk-wallet", "dep:backend-blindbit-v1", "de
 [dependencies]
 # bwk crates
 bwk = { workspace = true, features = ["sp"] }
-bwk-sign = { workspace = true }
+bwk-sign = { workspace = true, default-features = false, features = ["sp"] }
 bwk-tx = { workspace = true }
 bwk-spscan-sys = { workspace = true }
 
