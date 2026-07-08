@@ -472,7 +472,7 @@ impl Receiver {
         // malformed tweak surfaces as a `MalformedPubkey` -> `Error::MalformedTweak`.
         let scan_key = scan_key.secret_bytes();
         let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
-        let xonly = bwk_spscan_sys::scan_spend_points(&scan_key, tweak, &spend_points)?;
+        let xonly = secp256k1_spscan_sys::scan_spend_points(&scan_key, tweak, &spend_points)?;
         Ok(xonly
             .into_iter()
             .map(|xonly_bytes| {
@@ -507,7 +507,8 @@ impl Receiver {
         // malformed tweak surfaces as a `MalformedPubkey` -> `Error::MalformedTweak`.
         let scan_key = scan_key.secret_bytes();
         let spend_points: Vec<[u8; 33]> = spend_points.iter().map(|p| p.serialize()).collect();
-        let xonly = bwk_spscan_sys::scan_spend_points_batch(&scan_key, tweaks, &spend_points)?;
+        let xonly =
+            secp256k1_spscan_sys::scan_spend_points_batch(&scan_key, tweaks, &spend_points)?;
         Ok(xonly
             .into_iter()
             .map(|xonly_bytes| {
@@ -637,7 +638,7 @@ pub fn calculate_ecdh_shared_secret(tweak_data: &PublicKey, b_scan: &SecretKey) 
 
     // Constant-time ECDH multiply (mainline secp256k1). The output point is
     // byte-identical to the fork's vartime multiply; only timing differs. The
-    // hot candidate-spk scan path uses bwk-spscan-sys (own vartime kernel); this
+    // hot candidate-spk scan path uses secp256k1_spscan-sys (own vartime kernel); this
     // recovery path runs only on a filter match, so const time is fine here.
     ss_bytes[1..].copy_from_slice(&shared_secret_point(tweak_data, b_scan));
 

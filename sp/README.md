@@ -66,6 +66,25 @@ Notification ──► Account consumer
 - `bwk::LabelStore` — User labels for coins and transactions (shared with bwk)
 - `ScanState` — Scan progress and checkpoint management
 
+## Packaging
+
+`bwk-sp` depends on `secp256k1_spscan-sys`, whose C sources live in the
+`secp256k1_spscan-sys/depend/secp256k1` git submodule. The build script
+initializes the submodule automatically for git checkouts when those files are
+missing.
+
+Before publishing `bwk-sp`, run:
+
+```bash
+cargo package -p bwk-sp
+```
+
+Cargo builds the package from the generated tarball, so this verifies that the
+submodule contents needed by `secp256k1_spscan-sys` are included in the package.
+It also catches crates.io packaging blockers. For example, git-only benchmark
+dependencies such as `bench-spdk` must be removed, moved out of the published
+crate, or replaced with versioned crates before publishing.
+
 ## Benchmarking
 
 The `sp_sync_bench` binary measures SP sync throughput by driving the scanner

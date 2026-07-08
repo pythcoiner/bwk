@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! bwk-spscan-sys: relocated, symbol-renamed (`bwkspscan_v0_1_0_`) copy of the
-//! SP-scan libsecp fork, exposing a byte-only FFI for the two light-client scan
-//! kernels.
+//! secp256k1_spscan-sys: byte-only FFI for the SP-scan libsecp fork.
 //!
-//! The C tree is the same vendored libsecp256k1 the bwk secp256k1-sys fork uses,
-//! with the symbol prefix renamed so it does not collide with the mainline
-//! secp256k1-sys (which keeps its own rustsecp prefix). The vendored C is built
-//! with `USE_EXTERNAL_DEFAULT_CALLBACKS`, so the context allocator wrappers and
-//! the default illegal/error callbacks are provided here in Rust, exactly as the
-//! upstream secp256k1-sys does.
+//! The fork is built with `USE_EXTERNAL_DEFAULT_CALLBACKS`, so the context
+//! allocator wrappers and the default illegal/error callbacks are provided here
+//! in Rust, exactly as upstream secp256k1-sys does.
 //!
 //! No async, no pre-validation: the safe API hands raw tweak/spend bytes
 //! straight to the C kernel (which validates each point via `ec_pubkey_parse`)
@@ -53,17 +48,17 @@ struct AlignedType([u8; 16]);
 const ALIGN_TO: usize = core::mem::align_of::<AlignedType>();
 
 extern "C" {
-    #[link_name = "bwkspscan_v0_1_0_context_preallocated_size"]
+    #[link_name = "secp256k1_context_preallocated_size"]
     fn context_preallocated_size(flags: c_uint) -> usize;
 
-    #[link_name = "bwkspscan_v0_1_0_context_preallocated_create"]
+    #[link_name = "secp256k1_context_preallocated_create"]
     fn context_preallocated_create(prealloc: NonNull<c_void>, flags: c_uint) -> NonNull<Context>;
 
-    #[link_name = "bwkspscan_v0_1_0_context_preallocated_destroy"]
+    #[link_name = "secp256k1_context_preallocated_destroy"]
     fn context_preallocated_destroy(cx: NonNull<Context>);
 
     // Byte-FFI shim entries (spscan_ffi.c).
-    fn bwkspscan_scan_spend_points(
+    fn secp256k1_spscan_scan_spend_points(
         ctx: *const Context,
         out_xonly32: *mut c_uchar,
         n_out: *mut usize,
@@ -73,7 +68,7 @@ extern "C" {
         n_spend_points: usize,
     ) -> c_int;
 
-    fn bwkspscan_scan_spend_points_batch(
+    fn secp256k1_spscan_scan_spend_points_batch(
         ctx: *const Context,
         out_xonly32: *mut c_uchar,
         n_out: *mut usize,
@@ -136,7 +131,7 @@ unsafe fn strlen(mut s: *const c_char) -> usize {
 }
 
 #[no_mangle]
-unsafe extern "C" fn bwkspscan_v0_1_0_default_illegal_callback_fn(
+unsafe extern "C" fn secp256k1_default_illegal_callback_fn(
     message: *const c_char,
     _data: *mut c_void,
 ) {
@@ -146,7 +141,7 @@ unsafe extern "C" fn bwkspscan_v0_1_0_default_illegal_callback_fn(
 }
 
 #[no_mangle]
-unsafe extern "C" fn bwkspscan_v0_1_0_default_error_callback_fn(
+unsafe extern "C" fn secp256k1_default_error_callback_fn(
     message: *const c_char,
     _data: *mut c_void,
 ) {
@@ -199,7 +194,7 @@ pub fn scan_spend_points(
     // SAFETY: out holds n_spend*32 bytes; spend_points is n_spend contiguous
     // 33-byte blobs; tweak/scan_key are fixed-size; ctx is live.
     let ret = unsafe {
-        bwkspscan_scan_spend_points(
+        secp256k1_spscan_scan_spend_points(
             ctx.as_ptr(),
             out.as_mut_ptr(),
             &mut n_out,
@@ -241,7 +236,7 @@ pub fn scan_spend_points_batch(
     // SAFETY: out holds total*32 bytes; tweaks/spend_points are contiguous
     // 33-byte blobs of the given counts; scan_key is fixed-size; ctx is live.
     let ret = unsafe {
-        bwkspscan_scan_spend_points_batch(
+        secp256k1_spscan_scan_spend_points_batch(
             ctx.as_ptr(),
             out.as_mut_ptr(),
             &mut n_out,

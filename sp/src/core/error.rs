@@ -34,8 +34,8 @@ pub enum Error {
     MalformedTweak,
 }
 
-impl From<bwk_spscan_sys::MalformedPubkey> for Error {
-    fn from(_: bwk_spscan_sys::MalformedPubkey) -> Self {
+impl From<secp256k1_spscan_sys::MalformedPubkey> for Error {
+    fn from(_: secp256k1_spscan_sys::MalformedPubkey) -> Self {
         Error::MalformedTweak
     }
 }

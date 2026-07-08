@@ -1,4 +1,4 @@
-// Self-contained vector test for the relocated/renamed `bwk-spscan-sys` byte-FFI.
+// Self-contained vector test for the relocated/renamed `secp256k1_spscan-sys` byte-FFI.
 //
 // Pins fixed deterministic inputs (one scan key, 33 tweaks, 2 spend points) and
 // asserts that `scan_spend_points` / `scan_spend_points_batch` reproduce the
@@ -169,11 +169,12 @@ fn vectors_1_tweak_1_spend() {
     let tweaks = tweaks();
     let spends = spends();
 
-    let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[0], &spends[..1]).unwrap();
+    let per = secp256k1_spscan_sys::scan_spend_points(&scan, &tweaks[0], &spends[..1]).unwrap();
     assert_eq!(per.len(), 1);
     assert_eq!(per[0], expected(0, 0));
 
-    let bat = bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..1], &spends[..1]).unwrap();
+    let bat =
+        secp256k1_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..1], &spends[..1]).unwrap();
     assert_eq!(bat.len(), 1);
     assert_eq!(bat[0], expected(0, 0));
 }
@@ -188,7 +189,8 @@ fn vectors_5_tweaks_2_spends() {
 
     // Per-tweak path == vectors.
     for t in 0..n_tweaks {
-        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
+        let per =
+            secp256k1_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
         assert_eq!(per.len(), n_spend);
         for s in 0..n_spend {
             assert_eq!(per[s], expected(t, s), "per-tweak mismatch at t={t} s={s}");
@@ -196,9 +198,12 @@ fn vectors_5_tweaks_2_spends() {
     }
 
     // Batch path == vectors; flat, row-major by tweak.
-    let bat =
-        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend])
-            .unwrap();
+    let bat = secp256k1_spscan_sys::scan_spend_points_batch(
+        &scan,
+        &tweaks[..n_tweaks],
+        &spends[..n_spend],
+    )
+    .unwrap();
     assert_eq!(bat.len(), n_tweaks * n_spend);
     for t in 0..n_tweaks {
         for s in 0..n_spend {
@@ -219,14 +224,18 @@ fn vectors_33_tweaks_2_spends() {
     let n_tweaks = 33;
     let n_spend = 2;
 
-    let bat =
-        bwk_spscan_sys::scan_spend_points_batch(&scan, &tweaks[..n_tweaks], &spends[..n_spend])
-            .unwrap();
+    let bat = secp256k1_spscan_sys::scan_spend_points_batch(
+        &scan,
+        &tweaks[..n_tweaks],
+        &spends[..n_spend],
+    )
+    .unwrap();
     assert_eq!(bat.len(), n_tweaks * n_spend);
 
     let mut per_all: Vec<Vec<[u8; 32]>> = Vec::with_capacity(n_tweaks);
     for t in 0..n_tweaks {
-        let per = bwk_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
+        let per =
+            secp256k1_spscan_sys::scan_spend_points(&scan, &tweaks[t], &spends[..n_spend]).unwrap();
         per_all.push(per);
     }
 

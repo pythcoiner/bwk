@@ -39,7 +39,7 @@ bench-spdk = ["dep:spdk-core", "dep:spdk-wallet", "dep:backend-blindbit-v1", "de
 bwk = { workspace = true, features = ["sp"] }
 bwk-sign = { workspace = true, default-features = false, features = ["sp"] }
 bwk-tx = { workspace = true }
-bwk-spscan-sys = { workspace = true }
+secp256k1_spscan-sys = { workspace = true }
 
 # Bitcoin
 bitcoin = { workspace = true }

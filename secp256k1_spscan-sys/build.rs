@@ -1,22 +1,30 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! Build script for bwk-spscan-sys.
+//! Build script for secp256k1_spscan-sys.
 //!
-//! cc-compiles the relocated/symbol-renamed libsecp256k1 (prefix
-//! `bwkspscan_v0_1_0_`) plus the byte-FFI shim. Mirrors secp256k1-sys/build.rs:
-//! same ENABLE_MODULE_* defines and field/ecmult window config. No module
-//! stripping in this step.
+//! cc-compiles the libsecp256k1 SP-scan fork plus the byte-FFI shim.
 
 extern crate cc;
 
-use std::env;
+use std::{env, path::Path, process::Command};
+
+const SECP256K1_REQUIRED_FILES: &[&str] = &[
+    "depend/secp256k1/include/secp256k1.h",
+    "depend/secp256k1/include/secp256k1_silentpayments.h",
+    "depend/secp256k1/src/precomputed_ecmult_gen.c",
+    "depend/secp256k1/src/precomputed_ecmult.c",
+    "depend/secp256k1/src/secp256k1.c",
+];
 
 fn main() {
     // cc only tracks the explicit `.file()` entries, not the headers they
     // `#include` (the per-module `main_impl.h`, the shim's secp headers). Without
     // this a header edit leaves a stale object and the link sees outdated symbols.
     println!("cargo:rerun-if-changed=depend");
+    println!("cargo:rerun-if-changed=spscan_ffi.c");
     println!("cargo:rerun-if-changed=build.rs");
+
+    init_secp256k1_submodule();
 
     let mut base_config = cc::Build::new();
     base_config
@@ -26,12 +34,8 @@ fn main() {
         .include("depend/secp256k1/src/modules/silentpayments")
         .flag_if_supported("-Wno-unused-function")
         .flag_if_supported("-Wno-unused-parameter")
-        .define("SECP256K1_API", Some(""))
-        // Stripped build: only extrakeys (x-only save/load/cmp/serialize used by
-        // the SP light-client path + shim) and silentpayments are enabled. The
-        // ecdh/schnorrsig/ellswift/recovery/musig modules are not referenced by
-        // the two scan kernels and have been removed from depend/. See
-        // depend/README.
+        .define("SECP256K1_API", Some("extern"))
+        // Only extrakeys and silentpayments are needed by the SP scan path.
         .define("ENABLE_MODULE_EXTRAKEYS", Some("1"))
         .define("ENABLE_MODULE_SILENTPAYMENTS", Some("1"));
 
@@ -50,16 +54,46 @@ fn main() {
             .file("wasm/wasm.c");
     }
 
-    // libsecp + the byte-FFI shim. lax_der_parsing is a DER helper used only by
-    // upstream tests (not the scan path), so it is not compiled here.
+    // libsecp + the byte-FFI shim.
     base_config
         .file("depend/secp256k1/src/precomputed_ecmult_gen.c")
         .file("depend/secp256k1/src/precomputed_ecmult.c")
         .file("depend/secp256k1/src/secp256k1.c")
-        .file("depend/secp256k1/src/modules/silentpayments/spscan_ffi.c");
+        .file("spscan_ffi.c");
 
-    if base_config.try_compile("libbwkspscan.a").is_err() {
+    if base_config.try_compile("libsecp256k1_spscan.a").is_err() {
         base_config.include("wasm/wasm-sysroot");
-        base_config.compile("libbwkspscan.a");
+        base_config.compile("libsecp256k1_spscan.a");
+    }
+}
+
+fn init_secp256k1_submodule() {
+    if SECP256K1_REQUIRED_FILES
+        .iter()
+        .all(|path| Path::new(path).exists())
+    {
+        return;
+    }
+
+    let status = Command::new("git")
+        .args([
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+            "depend/secp256k1",
+        ])
+        .status()
+        .expect("failed to run git submodule update for secp256k1_spscan");
+    assert!(
+        status.success(),
+        "failed to initialize secp256k1_spscan submodule"
+    );
+
+    for path in SECP256K1_REQUIRED_FILES {
+        assert!(
+            Path::new(path).exists(),
+            "missing secp256k1_spscan submodule file `{path}` after initialization"
+        );
     }
 }

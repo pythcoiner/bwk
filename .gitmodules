@@ -1,0 +1,3 @@
+[submodule "secp256k1_spscan-sys/depend/secp256k1"]
+	path = secp256k1_spscan-sys/depend/secp256k1
+	url = https://github.com/pythcoiner/secp256k1_spscan.git

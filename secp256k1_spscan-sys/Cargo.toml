@@ -1,13 +1,13 @@
 [package]
-name = "bwk-spscan-sys"
+name = "secp256k1_spscan-sys"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 authors = ["pythcoiner"]
 license-file = "../LICENSE"
-description = "Byte-FFI for the bwk SP-scan libsecp fork (relocated, symbol-renamed)."
+description = "Byte-FFI for the secp256k1 SP-scan fork."
 build = "build.rs"
-links = "bwkspscan_v0_1_0"
+links = "secp256k1_spscan"
 
 [build-dependencies]
 cc = "1.0.28"
