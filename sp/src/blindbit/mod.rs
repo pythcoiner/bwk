@@ -1,3 +1,5 @@
+//! Source: adapted from cygnet3/spdk. See `sp/NOTICE`.
+
 use std::{sync::Arc, time::Duration};
 
 use bitcoin::{absolute::Height, Amount, BlockHash, Network, ScriptBuf, Txid};

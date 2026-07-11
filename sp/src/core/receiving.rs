@@ -9,7 +9,10 @@
 //! For this, you need to have calculated the `ecdh_shared_secret` beforehand.
 //! To do so, you can use [`calculate_ecdh_shared_secret`](`crate::core::receiving::calculate_ecdh_shared_secret`) from the `utils` module.
 //!
-//! For a concrete example, have a look at the [test vectors](https://github.com/cygnet3/rust-core/blob/master/tests/vector_tests.rs).
+//! For a concrete example, have a look at the [test vectors](https://github.com/cygnet3/rust-silentpayments/blob/master/tests/vector_tests.rs).
+//!
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
 use std::{collections::HashMap, fmt};
 
 use crate::core::{

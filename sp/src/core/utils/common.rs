@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 use core::fmt;
 
 use crate::core::{

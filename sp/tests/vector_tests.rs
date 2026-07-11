@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` vector tests,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 #![allow(non_snake_case)]
 mod sp_common;
 #[cfg(test)]

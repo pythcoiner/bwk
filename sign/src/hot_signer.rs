@@ -758,7 +758,7 @@ impl HotSigner {
 }
 
 /// Compute taproot sighash for key-spend or script-spend.
-// Self-contained signer op (relocated from spdk_core). Uses only bitcoin/secp256k1.
+// Source: relocated from cygnet3/spdk's SP signing path. See `sp/NOTICE`.
 #[cfg(feature = "sp")]
 fn taproot_sighash<
     T: std::ops::Deref<Target = bitcoin::Transaction> + std::borrow::Borrow<bitcoin::Transaction>,
@@ -785,7 +785,7 @@ fn taproot_sighash<
 
 /// Sign a single taproot input using SP tweak-based key derivation.
 /// signing_key = b_spend + tweak
-// Self-contained signer op (relocated from spdk_core). Uses only bitcoin/secp256k1.
+// Source: relocated from cygnet3/spdk's SP signing path. See `sp/NOTICE`.
 #[cfg(feature = "sp")]
 fn sign_sp_input(
     b_spend: &secp256k1::SecretKey,

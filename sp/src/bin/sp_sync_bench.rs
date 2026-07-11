@@ -7,7 +7,7 @@
 //!   timing only (blocks scanned, elapsed, blocks/sec, ms/block) from the
 //!   account's scan notifications.
 //! - `--features instrumentation`: the instrumented harness that drives the
-//!   `spdk-core` block scanner directly, timing the per-block match work, the
+//!   local BWK-SP scan path, timing the per-block match work, the
 //!   per-block data volume, the per-phase breakdown via `profiling`, and
 //!   auto-saving each run to JSON for the `plot` subcommand.
 //!

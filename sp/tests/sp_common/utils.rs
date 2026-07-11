@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` vector-test helpers,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 use std::{fs::File, io::Read, str::FromStr};
 
 use bitcoin_hashes::Hash;

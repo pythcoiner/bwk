@@ -5,8 +5,11 @@
 //! Using [`generate_recipient_pubkeys`] will require calculating a
 //! `partial_secret` beforehand.
 //! To do this, you can use [`calculate_partial_secret`](crate::core::sending::calculate_partial_secret) from the `utils` module.
-//! See the [tests on github](https://github.com/cygnet3/rust-core/blob/master/tests/vector_tests.rs)
+//! See the [tests on github](https://github.com/cygnet3/rust-silentpayments/blob/master/tests/vector_tests.rs)
 //! for a concrete example.
+//!
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
 
 use std::collections::HashMap;
 

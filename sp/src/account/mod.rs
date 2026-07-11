@@ -1077,6 +1077,9 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// For each input whose outpoint is found in this account's coin store,
     /// computes the signing key (`b_spend + tweak`) and produces a Schnorr
     /// signature stored in `tap_key_sig`.
+    ///
+    /// Source: adapted from cygnet3/spdk's silent-payment input signing.
+    /// See `sp/NOTICE`.
     fn sign_sp_inputs(&self, psbt: &mut bitcoin::Psbt) -> Result<(), AccountError> {
         let b_spend = self
             .sp_receiver

@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` vector-test helpers,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 #![allow(non_snake_case)]
 use bwk_sp::core::utils::common::SilentPaymentAddress;
 use serde::Deserialize;

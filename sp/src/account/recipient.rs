@@ -395,6 +395,9 @@ fn to_sp_network(network: Network) -> crate::core::utils::common::Network {
 /// 2. Calls `generate_recipient_pubkeys()` once with all SP addresses
 /// 3. Uses per-address counters to assign the correct pubkey to each output
 /// 4. Stores the pre-computed script on each SP output
+///
+/// Source: adapted from cygnet3/spdk's silent-payment transaction finalization.
+/// See `sp/NOTICE`.
 fn batch_derive_sp_scripts(
     outputs: &mut [Box<dyn RecipientProvider>],
     partial_secret: crate::receiver::bitcoin::secp256k1::SecretKey,
@@ -519,6 +522,8 @@ impl<P: crate::profile::SpStorageProfile> SpSecretProvider<P> {
 impl<P: crate::profile::SpStorageProfile + Send + Sync + 'static> SpPartialSecretProvider
     for SpSecretProvider<P>
 {
+    // Source: adapted from cygnet3/spdk's selected-input partial-secret logic.
+    // See `sp/NOTICE`.
     fn compute_partial_secret(
         &self,
         inputs: &[Coin],
@@ -623,6 +628,8 @@ fn derive_bip32_key(
 
 #[cfg(feature = "mnemonic")]
 impl SpPartialSecretProvider for Account {
+    // Source: adapted from cygnet3/spdk's selected-input partial-secret logic.
+    // See `sp/NOTICE`.
     fn compute_partial_secret(
         &self,
         inputs: &[Coin],

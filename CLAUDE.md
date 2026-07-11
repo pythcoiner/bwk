@@ -78,8 +78,8 @@ Account (bwk/src/account.rs)
 ### Silent Payments Wallet (`bwk-sp`)
 ```
 Account (sp/src/account.rs)
-├── SpClient (spdk-core) - SP key management
-├── BlindbitBackend - blockchain data via Blindbit oracle
+├── SpReceiver - SP key management and scan matching
+├── Blindbit transport - blockchain data via Blindbit oracle
 ├── SpCoinStore, SpTxStore, SpLabelStore, ScanState
 └── Scanner thread (background block scanning)
 ```
@@ -118,8 +118,7 @@ Tests in `bwk-sp/tests/` use `blindbitd` for regtest Blindbit integration.
 
 ## External Dependencies
 
-- `spdk-core`, `silentpayments`: Silent Payments implementation
-  (from pythcoiner/spdk, pythcoiner/rust-silentpayments)
-- `backend-blindbit-native-non-async`: Blindbit backend client
+- `spdk-core`, `spdk-wallet`, `backend-blindbit-v1`: optional comparison
+  benchmark dependencies only (`bwk-sp/bench-spdk`)
 - `miniscript`: Descriptor parsing and script generation
 - `bitcoin`: Bitcoin primitives (v0.32)

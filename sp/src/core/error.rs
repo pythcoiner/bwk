@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("unsupported version {0}, only version 0 is supported")]

@@ -1,3 +1,5 @@
+//! Source: adapted from cygnet3/spdk. See `sp/NOTICE`.
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]

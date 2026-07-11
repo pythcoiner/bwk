@@ -2,6 +2,9 @@
 //! can be used to add silent payment support to wallets.
 //!
 //! This library is split up in two parts: sending and receiving.
+//!
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
 #![allow(non_snake_case)]
 
 pub use secp256k1;

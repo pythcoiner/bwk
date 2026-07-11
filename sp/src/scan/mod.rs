@@ -1,3 +1,7 @@
+//! Parts of the scan algorithms are adapted from cygnet3/spdk. The worker
+//! pipeline, persistence, and native candidate-SPK path are BWK additions.
+//! See `sp/NOTICE`.
+
 #[cfg(feature = "scan-profile")]
 pub mod profiling;
 pub mod state;

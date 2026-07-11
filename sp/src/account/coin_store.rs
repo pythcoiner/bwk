@@ -1,8 +1,9 @@
 //! Coin store for Silent Payment outputs.
 //!
 //! The `SpCoinStore` manages a collection of `SpCoinEntry` items, which wrap
-//! `OwnedOutput` from spdk-core with additional metadata. This provides a
-//! similar interface to bwk's CoinStore but for silent payment outputs.
+//! an SPDK-derived `OwnedOutput` data shape with BWK-specific metadata and
+//! persistence. This provides a similar interface to bwk's CoinStore but for
+//! silent payment outputs.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -35,7 +36,7 @@ pub const STORE_KEY: &str = bwk::persist::COINS_STORE_KEY;
 pub struct SpCoinEntry {
     /// The outpoint (txid:vout) identifying this UTXO
     outpoint: OutPoint,
-    /// The owned output data from spdk-core
+    /// SPDK-derived owned output data with BWK-specific metadata.
     output: OwnedOutput,
 }
 

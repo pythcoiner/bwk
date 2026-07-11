@@ -1,3 +1,6 @@
+//! Source: adapted from SPDK's vendored `silentpayments` implementation,
+//! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
+
 use crate::core::{
     error::Error,
     secp256k1::{PublicKey, Scalar, SecretKey},

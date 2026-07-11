@@ -1,5 +1,7 @@
 //! The silent-payment receiver: BIP352 key material plus address/output
 //! derivation and scan-matching. No network I/O, that is the blindbit module.
+//!
+//! Source: adapted from cygnet3/spdk. See `sp/NOTICE`.
 
 pub mod error;
 
