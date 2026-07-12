@@ -9,7 +9,10 @@ use std::{
 };
 
 use bitcoin::{bip32::ChildNumber, Network};
-use bwk::miniscript::{Descriptor, DescriptorPublicKey};
+use bwk::{
+    miniscript::{Descriptor, DescriptorPublicKey},
+    resolve,
+};
 use bwk_sign::{bwk_descriptor, HotSigner};
 use serde::{Deserialize, Serialize};
 
@@ -232,9 +235,10 @@ impl Config {
     }
 
     /// Set the Electrum server endpoint used to broadcast spends.
-    pub fn set_electrum_endpoint(&mut self, url: String, port: u16) {
-        self.electrum_url = Some(url);
+    pub fn set_electrum_endpoint(&mut self, url: String, port: u16) -> Result<(), std::io::Error> {
+        self.electrum_url = Some(resolve(&url)?);
         self.electrum_port = Some(port);
+        Ok(())
     }
 
     /// Set the dust limit in satoshis.
@@ -426,6 +430,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
     use std::path::Path;
 
     fn test_config() -> Config {
@@ -452,6 +457,17 @@ mod tests {
         assert!(config.persist); // Default is true
         assert!(config.dust_limit.is_none());
         assert!(config.birthday_height.is_none());
+    }
+
+    #[test]
+    fn set_electrum_endpoint_resolves_hostname() {
+        let mut config = test_config();
+
+        config
+            .set_electrum_endpoint("localhost".to_string(), 50001)
+            .unwrap();
+
+        config.electrum_url.unwrap().parse::<IpAddr>().unwrap();
     }
 
     #[test]
