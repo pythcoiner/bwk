@@ -3,7 +3,6 @@ use std::{path::PathBuf, str::FromStr, sync::Arc};
 use bwk_descriptor::descriptor::ScriptType;
 use bwk_persist::{self as persist, PersistenceBackend, PersistenceKind};
 use bwk_sign::hot_signer::HotSigner;
-use bwk_utils::resolve;
 use miniscript::{bitcoin, Descriptor, DescriptorPublicKey};
 use serde::{Deserialize, Serialize};
 
@@ -227,9 +226,8 @@ impl Config {
         self.network
     }
     /// Sets the Electrum URL.
-    pub fn set_electrum_url(&mut self, url: String) -> Result<(), std::io::Error> {
-        self.electrum_url = Some(resolve(&url)?);
-        Ok(())
+    pub fn set_electrum_url(&mut self, url: String) {
+        self.electrum_url = Some(url);
     }
     /// Sets the Electrum port from a string.
     pub fn set_electrum_port(&mut self, port: String) {
@@ -334,7 +332,6 @@ pub fn is_descriptor_valid(descriptor: String) -> bool {
 pub mod tests {
     use bwk_persist::{ConfigStore, FileConfigStore};
     use miniscript::bitcoin::bip32::ChildNumber;
-    use std::net::IpAddr;
 
     use super::*;
 
@@ -363,7 +360,7 @@ pub mod tests {
     }
 
     #[test]
-    fn set_electrum_url_resolves_hostname() {
+    fn set_electrum_url_keeps_hostname() {
         let temp = temp_dir::TempDir::new().unwrap();
         let path = temp.child("storage");
         let mnemonic = bip39::Mnemonic::generate(12).unwrap();
@@ -378,9 +375,9 @@ pub mod tests {
         )
         .unwrap();
 
-        cfg.set_electrum_url("localhost".to_string()).unwrap();
+        cfg.set_electrum_url("electrum.pythcoiner.dev".to_string());
 
-        cfg.electrum_url.unwrap().parse::<IpAddr>().unwrap();
+        assert_eq!(cfg.electrum_url.unwrap(), "electrum.pythcoiner.dev");
     }
 
     #[test]

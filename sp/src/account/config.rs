@@ -9,10 +9,7 @@ use std::{
 };
 
 use bitcoin::{bip32::ChildNumber, Network};
-use bwk::{
-    miniscript::{Descriptor, DescriptorPublicKey},
-    resolve,
-};
+use bwk::miniscript::{Descriptor, DescriptorPublicKey};
 use bwk_sign::{bwk_descriptor, HotSigner};
 use serde::{Deserialize, Serialize};
 
@@ -235,10 +232,9 @@ impl Config {
     }
 
     /// Set the Electrum server endpoint used to broadcast spends.
-    pub fn set_electrum_endpoint(&mut self, url: String, port: u16) -> Result<(), std::io::Error> {
-        self.electrum_url = Some(resolve(&url)?);
+    pub fn set_electrum_endpoint(&mut self, url: String, port: u16) {
+        self.electrum_url = Some(url);
         self.electrum_port = Some(port);
-        Ok(())
     }
 
     /// Set the dust limit in satoshis.
@@ -430,7 +426,6 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
     use std::path::Path;
 
     fn test_config() -> Config {
@@ -460,14 +455,12 @@ mod tests {
     }
 
     #[test]
-    fn set_electrum_endpoint_resolves_hostname() {
+    fn set_electrum_endpoint_keeps_hostname() {
         let mut config = test_config();
 
-        config
-            .set_electrum_endpoint("localhost".to_string(), 50001)
-            .unwrap();
+        config.set_electrum_endpoint("electrum.pythcoiner.dev".to_string(), 50001);
 
-        config.electrum_url.unwrap().parse::<IpAddr>().unwrap();
+        assert_eq!(config.electrum_url.unwrap(), "electrum.pythcoiner.dev");
     }
 
     #[test]

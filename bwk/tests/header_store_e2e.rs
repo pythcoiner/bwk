@@ -109,7 +109,7 @@ fn fresh_config(dir: &TempDir, name: &str, url: &str, port: u16, look_ahead: u32
     .unwrap();
     config.network = Network::Regtest;
     config.look_ahead = look_ahead;
-    config.set_electrum_url(url.to_string()).unwrap();
+    config.set_electrum_url(url.to_string());
     config.set_electrum_port(port.to_string());
     config.set_mnemonic(mnemonic.to_string());
     config
@@ -592,9 +592,7 @@ fn restart_requeues_stranded_merkle_fetch() {
     generate(&bitcoind, 1);
     let (new_url, new_port, _new_electrsd) = restart_electrs(electrsd, &bitcoind);
 
-    account
-        .set_electrum_config(Some(new_url), Some(new_port))
-        .unwrap();
+    account.set_electrum_config(Some(new_url), Some(new_port));
     account.restart_electrum();
 
     // A few more confirmations so the verifier has a stable header to

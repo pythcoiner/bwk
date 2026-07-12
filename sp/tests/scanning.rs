@@ -1874,7 +1874,7 @@ fn test_sp_scan_timestamps() {
         env.url(),
         dir.path().to_path_buf(),
     );
-    config.set_electrum_endpoint(host, port).unwrap();
+    config.set_electrum_endpoint(host, port);
     let mut account = bwk_sp::account::Account::new(config).expect("create account");
 
     // fund_sp funds the SP address and scans, recording the funding tx.

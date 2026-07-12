@@ -45,7 +45,6 @@ use {
     miniscript::psbt::PsbtExt,
     std::{
         collections::{BTreeMap, HashMap, HashSet},
-        io,
         str::FromStr,
         sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
         thread::JoinHandle,
@@ -118,8 +117,6 @@ pub enum AccountError {
     HeaderStart(#[from] bwk::header_store::StartError),
     #[error("persistence error: {0}")]
     Persist(#[from] bwk::persist::PersistError),
-    #[error("failed to resolve electrum endpoint: {0}")]
-    Resolve(#[from] io::Error),
 }
 
 // Re-use unified Notification from bwk
@@ -237,7 +234,6 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         config_store: Arc<dyn ConfigStore<Config>>,
         header_store: Arc<bwk::header_store::HeaderStore>,
     ) -> Result<Self, AccountError> {
-        let config = Self::resolve_electrum_config(config)?;
         // Validate config
         if config.mnemonic.is_none() && config.scan_sk.is_none() {
             return Err(AccountError::MissingKeys);
@@ -309,18 +305,6 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             header_store,
             header_store_endpoint,
         })
-    }
-
-    fn resolve_electrum_config(mut config: Config) -> Result<Config, AccountError> {
-        if let Some(url) = config.electrum_url.as_mut() {
-            *url = bwk::resolve(url)?;
-        }
-        for sub in &mut config.descriptors {
-            if let Some(url) = sub.electrum_url.as_mut() {
-                *url = bwk::resolve(url)?;
-            }
-        }
-        Ok(config)
     }
 
     /// Create account from mnemonic (convenience constructor).
@@ -681,17 +665,11 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
     }
 
     /// Set electrum URL and port on all sub-accounts without writing to file.
-    pub fn set_electrum_settings(
-        &mut self,
-        url: Option<String>,
-        port: Option<u16>,
-    ) -> Result<(), io::Error> {
-        let url = url.map(|url| bwk::resolve(&url)).transpose()?;
+    pub fn set_electrum_settings(&mut self, url: Option<String>, port: Option<u16>) {
         for sub in &mut self.sub_accounts {
-            sub.set_electrum_config(url.clone(), port)?;
+            sub.set_electrum_config(url.clone(), port);
         }
         self.follow_header_store_endpoint(url.zip(port));
-        Ok(())
     }
 
     /// Point the shared `HeaderStore` at `endpoint`: restart its worker

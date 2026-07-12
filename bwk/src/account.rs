@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io,
     ops::ControlFlow,
     str::FromStr,
     sync::{
@@ -16,7 +15,6 @@ use bwk_electrum::client::{CoinError, CoinRequest, CoinResponse};
 use bwk_persist::{ConfigStore, NoopConfigStore, PersistError, PersistenceBackend, Store};
 use bwk_sign::signing_manager::SigningManager;
 use bwk_tx::{coin::KeyChain, tx_builder::TxBuilder, ChangeRecipientProvider, Coin};
-use bwk_utils::resolve;
 
 use miniscript::{
     bitcoin::{self, BlockHash, OutPoint, ScriptBuf, TxMerkleNode, Txid},
@@ -161,8 +159,6 @@ pub enum OpenError {
     /// the account's [`HeaderStore`]. Fails loud rather than silently
     /// opening a worker-less store (see [`Account::build_header_store`]).
     HeaderStore(crate::header_store::StartError),
-    /// The configured Electrum address could not be resolved.
-    Resolve(io::Error),
 }
 
 impl std::fmt::Display for OpenError {
@@ -171,7 +167,6 @@ impl std::fmt::Display for OpenError {
             OpenError::EmptyAccount => write!(f, "account name must not be empty"),
             OpenError::Persist(e) => write!(f, "{e}"),
             OpenError::HeaderStore(e) => write!(f, "{e}"),
-            OpenError::Resolve(e) => write!(f, "{e}"),
         }
     }
 }
@@ -187,12 +182,6 @@ impl From<PersistError> for OpenError {
 impl From<crate::header_store::StartError> for OpenError {
     fn from(e: crate::header_store::StartError) -> Self {
         OpenError::HeaderStore(e)
-    }
-}
-
-impl From<io::Error> for OpenError {
-    fn from(e: io::Error) -> Self {
-        OpenError::Resolve(e)
     }
 }
 
@@ -320,13 +309,6 @@ fn default_config_store() -> Arc<dyn ConfigStore<Config>> {
 // Generic constructors over any profile that knows how to open its
 // store bundle from a single `Arc<dyn PersistenceBackend>`.
 impl<P: OpenFromBackend> Account<P> {
-    fn resolve_electrum_config(mut config: Config) -> Result<Config, OpenError> {
-        if let Some(url) = config.electrum_url.as_mut() {
-            *url = resolve(url)?;
-        }
-        Ok(config)
-    }
-
     /// Creates a new `Account` instance with the given configuration.
     ///
     /// Opens the profile's stores against whatever backend the config
@@ -350,7 +332,6 @@ impl<P: OpenFromBackend> Account<P> {
     /// cannot be built (e.g. the account directory is already locked by
     /// another instance), or a stored blob fails to decode.
     pub fn try_new(config: Config) -> Result<Self, OpenError> {
-        let config = Self::resolve_electrum_config(config)?;
         let header_store = Self::build_header_store(&config)?;
         Self::try_new_with_header_store(config, header_store)
     }
@@ -361,7 +342,6 @@ impl<P: OpenFromBackend> Account<P> {
         config: Config,
         header_store: Arc<HeaderStore<P::HeaderStore>>,
     ) -> Result<Self, OpenError> {
-        let config = Self::resolve_electrum_config(config)?;
         let (sender, receiver) = mpsc::channel();
         let mut account =
             Self::try_new_inner(config, header_store, sender, default_config_store())?;
@@ -374,7 +354,6 @@ impl<P: OpenFromBackend> Account<P> {
         config: Config,
         config_store: Arc<dyn ConfigStore<Config>>,
     ) -> Result<Self, OpenError> {
-        let config = Self::resolve_electrum_config(config)?;
         let header_store = Self::build_header_store(&config)?;
         let (sender, receiver) = mpsc::channel();
         let mut account = Self::try_new_inner(config, header_store, sender, config_store)?;
@@ -387,7 +366,6 @@ impl<P: OpenFromBackend> Account<P> {
         config: Config,
         sender: mpsc::Sender<Notification>,
     ) -> Result<Self, OpenError> {
-        let config = Self::resolve_electrum_config(config)?;
         let header_store = Self::build_header_store(&config)?;
         Self::try_new_inner(config, header_store, sender, default_config_store())
     }
@@ -401,7 +379,6 @@ impl<P: OpenFromBackend> Account<P> {
         header_store: Arc<HeaderStore<P::HeaderStore>>,
         sender: mpsc::Sender<Notification>,
     ) -> Result<Self, OpenError> {
-        let config = Self::resolve_electrum_config(config)?;
         Self::try_new_inner(config, header_store, sender, default_config_store())
     }
 
@@ -1084,30 +1061,21 @@ impl<P: StorageProfile> Account<P> {
     /// * `url` - The URL of the Electrum server.
     /// * `port` - The port of the Electrum server.
     pub fn set_electrum(&mut self, url: String, port: String) {
-        let parsed = port.parse::<u16>().map_err(io::Error::other);
-        let endpoint = parsed.and_then(|port| resolve(&url).map(|url| (url, port)));
-        match endpoint {
-            Ok((url, port)) => {
-                self.config.electrum_url = Some(url);
-                self.config.electrum_port = Some(port);
-                self.persist_config();
-            }
-            Err(_) => self
-                .sender
+        if let Ok(port) = port.parse::<u16>() {
+            self.config.electrum_url = Some(url);
+            self.config.electrum_port = Some(port);
+            self.persist_config();
+        } else {
+            self.sender
                 .send(Notification::InvalidElectrumConfig)
-                .expect("cannot fail"),
+                .expect("cannot fail");
         }
     }
 
     /// Sets the Electrum URL and port in memory without writing to file.
-    pub fn set_electrum_config(
-        &mut self,
-        url: Option<String>,
-        port: Option<u16>,
-    ) -> Result<(), io::Error> {
-        self.config.electrum_url = url.map(|url| resolve(&url)).transpose()?;
+    pub fn set_electrum_config(&mut self, url: Option<String>, port: Option<u16>) {
+        self.config.electrum_url = url;
         self.config.electrum_port = port;
-        Ok(())
     }
 
     /// Starts the Electrum listener for the account.
@@ -3609,7 +3577,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url.clone()).unwrap();
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account: Account = Account::new(config);
@@ -3731,7 +3699,7 @@ mod integration_tests {
         )
         .unwrap();
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url.clone()).unwrap();
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account: Account = Account::new(config);
@@ -3892,7 +3860,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url.clone()).unwrap();
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
@@ -3972,7 +3940,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = 20;
-        config.set_electrum_url(url).unwrap();
+        config.set_electrum_url(url);
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let mut account = Account::new(config);
@@ -4064,7 +4032,7 @@ mod integration_tests {
         .unwrap();
         config.network = Network::Regtest;
         config.look_ahead = look_ahead;
-        config.set_electrum_url(url.clone()).unwrap();
+        config.set_electrum_url(url.clone());
         config.set_electrum_port(port.to_string());
         config.set_mnemonic(mnemonic.to_string());
         let saved_config = config.clone();
