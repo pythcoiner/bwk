@@ -3,6 +3,24 @@ pub mod test;
 
 use std::{io, net::ToSocketAddrs};
 
+#[cfg(target_os = "android")]
+pub fn android_root_certs() -> io::Result<Vec<Vec<u8>>> {
+    let mut certs = Vec::new();
+
+    for entry in std::fs::read_dir("/system/etc/security/cacerts")? {
+        certs.push(std::fs::read(entry?.path())?);
+    }
+
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "android cert store is empty",
+        ));
+    }
+
+    Ok(certs)
+}
+
 pub fn resolve(address: &str) -> Result<String, io::Error> {
     (address, 0)
         .to_socket_addrs()?

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[cfg(target_os = "android")]
-use {native_tls::Certificate, std::fs};
+use {bwk_utils::android_root_certs, native_tls::Certificate};
 
 /// A connected TLS stream plus the bytes already read past the last delimiter.
 /// native-tls has no peek, so we keep a residual buffer across read calls to
@@ -97,19 +97,11 @@ impl SslClient {
 
         #[cfg(target_os = "android")]
         {
-            // native-tls uses a vendored openssl on android, which looks for
-            // certs at the build-host paths, so we load them manually.
-            // /system/etc/security/cacerts contains one file per CA (hash.0)
-            let ca_dir = std::path::Path::new("/system/etc/security/cacerts");
-            if ca_dir.is_dir() {
-                for entry in fs::read_dir(ca_dir).map_err(Error::Io)? {
-                    let path = entry.map_err(Error::Io)?.path();
-                    let cert = fs::read(&path).map_err(Error::Io)?;
-                    let cert = Certificate::from_pem(&cert)
-                        .or_else(|_| Certificate::from_der(&cert)) // some are DER
-                        .map_err(Error::Tls)?;
-                    builder.add_root_certificate(cert);
-                }
+            for cert in android_root_certs().map_err(Error::Io)? {
+                let cert = Certificate::from_pem(&cert)
+                    .or_else(|_| Certificate::from_der(&cert))
+                    .map_err(Error::Tls)?;
+                builder.add_root_certificate(cert);
             }
         }
 
