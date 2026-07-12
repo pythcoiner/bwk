@@ -249,7 +249,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         // Create SpReceiver
         let sp_receiver = Self::create_sp_receiver(&config)?;
 
-        let agent = Arc::new(blindbit::agent());
+        let agent = Arc::new(blindbit::agent().map_err(|e| AccountError::Network(e.to_string()))?);
 
         // Create notification channel
         let (sender, receiver) = mpsc::channel();
@@ -1302,7 +1302,7 @@ impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
 /// Returns the `InfoResponse` and the URL that worked.
 pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), AccountError> {
     let try_url = |url: &str| -> Result<InfoResponse, AccountError> {
-        let agent = blindbit::agent();
+        let agent = blindbit::agent().map_err(|e| AccountError::Network(e.to_string()))?;
         blindbit::info(&agent, url).map_err(|e| AccountError::Network(e.to_string()))
     };
 
@@ -1326,7 +1326,7 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
 #[cfg(feature = "mnemonic")]
 /// Get block height without an Account.
 pub fn backend_block_height(blindbit_url: String) -> Result<u32, AccountError> {
-    let agent = blindbit::agent();
+    let agent = blindbit::agent().map_err(|e| AccountError::Network(e.to_string()))?;
     blindbit::block_height(&agent, &blindbit_url)
         .map(|h| h.to_consensus_u32())
         .map_err(|e| AccountError::Network(e.to_string()))

@@ -328,7 +328,7 @@ mod instrumented {
         let client = SpReceiver::new(scan_sk, SpendKey::Public(spend_pk), args.network)
             .map_err(|e| format!("SpReceiver: {e}"))?;
 
-        let probe = bwk_sp::blindbit::agent();
+        let probe = bwk_sp::blindbit::agent()?;
         let info = bwk_sp::blindbit::info(&probe, &args.url).map_err(|e| format!("info: {e}"))?;
         if info.network != args.network {
             return Err(format!(
@@ -491,7 +491,7 @@ mod instrumented {
         // vs compute; the profiling breakdown below gives the compute split.
         let done = Arc::new(AtomicBool::new(false));
         let scan_done = Arc::clone(&done);
-        let agent = Arc::new(bwk_sp::blindbit::agent());
+        let agent = Arc::new(bwk_sp::blindbit::agent()?);
         let stop = Arc::new(AtomicBool::new(false));
         let (_sender, receiver) = mpsc::channel();
         drop(receiver);

@@ -25,14 +25,14 @@ use bwk::{
 use bwk_sp::{account::config::Config, Notification, SpNotification};
 
 fn backend_height(blindbit_url: &str) -> u32 {
-    let agent = bwk_sp::blindbit::agent();
+    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     bwk_sp::blindbit::block_height(&agent, blindbit_url)
         .expect("backend height")
         .to_consensus_u32()
 }
 
 fn backend_with_cutthrough(blindbit_url: &str) -> bool {
-    let agent = bwk_sp::blindbit::agent();
+    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     bwk_sp::blindbit::info(&agent, blindbit_url)
         .map(|i| i.tweaks_cut_through_with_dust_filter)
         .unwrap_or(false)
@@ -1874,7 +1874,7 @@ fn test_sp_scan_timestamps() {
         env.url(),
         dir.path().to_path_buf(),
     );
-    config.set_electrum_endpoint(host, port);
+    config.set_electrum_endpoint(host, port).unwrap();
     let mut account = bwk_sp::account::Account::new(config).expect("create account");
 
     // fund_sp funds the SP address and scans, recording the funding tx.

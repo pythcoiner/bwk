@@ -245,7 +245,7 @@ fn main() -> Result<()> {
 
     // Oracle metadata via bwk's blindbit client (identical to sp_sync_bench): network
     // check, with-cutthrough capability, and the tip for the default --end.
-    let agent = bwk_sp::blindbit::agent();
+    let agent = bwk_sp::blindbit::agent()?;
     let info = bwk_sp::blindbit::info(&agent, &args.url)?;
     if info.network != args.network {
         return Err(anyhow!(

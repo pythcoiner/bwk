@@ -497,7 +497,7 @@ impl SyncTarget for &mut BlindbitD {
 /// in parallel; 120 s with finer polling is more robust.
 #[allow(dead_code)]
 pub fn wait_until_sync_at_height(mut target: impl SyncTarget, height: u32) {
-    let agent = bwk_sp::blindbit::agent();
+    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     let blindbit_url = target.url();
     let start = std::time::Instant::now();
     // Generous: blindbitd indexes 100 blocks in seconds locally, but deep into a

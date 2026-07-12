@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("HTTP GET failed: {0}")]
     HttpGet(String),
+    #[error("TLS config failed: {0}")]
+    TlsConfig(String),
     #[error("failed to read response body: {0}")]
     ResponseBody(String),
     #[error(transparent)]

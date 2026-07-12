@@ -1,6 +1,6 @@
 //! Source: adapted from cygnet3/spdk. See `sp/NOTICE`.
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use bitcoin::{absolute::Height, Amount, BlockHash, Network, ScriptBuf, Txid};
 use serde::{Deserialize, Deserializer};
@@ -15,27 +15,54 @@ use error::Error;
 
 // HTTP agent and low-level requests.
 
-/// TLS config selecting the native-tls (openssl) provider. ureq defaults to
-/// rustls, which we don't compile (ureq is built with only the
-/// `native-tls`/`vendored` providers); root certs default to the bundled WebPki
-/// roots, so HTTPS works without a system cert store (e.g. Android).
-fn native_tls_config() -> ureq::tls::TlsConfig {
-    ureq::tls::TlsConfig::builder()
-        .provider(ureq::tls::TlsProvider::NativeTls)
-        .build()
+#[cfg(target_os = "android")]
+fn android_root_certs() -> Result<ureq::tls::RootCerts, Error> {
+    let mut certs = Vec::new();
+
+    for data in bwk::bwk_utils::android_root_certs().map_err(|e| Error::TlsConfig(e.to_string()))? {
+        let cert = match ureq::tls::Certificate::from_pem(&data) {
+            Ok(cert) => cert,
+            Err(_) => ureq::tls::Certificate::from_der(&data).to_owned(),
+        };
+        certs.push(cert);
+    }
+
+    Ok(ureq::tls::RootCerts::new_with_certs(&certs))
 }
 
-pub fn agent() -> ureq::Agent {
+fn native_tls_config() -> Result<ureq::tls::TlsConfig, Error> {
+    let builder = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls);
+
+    #[cfg(target_os = "android")]
+    let builder = builder.root_certs(android_root_certs()?);
+
+    Ok(builder.build())
+}
+
+pub fn agent() -> Result<ureq::Agent, Error> {
     // Keep one idle connection per concurrent fetch worker so the pool is reused
     // rather than churned on every block.
     let max_idle = crate::scan::fetch_concurrency();
-    ureq::Agent::config_builder()
-        .tls_config(native_tls_config())
+    Ok(ureq::Agent::config_builder()
+        .tls_config(native_tls_config()?)
         .timeout_global(Some(Duration::from_secs(30)))
         .max_idle_connections(max_idle)
         .max_idle_connections_per_host(max_idle)
         .build()
-        .into()
+        .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls_config_uses_native_tls() {
+        assert_eq!(
+            native_tls_config().unwrap().provider(),
+            ureq::tls::TlsProvider::NativeTls
+        );
+    }
 }
 
 fn get(agent: &ureq::Agent, url: &str, query_params: &[(&str, String)]) -> Result<String, Error> {

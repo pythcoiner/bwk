@@ -34,7 +34,7 @@ use bwk::{
 use bwk_sp::account::{coin_store::SpCoinStore, config::Config, tx_store::SpTxStore};
 
 fn backend_block_height(url: &str) -> u32 {
-    let agent = bwk_sp::blindbit::agent();
+    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     bwk_sp::blindbit::block_height(&agent, url)
         .expect("block height")
         .to_consensus_u32()

@@ -69,10 +69,8 @@ getrandom = { workspace = true }
 # Bip39 mnemonics (optional, mnemonic feature)
 bip39 = { workspace = true, optional = true }
 
-# Blindbit HTTP transport. HTTPS via native-tls, which maps to the platform TLS
-# (system openssl on Linux, SChannel on Windows, Secure Transport on Apple).
-# Provider is selected explicitly in blindbit/mod.rs (ureq defaults to rustls,
-# which we don't compile).
+# Blindbit HTTP transport. Android uses native-tls's vendored openssl, so the
+# transport loads Android's cert store explicitly in blindbit/mod.rs.
 ureq = { workspace = true, features = ["gzip", "native-tls"] }
 
 # Plotting (sp_sync_bench plot subcommand, behind the `instrumentation` feature)
@@ -88,8 +86,6 @@ backend-blindbit-v1 = { git = "https://github.com/cygnet3/spdk.git", rev = "8394
 tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
 anyhow = { version = "1", optional = true }
 
-# Vendor a static openssl only on Android, where native-tls's openssl backend
-# looks for certs at the build-host paths.
 [target.'cfg(target_os = "android")'.dependencies]
 ureq = { workspace = true, features = ["gzip", "native-tls", "vendored"] }
 

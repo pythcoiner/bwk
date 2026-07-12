@@ -20,7 +20,7 @@ fn test_reorg_detection_block_hash_mismatch() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let blindbit_url = bbd.url();
-    let agent = blindbit::agent();
+    let agent = blindbit::agent().expect("blindbit agent");
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -319,7 +319,7 @@ fn test_reorg_deep_reorganization() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let blindbit_url = bbd.url();
-    let agent = blindbit::agent();
+    let agent = blindbit::agent().expect("blindbit agent");
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
