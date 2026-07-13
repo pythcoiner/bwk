@@ -18,9 +18,11 @@ bitcoin.workspace = true
 rand.workspace = true
 env_logger.workspace = true
 log.workspace = true
+ureq = { workspace = true, optional = true }
 corepc-node = { workspace = true, optional = true }
 temp-dir = { workspace = true, optional = true }
 
 [features]
 default = []
 test = ["dep:corepc-node", "dep:temp-dir", "bitcoin/rand-std"]
+ureq = ["dep:ureq"]

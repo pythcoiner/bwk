@@ -37,6 +37,7 @@ bench-spdk = ["dep:spdk-core", "dep:spdk-wallet", "dep:backend-blindbit-v1", "de
 [dependencies]
 # bwk crates
 bwk = { workspace = true, features = ["sp"] }
+bwk-utils = { workspace = true, features = ["ureq"] }
 bwk-sign = { workspace = true, default-features = false, features = ["sp"] }
 bwk-tx = { workspace = true }
 secp256k1_spscan-sys = { workspace = true }

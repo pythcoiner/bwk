@@ -15,6 +15,9 @@ use error::Error;
 
 // HTTP agent and low-level requests.
 
+const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const DNS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(target_os = "android")]
 fn android_root_certs() -> Result<ureq::tls::RootCerts, Error> {
     let mut certs = Vec::new();
@@ -43,19 +46,25 @@ pub fn agent() -> Result<ureq::Agent, Error> {
     // Keep one idle connection per concurrent fetch worker so the pool is reused
     // rather than churned on every block.
     let max_idle = crate::scan::fetch_concurrency();
-    Ok(ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .tls_config(native_tls_config()?)
         .timeout_global(Some(Duration::from_secs(30)))
         .max_idle_connections(max_idle)
         .max_idle_connections_per_host(max_idle)
-        .build()
-        .into())
+        .build();
+    Ok(ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        bwk_utils::ureq_resolver::RefreshingResolver::new(
+            DNS_REFRESH_INTERVAL,
+            DNS_REFRESH_TIMEOUT,
+        ),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn tls_config_uses_native_tls() {
         assert_eq!(
