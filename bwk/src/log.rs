@@ -60,6 +60,8 @@ impl Logger {
         INIT.call_once(|| {
             let mut logger = env_logger::builder();
             logger.filter_level(self.level.into());
+            logger.filter_module("ureq", log::LevelFilter::Warn);
+            logger.filter_module("ureq_proto", log::LevelFilter::Warn);
             for (module, lvl) in self.levels.clone() {
                 logger.filter_module(&module, lvl.into());
             }
