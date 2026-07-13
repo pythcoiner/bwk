@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ops::RangeInclusive,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc, Arc, Mutex,
     },
     time::Instant,
@@ -54,6 +54,28 @@ pub(crate) fn fetch_concurrency() -> usize {
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_FETCH_CONCURRENCY)
     })
+}
+
+fn is_cancelled(stop: &AtomicBool, abort: &AtomicBool) -> bool {
+    stop.load(Ordering::Relaxed) || abort.load(Ordering::Relaxed)
+}
+
+fn abort_once(abort: &AtomicBool) -> bool {
+    abort
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+}
+
+struct FetchWorkers {
+    abort: Arc<AtomicBool>,
+    pool: ThreadPool,
+}
+
+impl FetchWorkers {
+    fn stop(self) {
+        self.abort.store(true, Ordering::Relaxed);
+        self.pool.shutdown();
+    }
 }
 
 fn fetch_channel_cap() -> usize {
@@ -155,11 +177,11 @@ pub(crate) fn candidate_spks(
 /// order. Non-blocking: queues the heights, spawns the pool, and returns
 /// immediately. The bounded channel applies backpressure, so fetching stays at
 /// most `fetch_channel_cap()` blocks ahead of the consumer.
-pub fn fetch_blocks<P: SpStorageProfile>(
+fn fetch_blocks<P: SpStorageProfile>(
     sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     backend: &BackendContext,
     scan: &ScanContext<P>,
-) {
+) -> FetchWorkers {
     // Height 0 has no block to fetch; clamp the start to 1.
     let start = scan.start.to_consensus_u32().max(1);
     let end = scan.end.to_consensus_u32();
@@ -171,8 +193,8 @@ pub fn fetch_blocks<P: SpStorageProfile>(
         backend.with_cutthrough,
         sender,
         scan.block_data_observer.clone(),
-        ThreadPool::new(fetch_concurrency()),
-    );
+        Arc::clone(scan.stop),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -184,72 +206,94 @@ fn spawn_block_fetchers(
     with_cutthrough: bool,
     sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     block_data_observer: Option<BlockDataObserver>,
-    pool: ThreadPool,
-) {
-    for height in range {
+    stop: Arc<AtomicBool>,
+) -> FetchWorkers {
+    let start = *range.start();
+    let end = *range.end();
+    let next = Arc::new(AtomicU32::new(start));
+    let abort = Arc::new(AtomicBool::new(false));
+    let fetch_concurrency = fetch_concurrency();
+    let pool = ThreadPool::new(fetch_concurrency);
+    for _ in 0..fetch_concurrency {
         let agent = agent.clone();
         let url = url.clone();
         let sender = sender.clone();
         let block_data_observer = block_data_observer.clone();
-        pool.execute(move || {
-            fetch_block_data_for_height(
-                agent,
-                url,
+        let next = Arc::clone(&next);
+        let abort = Arc::clone(&abort);
+        let stop = Arc::clone(&stop);
+        pool.execute(move || loop {
+            let height = next.fetch_add(1, Ordering::Relaxed);
+            if height > end || is_cancelled(&stop, &abort) {
+                break;
+            }
+            match fetch_block_data_for_height(
+                &agent,
+                &url,
                 height,
                 dust_limit,
                 with_cutthrough,
-                sender,
-                block_data_observer,
-            );
+                &stop,
+                &abort,
+            ) {
+                Ok(Some(block_data)) => {
+                    if is_cancelled(&stop, &abort) {
+                        break;
+                    }
+                    if let Some(observer) = &block_data_observer {
+                        observer(&block_data);
+                    }
+                    if sender.send(Ok(block_data)).is_err() {
+                        abort.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    if abort_once(&abort) {
+                        let _ = sender.send(Err(e));
+                    }
+                    break;
+                }
+            }
         });
     }
+    FetchWorkers { abort, pool }
 }
 
 fn fetch_block_data_for_height(
-    agent: Arc<ureq::Agent>,
-    url: String,
+    agent: &ureq::Agent,
+    url: &str,
     height: u32,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
-    sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
-    block_data_observer: Option<BlockDataObserver>,
-) {
-    let blkheight = match Height::from_consensus(height) {
-        Ok(bh) => bh,
-        Err(e) => {
-            let _ = sender.send(Err(receiver::error::Error::from(e)));
-            return;
-        }
-    };
+    stop: &AtomicBool,
+    abort: &AtomicBool,
+) -> Result<Option<BlockData>, receiver::error::Error> {
+    if is_cancelled(stop, abort) {
+        return Ok(None);
+    }
+    let blkheight = Height::from_consensus(height).map_err(receiver::error::Error::from)?;
     let tweaks = match with_cutthrough {
-        true => blindbit::tweaks(&agent, &url, blkheight, dust_limit),
-        false => blindbit::tweak_index(&agent, &url, blkheight, dust_limit),
+        true => blindbit::tweaks(agent, url, blkheight, dust_limit),
+        false => blindbit::tweak_index(agent, url, blkheight, dust_limit),
     };
-    let tweaks = match tweaks {
-        Ok(t) => t,
-        Err(e) => {
-            let _ = sender.send(Err(receiver::error::Error::from(e)));
-            return;
-        }
-    };
-    let new_utxo_filter = match blindbit::filter_new_utxos(&agent, &url, blkheight) {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = sender.send(Err(receiver::error::Error::from(e)));
-            return;
-        }
-    };
+    let tweaks = tweaks.map_err(receiver::error::Error::from)?;
+    if is_cancelled(stop, abort) {
+        return Ok(None);
+    }
+    let new_utxo_filter =
+        blindbit::filter_new_utxos(agent, url, blkheight).map_err(receiver::error::Error::from)?;
+    if is_cancelled(stop, abort) {
+        return Ok(None);
+    }
     let blkhash = new_utxo_filter.block_hash;
-    let block_data = BlockData {
+    Ok(Some(BlockData {
         blkheight,
         blkhash,
         tweaks,
         new_utxo_filter: new_utxo_filter.into(),
-    };
-    if let Some(observer) = &block_data_observer {
-        observer(&block_data);
-    }
-    let _ = sender.send(Ok(block_data));
+    }))
 }
 
 /// Concurrent spent-filter fetch for the spend sweep: one `filter/spent/{h}` GET
@@ -289,6 +333,7 @@ struct BlindbitSpendScanner {
     agent: Arc<ureq::Agent>,
     url: String,
     pool: ThreadPool,
+    abort: Arc<AtomicBool>,
     tx: channel::Sender<(u32, Result<FilterData, receiver::error::Error>)>,
     rx: channel::Receiver<(u32, Result<FilterData, receiver::error::Error>)>,
     cursor: u32,
@@ -301,10 +346,12 @@ struct BlindbitSpendScanner {
 impl BlindbitSpendScanner {
     fn new(backend: &BackendContext, cursor: u32, end: u32) -> Self {
         let (tx, rx) = channel::unbounded();
+        let abort = Arc::new(AtomicBool::new(false));
         let mut scanner = Self {
             agent: backend.agent.clone(),
             url: backend.url.clone(),
             pool: ThreadPool::new(fetch_concurrency()),
+            abort,
             tx,
             rx,
             cursor,
@@ -321,6 +368,9 @@ impl BlindbitSpendScanner {
     /// is in flight or buffered. Gap heights below `next_to_fetch` are never
     /// submitted.
     fn refill(&mut self) {
+        if self.abort.load(Ordering::Relaxed) {
+            return;
+        }
         let limit = self
             .cursor
             .saturating_add(self.window)
@@ -330,17 +380,39 @@ impl BlindbitSpendScanner {
             let agent = self.agent.clone();
             let url = self.url.clone();
             let tx = self.tx.clone();
+            let abort = Arc::clone(&self.abort);
             self.pool.execute(move || {
+                if abort.load(Ordering::Relaxed) {
+                    return;
+                }
                 let res = Height::from_consensus(height)
                     .map_err(receiver::error::Error::from)
                     .and_then(|bh| {
                         blindbit::spent_filter(&agent, &url, bh, None)
                             .map_err(receiver::error::Error::from)
                     });
-                let _ = tx.send((height, res));
+                if abort.load(Ordering::Relaxed) {
+                    return;
+                }
+                if res.is_err() {
+                    if abort_once(&abort) {
+                        let _ = tx.send((height, res));
+                    }
+                    return;
+                }
+                if tx.send((height, res)).is_err() {
+                    abort.store(true, Ordering::Relaxed);
+                }
             });
             self.next_to_fetch += 1;
         }
+    }
+}
+
+impl Drop for BlindbitSpendScanner {
+    fn drop(&mut self) {
+        self.abort.store(true, Ordering::Relaxed);
+        self.pool.join();
     }
 }
 
@@ -1080,6 +1152,15 @@ fn process_blocks<P: SpStorageProfile>(
     }
 
     if recv_tip != Some(end_u32) {
+        if should_interrupt(scan.stop) {
+            if let Some(tip) = recv_tip {
+                let i = (tip - start_u32) as usize;
+                let hash = hashes[i].ok_or(receiver::error::Error::MissingBlockHash(tip))?;
+                record_scan_frontier(scan.stores, Height::from_consensus(tip)?, hash)?;
+            }
+            save_state(scan.stores)?;
+            return Ok(true);
+        }
         return Err(receiver::error::Error::MissingBlockHash(end_u32));
     }
     let end_hash = hashes[len - 1].ok_or(receiver::error::Error::MissingBlockHash(end_u32))?;
@@ -1288,8 +1369,10 @@ fn process_scan<P: SpStorageProfile>(
         #[cfg(feature = "scan-profile")]
         let recv_t = Instant::now();
         let (sender, receiver) = channel::bounded(fetch_channel_cap());
-        fetch_blocks(sender, backend, scan);
-        let interrupted = process_blocks(backend, scan, receiver)?;
+        let fetchers = fetch_blocks(sender, backend, scan);
+        let result = process_blocks(backend, scan, receiver);
+        fetchers.stop();
+        let interrupted = result?;
         #[cfg(feature = "scan-profile")]
         profiling::add(&profiling::RECEIVE_WALL_NS, recv_t.elapsed());
         if interrupted {
