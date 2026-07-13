@@ -5,6 +5,7 @@ use std::{
 
 pub struct ThreadPool {
     sender: Option<mpsc::Sender<Box<dyn FnOnce() + Send + 'static>>>,
+    handles: Vec<thread::JoinHandle<()>>,
 }
 
 type Task = Box<dyn FnOnce() + Send + 'static>;
@@ -21,10 +22,11 @@ impl ThreadPool {
         let (tx, rx) = mpsc::channel::<Task>();
         let rx = Arc::new(Mutex::new(rx));
 
+        let mut handles = Vec::with_capacity(size);
         for _ in 0..size {
             let rx = Arc::clone(&rx);
             #[allow(clippy::while_let_loop)]
-            thread::Builder::new()
+            let handle = thread::Builder::new()
                 .stack_size(WORKER_STACK_SIZE)
                 .spawn(move || loop {
                     let task: Task = match rx.lock().expect("poisoned").recv() {
@@ -34,8 +36,12 @@ impl ThreadPool {
                     task();
                 })
                 .expect("failed to spawn fetch worker");
+            handles.push(handle);
         }
-        ThreadPool { sender: Some(tx) }
+        ThreadPool {
+            sender: Some(tx),
+            handles,
+        }
     }
 
     pub fn execute<F>(&self, f: F)
@@ -45,6 +51,17 @@ impl ThreadPool {
         if let Some(sender) = &self.sender {
             let _ = sender.send(Box::new(f));
         }
+    }
+
+    pub fn join(&mut self) {
+        self.sender.take();
+        for handle in self.handles.drain(..) {
+            handle.join().expect("fetch worker panicked");
+        }
+    }
+
+    pub fn shutdown(mut self) {
+        self.join();
     }
 }
 
@@ -117,5 +134,24 @@ mod tests {
             "Last result arrived at {:?}, expected >= 150ms",
             last_arrival
         );
+    }
+
+    #[test]
+    fn shutdown_waits_for_workers() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let pool = ThreadPool::new(2);
+
+        for _ in 0..2 {
+            let tx = tx.clone();
+            pool.execute(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                tx.send(()).unwrap();
+            });
+        }
+        drop(tx);
+
+        pool.shutdown();
+
+        assert_eq!(rx.try_iter().count(), 2);
     }
 }
