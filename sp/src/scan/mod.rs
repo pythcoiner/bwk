@@ -42,7 +42,7 @@ use crate::{
 pub type BlockDataObserver = Arc<dyn Fn(&BlockData) + Send + Sync>;
 pub type HeightObserver = Arc<dyn Fn(Height) + Send + Sync>;
 
-const CONCURRENT_FILTER_REQUESTS: usize = 64;
+const DEFAULT_FETCH_CONCURRENCY: usize = 128;
 const BLOCK_CHANNEL_CAPACITY: usize = 64;
 
 pub(crate) fn fetch_concurrency() -> usize {
@@ -52,7 +52,7 @@ pub(crate) fn fetch_concurrency() -> usize {
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(CONCURRENT_FILTER_REQUESTS)
+            .unwrap_or(DEFAULT_FETCH_CONCURRENCY)
     })
 }
 
