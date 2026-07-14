@@ -1762,7 +1762,9 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             .sender
             .send(Notification::Sp(SpNotification::StoppingScan));
         self.scanner_stop.store(true, Ordering::Relaxed);
-        self.scanner_handle = None;
+        if let Some(handle) = self.scanner_handle.take() {
+            let _ = handle.join();
+        }
     }
 
     /// Check if a continuous scan is currently running.
