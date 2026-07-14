@@ -26,17 +26,16 @@ use {
         },
         blindbit::{self, InfoResponse},
         core::utils::common::SilentPaymentAddress,
-        receiver::{bip39, OwnedOutput, SpReceiver},
-        scan::state::ScanState,
+        receiver::{bip39, SpReceiver},
+        scan::{state::ScanState, ScanRuntimeConfig, ScanRuntimeConfigError},
         LabelKey,
     },
     bitcoin::{
-        absolute::Height,
         hashes::Hash,
         secp256k1::{Keypair, Message, Secp256k1, SecretKey},
         sighash::{Prevouts, SighashCache},
         taproot::Signature,
-        Amount, BlockHash, Network, OutPoint, TapSighashType, Txid,
+        Amount, Network, OutPoint, TapSighashType, Txid,
     },
     bwk::{
         label_store::LabelStore,
@@ -44,7 +43,7 @@ use {
     },
     miniscript::psbt::PsbtExt,
     std::{
-        collections::{BTreeMap, HashMap, HashSet},
+        collections::BTreeMap,
         str::FromStr,
         sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
         thread::JoinHandle,
@@ -117,6 +116,8 @@ pub enum AccountError {
     HeaderStart(#[from] bwk::header_store::StartError),
     #[error("persistence error: {0}")]
     Persist(#[from] bwk::persist::PersistError),
+    #[error("invalid scan runtime config: {0}")]
+    ScanRuntimeConfig(#[from] ScanRuntimeConfigError),
 }
 
 // Re-use unified Notification from bwk
@@ -161,6 +162,7 @@ pub struct Account<
     pub(crate) tx_store: Arc<Mutex<SpTxStore<P>>>,
     pub(crate) scan_state: Arc<Mutex<ScanState>>,
     pub(crate) config: Config,
+    pub(crate) scan_runtime: ScanRuntimeConfig,
     /// Persistence sink for `config`. [`NoopConfigStore`] by default.
     /// Consumers wire whatever shape suits them — a
     /// [`bwk::persist::FileConfigStore`] for file-backed persistence, a
@@ -200,7 +202,18 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     /// - Neither mnemonic nor scan_sk is provided ([`AccountError::MissingKeys`])
     /// - blindbit_url is empty ([`AccountError::MissingBlindbitUrl`])
     pub fn new(config: Config) -> Result<Self, AccountError> {
-        Self::with_config_store(config, Arc::new(NoopConfigStore::<Config>::default()))
+        Self::with_runtime_config(config, ScanRuntimeConfig::default())
+    }
+
+    pub fn with_runtime_config(
+        config: Config,
+        scan_runtime: ScanRuntimeConfig,
+    ) -> Result<Self, AccountError> {
+        Self::with_config_store_and_runtime_config(
+            config,
+            Arc::new(NoopConfigStore::<Config>::default()),
+            scan_runtime,
+        )
     }
 
     /// Like [`Account::new`] but with an explicit config store
@@ -211,8 +224,20 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         config: Config,
         config_store: Arc<dyn ConfigStore<Config>>,
     ) -> Result<Self, AccountError> {
+        Self::with_config_store_and_runtime_config(
+            config,
+            config_store,
+            ScanRuntimeConfig::default(),
+        )
+    }
+
+    pub fn with_config_store_and_runtime_config(
+        config: Config,
+        config_store: Arc<dyn ConfigStore<Config>>,
+        scan_runtime: ScanRuntimeConfig,
+    ) -> Result<Self, AccountError> {
         let header_store = Self::build_header_store(&config)?;
-        Self::with_config_store_and_header_store(config, config_store, header_store)
+        Self::with_config_store_and_header_store(config, config_store, header_store, scan_runtime)
     }
 
     /// Like [`Account::with_config_store`] but sharing an existing
@@ -222,10 +247,23 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         config: Config,
         header_store: Arc<bwk::header_store::HeaderStore>,
     ) -> Result<Self, AccountError> {
+        Self::with_header_store_and_runtime_config(
+            config,
+            header_store,
+            ScanRuntimeConfig::default(),
+        )
+    }
+
+    pub fn with_header_store_and_runtime_config(
+        config: Config,
+        header_store: Arc<bwk::header_store::HeaderStore>,
+        scan_runtime: ScanRuntimeConfig,
+    ) -> Result<Self, AccountError> {
         Self::with_config_store_and_header_store(
             config,
             Arc::new(NoopConfigStore::<Config>::default()),
             header_store,
+            scan_runtime,
         )
     }
 
@@ -233,6 +271,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         config: Config,
         config_store: Arc<dyn ConfigStore<Config>>,
         header_store: Arc<bwk::header_store::HeaderStore>,
+        scan_runtime: ScanRuntimeConfig,
     ) -> Result<Self, AccountError> {
         // Validate config
         if config.mnemonic.is_none() && config.scan_sk.is_none() {
@@ -245,7 +284,10 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         // Create SpReceiver
         let sp_receiver = Self::create_sp_receiver(&config)?;
 
-        let agent = Arc::new(blindbit::agent().map_err(|e| AccountError::Network(e.to_string()))?);
+        let agent = Arc::new(
+            blindbit::agent_with_fetch_concurrency(scan_runtime.fetch_concurrency())
+                .map_err(|e| AccountError::Network(e.to_string()))?,
+        );
 
         // Create notification channel
         let (sender, receiver) = mpsc::channel();
@@ -296,6 +338,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             tx_store,
             scan_state,
             config,
+            scan_runtime,
             config_store,
             sender,
             receiver: Some(receiver),
@@ -1339,6 +1382,8 @@ pub fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx:
 #[cfg(all(test, feature = "mnemonic"))]
 mod tests {
     use super::*;
+    use crate::receiver::OwnedOutput;
+    use bitcoin::absolute::Height;
     use std::path::PathBuf;
 
     fn test_config() -> Config {

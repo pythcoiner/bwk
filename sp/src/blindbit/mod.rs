@@ -7,10 +7,7 @@ use serde::{Deserialize, Deserializer};
 
 pub mod error;
 
-use crate::receiver::{
-    BlockData, FilterData, OutputSpendStatus, OwnedOutput, RecipientAddress, SpReceiver, SpendKey,
-    SpentIndexData, UtxoData,
-};
+use crate::receiver::{FilterData, SpentIndexData, UtxoData};
 use error::Error;
 
 // HTTP agent and low-level requests.
@@ -43,9 +40,13 @@ fn native_tls_config() -> Result<ureq::tls::TlsConfig, Error> {
 }
 
 pub fn agent() -> Result<ureq::Agent, Error> {
+    agent_with_fetch_concurrency(crate::scan::fetch_concurrency())
+}
+
+pub fn agent_with_fetch_concurrency(fetch_concurrency: usize) -> Result<ureq::Agent, Error> {
     // Keep one idle connection per concurrent fetch worker so the pool is reused
     // rather than churned on every block.
-    let max_idle = crate::scan::fetch_concurrency();
+    let max_idle = fetch_concurrency;
     let config = ureq::Agent::config_builder()
         .tls_config(native_tls_config()?)
         .timeout_global(Some(Duration::from_secs(30)))

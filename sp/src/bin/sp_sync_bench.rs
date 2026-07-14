@@ -180,7 +180,7 @@ mod instrumented {
             error::Error as SpError, BlockData, OutputSpendStatus, OwnedOutput, SpReceiver,
             SpendKey,
         },
-        scan::{scan_blocks_with_observer, ScanStores},
+        scan::{scan_blocks_with_observer, ScanRuntimeConfig, ScanStores},
     };
     use plotters::prelude::*;
     use serde::{Deserialize, Serialize};
@@ -537,6 +537,7 @@ mod instrumented {
                 end_height,
                 dust,
                 with_cutthrough,
+                ScanRuntimeConfig::default(),
                 Some(block_data_observer),
             );
             scan_done.store(true, Ordering::Relaxed);

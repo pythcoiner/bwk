@@ -8,6 +8,7 @@ pub mod state;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    num::NonZeroUsize,
     ops::RangeInclusive,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
@@ -42,17 +43,90 @@ use crate::{
 pub type BlockDataObserver = Arc<dyn Fn(&BlockData) + Send + Sync>;
 pub type HeightObserver = Arc<dyn Fn(Height) + Send + Sync>;
 
-const DEFAULT_FETCH_CONCURRENCY: usize = 128;
+pub const DEFAULT_FETCH_CONCURRENCY_FACTOR: usize = 12;
+pub const MAX_FETCH_CONCURRENCY_FACTOR: usize = 32;
+const DEFAULT_PARALLELISM: usize = 8;
 const BLOCK_CHANNEL_CAPACITY: usize = 64;
+const MATCH_WINDOW_MAX: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanRuntimeConfig {
+    fetch_concurrency_factor: NonZeroUsize,
+    fetch_concurrency: NonZeroUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ScanRuntimeConfigError {
+    #[error("SP fetch concurrency factor must be between 1 and {MAX_FETCH_CONCURRENCY_FACTOR}")]
+    InvalidFetchConcurrencyFactor,
+}
+
+impl ScanRuntimeConfig {
+    pub fn from_fetch_concurrency_factor(
+        fetch_concurrency_factor: usize,
+    ) -> Result<Self, ScanRuntimeConfigError> {
+        let fetch_concurrency_factor = factor(
+            fetch_concurrency_factor,
+            MAX_FETCH_CONCURRENCY_FACTOR,
+            ScanRuntimeConfigError::InvalidFetchConcurrencyFactor,
+        )?;
+        let parallelism = available_parallelism();
+        let fetch_concurrency = NonZeroUsize::new(parallelism * fetch_concurrency_factor.get())
+            .expect("factor is non-zero");
+        Ok(Self {
+            fetch_concurrency_factor,
+            fetch_concurrency,
+        })
+    }
+
+    pub fn fetch_concurrency_factor(self) -> usize {
+        self.fetch_concurrency_factor.get()
+    }
+
+    pub fn fetch_concurrency(self) -> usize {
+        self.fetch_concurrency.get()
+    }
+}
+
+impl Default for ScanRuntimeConfig {
+    fn default() -> Self {
+        Self::from_fetch_concurrency_factor(DEFAULT_FETCH_CONCURRENCY_FACTOR)
+            .expect("default scan runtime config is valid")
+    }
+}
+
+fn factor(
+    value: usize,
+    max: usize,
+    error: ScanRuntimeConfigError,
+) -> Result<NonZeroUsize, ScanRuntimeConfigError> {
+    if value == 0 || value > max {
+        return Err(error);
+    }
+    Ok(NonZeroUsize::new(value).expect("value checked above"))
+}
+
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(DEFAULT_PARALLELISM)
+}
 
 pub(crate) fn fetch_concurrency() -> usize {
+    ScanRuntimeConfig::default().fetch_concurrency()
+}
+
+fn match_window_cap() -> usize {
     static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
-        std::env::var("BWK_SP_FETCH_CONCURRENCY")
+        if let Some(n) = std::env::var("BWK_SP_MATCH_WINDOW")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_FETCH_CONCURRENCY)
+        {
+            return n;
+        }
+        available_parallelism().min(MATCH_WINDOW_MAX)
     })
 }
 
@@ -194,6 +268,7 @@ fn fetch_blocks<P: SpStorageProfile>(
         sender,
         scan.block_data_observer.clone(),
         Arc::clone(scan.stop),
+        scan.runtime.fetch_concurrency(),
     )
 }
 
@@ -207,12 +282,12 @@ fn spawn_block_fetchers(
     sender: channel::Sender<Result<BlockData, receiver::error::Error>>,
     block_data_observer: Option<BlockDataObserver>,
     stop: Arc<AtomicBool>,
+    fetch_concurrency: usize,
 ) -> FetchWorkers {
     let start = *range.start();
     let end = *range.end();
     let next = Arc::new(AtomicU32::new(start));
     let abort = Arc::new(AtomicBool::new(false));
-    let fetch_concurrency = fetch_concurrency();
     let pool = ThreadPool::new(fetch_concurrency);
     for _ in 0..fetch_concurrency {
         let agent = agent.clone();
@@ -347,17 +422,18 @@ impl BlindbitSpendScanner {
     fn new(backend: &BackendContext, cursor: u32, end: u32) -> Self {
         let (tx, rx) = channel::unbounded();
         let abort = Arc::new(AtomicBool::new(false));
+        let fetch_concurrency = backend.runtime.fetch_concurrency();
         let mut scanner = Self {
             agent: backend.agent.clone(),
             url: backend.url.clone(),
-            pool: ThreadPool::new(fetch_concurrency()),
+            pool: ThreadPool::new(fetch_concurrency),
             abort,
             tx,
             rx,
             cursor,
             next_to_fetch: cursor,
             end,
-            window: fetch_concurrency() as u32,
+            window: fetch_concurrency as u32,
             buf: BTreeMap::new(),
         };
         scanner.refill();
@@ -502,6 +578,7 @@ struct BackendContext {
     url: String,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
+    runtime: ScanRuntimeConfig,
 }
 
 /// Wallet-side handles and the height range for a scan.
@@ -511,6 +588,7 @@ struct ScanContext<'a, P: SpStorageProfile> {
     stop: &'a Arc<AtomicBool>,
     start: Height,
     end: Height,
+    runtime: ScanRuntimeConfig,
     block_data_observer: Option<BlockDataObserver>,
 }
 
@@ -524,6 +602,7 @@ pub fn scan_blocks<P: SpStorageProfile>(
     end: Height,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
+    runtime: ScanRuntimeConfig,
 ) -> Result<(), receiver::error::Error> {
     scan_blocks_with_observer(
         agent,
@@ -535,6 +614,7 @@ pub fn scan_blocks<P: SpStorageProfile>(
         end,
         dust_limit,
         with_cutthrough,
+        runtime,
         None,
     )
 }
@@ -550,6 +630,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     end: Height,
     dust_limit: Option<Amount>,
     with_cutthrough: bool,
+    runtime: ScanRuntimeConfig,
     block_data_observer: Option<BlockDataObserver>,
 ) -> Result<(), receiver::error::Error> {
     // `start > end` is allowed: it means the receive pass is already at the tip
@@ -562,6 +643,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
         url: blindbit_url.to_string(),
         dust_limit,
         with_cutthrough,
+        runtime,
     };
     let mut scan = ScanContext {
         sp_receiver,
@@ -569,6 +651,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
         stop,
         start,
         end,
+        runtime,
         block_data_observer,
     };
     process_scan(&backend, &mut scan)?;
@@ -954,25 +1037,6 @@ fn match_inputs_for(
         }
     }
     Ok(res)
-}
-
-const MATCH_WINDOW_MAX: usize = 64;
-
-fn match_window_cap() -> usize {
-    static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *CACHE.get_or_init(|| {
-        if let Some(n) = std::env::var("BWK_SP_MATCH_WINDOW")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-        {
-            return n;
-        }
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8)
-            .min(MATCH_WINDOW_MAX)
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1466,6 +1530,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let stop = self.scanner_stop.clone();
         let min_birthday = self.config.min_birthday_height();
         let header_store = self.header_store.clone();
+        let runtime = self.scan_runtime;
 
         let handle = thread::spawn(move || {
             let with_cutthrough = blindbit::info(&agent, &blindbit_url)
@@ -1533,6 +1598,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                 end,
                 dust_limit,
                 with_cutthrough,
+                runtime,
             ) {
                 Ok(()) => {
                     let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
@@ -1574,6 +1640,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let stop = self.scanner_stop.clone();
         let mut first_start = start.map(|h| h.max(self.config.min_birthday_height()));
         let header_store = self.header_store.clone();
+        let runtime = self.scan_runtime;
 
         let handle = thread::spawn(move || {
             let mut last_notified_tip: Option<u32> = None;
@@ -1662,6 +1729,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
                     end,
                     dust_limit,
                     with_cutthrough,
+                    runtime,
                 ) {
                     Ok(()) => {
                         let _ = sender.send(Notification::Sp(SpNotification::ScanCompleted));
@@ -1779,6 +1847,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             end,
             dust_limit,
             with_cutthrough,
+            self.scan_runtime,
         )
         .map_err(AccountError::Scan)?;
 
@@ -1841,6 +1910,26 @@ mod tests {
             ),
             "expected MalformedTweak Err, got {err:?}"
         );
+    }
+
+    #[test]
+    fn scan_runtime_config_defaults_are_current_mobile_baseline() {
+        let config = ScanRuntimeConfig::default();
+
+        assert_eq!(config.fetch_concurrency_factor(), 12);
+        assert!(config.fetch_concurrency() >= 16);
+    }
+
+    #[test]
+    fn scan_runtime_config_rejects_invalid_fetch_concurrency_factor() {
+        assert!(matches!(
+            ScanRuntimeConfig::from_fetch_concurrency_factor(0),
+            Err(ScanRuntimeConfigError::InvalidFetchConcurrencyFactor)
+        ));
+        assert!(matches!(
+            ScanRuntimeConfig::from_fetch_concurrency_factor(MAX_FETCH_CONCURRENCY_FACTOR + 1),
+            Err(ScanRuntimeConfigError::InvalidFetchConcurrencyFactor)
+        ));
     }
 
     use bitcoin::ScriptBuf;
