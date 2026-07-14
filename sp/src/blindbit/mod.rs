@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use bitcoin::{absolute::Height, Amount, BlockHash, Network, ScriptBuf, Txid};
-use serde::{Deserialize, Deserializer};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer};
 
 pub mod error;
 
@@ -92,6 +92,42 @@ fn get(agent: &ureq::Agent, url: &str, query_params: &[(&str, String)]) -> Resul
     Ok(body)
 }
 
+fn parse_response<T: DeserializeOwned>(body: &str) -> Result<T, Error> {
+    Ok(serde_json::from_str(body)?)
+}
+
+fn get_parsed<T: DeserializeOwned>(
+    agent: &ureq::Agent,
+    url: &str,
+    query_params: &[(&str, String)],
+) -> Result<T, Error> {
+    let body = get(agent, url, query_params)?;
+    match parse_response(&body) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            log::warn!(
+                "blindbit parse failed for {}; retrying request once: {e}",
+                request_label(url, query_params)
+            );
+            let body = get(agent, url, query_params)?;
+            parse_response(&body)
+        }
+    }
+}
+
+fn request_label(url: &str, query_params: &[(&str, String)]) -> String {
+    if query_params.is_empty() {
+        return url.to_string();
+    }
+
+    let query = query_params
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{url}?{query}")
+}
+
 fn join(url: &str, route: &str) -> String {
     let url = url.trim_end_matches('/');
     format!("{url}/{route}")
@@ -101,15 +137,13 @@ fn join(url: &str, route: &str) -> String {
 
 pub fn block_height(agent: &ureq::Agent, url: &str) -> Result<Height, Error> {
     let url = join(url, "block-height");
-    let body = get(agent, url.as_str(), &[])?;
-    let blkheight: BlockHeightResponse = serde_json::from_str(&body)?;
+    let blkheight: BlockHeightResponse = get_parsed(agent, url.as_str(), &[])?;
     Ok(blkheight.block_height)
 }
 
 pub fn info(agent: &ureq::Agent, url: &str) -> Result<InfoResponse, Error> {
     let url = join(url, "info");
-    let body = get(agent, url.as_str(), &[])?;
-    Ok(serde_json::from_str(&body)?)
+    get_parsed(agent, url.as_str(), &[])
 }
 
 pub fn spent_filter(
@@ -122,8 +156,7 @@ pub fn spent_filter(
         observer(block_height);
     }
     let url = join(url, &format!("filter/spent/{}", block_height));
-    let body = get(agent, url.as_str(), &[])?;
-    let resp: FilterResponse = serde_json::from_str(&body)?;
+    let resp: FilterResponse = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into())
 }
 
@@ -133,15 +166,13 @@ pub fn spent_index(
     block_height: Height,
 ) -> Result<SpentIndexData, Error> {
     let url = join(url, &format!("spent-index/{}", block_height));
-    let body = get(agent, url.as_str(), &[])?;
-    let resp: SpentIndexResponse = serde_json::from_str(&body)?;
+    let resp: SpentIndexResponse = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into())
 }
 
 pub fn utxos(agent: &ureq::Agent, url: &str, block_height: Height) -> Result<Vec<UtxoData>, Error> {
     let url = join(url, &format!("utxos/{}", block_height));
-    let body = get(agent, url.as_str(), &[])?;
-    let resp: Vec<UtxoResponse> = serde_json::from_str(&body)?;
+    let resp: Vec<UtxoResponse> = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into_iter().map(Into::into).collect())
 }
 
@@ -155,8 +186,7 @@ pub(crate) fn tweaks(
     let params = dust_limit
         .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
         .unwrap_or_default();
-    let body = get(agent, url.as_str(), &params)?;
-    parse_tweaks(&body)
+    get_parsed_tweaks(agent, url.as_str(), &params)
 }
 
 pub(crate) fn tweak_index(
@@ -169,8 +199,7 @@ pub(crate) fn tweak_index(
     let params = dust_limit
         .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
         .unwrap_or_default();
-    let body = get(agent, url.as_str(), &params)?;
-    parse_tweaks(&body)
+    get_parsed_tweaks(agent, url.as_str(), &params)
 }
 
 pub(crate) fn filter_new_utxos(
@@ -179,8 +208,26 @@ pub(crate) fn filter_new_utxos(
     block_height: Height,
 ) -> Result<FilterResponse, Error> {
     let url = join(url, &format!("filter/new-utxos/{}", block_height));
-    let body = get(agent, url.as_str(), &[])?;
-    Ok(serde_json::from_str(&body)?)
+    get_parsed(agent, url.as_str(), &[])
+}
+
+fn get_parsed_tweaks(
+    agent: &ureq::Agent,
+    url: &str,
+    query_params: &[(&str, String)],
+) -> Result<Vec<[u8; 33]>, Error> {
+    let body = get(agent, url, query_params)?;
+    match parse_tweaks(&body) {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            log::warn!(
+                "blindbit parse failed for {}; retrying request once: {e}",
+                request_label(url, query_params)
+            );
+            let body = get(agent, url, query_params)?;
+            parse_tweaks(&body)
+        }
+    }
 }
 
 fn parse_tweaks(body: &str) -> Result<Vec<[u8; 33]>, Error> {
@@ -227,7 +274,6 @@ impl From<UtxoResponse> for UtxoData {
 
 #[derive(Debug, Deserialize)]
 struct SpentIndexResponse {
-    block_hash: BlockHash,
     data: Vec<MyHex>,
 }
 
