@@ -98,6 +98,7 @@ where
     // No bound or explicit deregister: `notify_listeners` drops any sender
     // whose receiver is gone, so this only ever holds live listeners.
     listeners: Mutex<Vec<mpsc::Sender<()>>>,
+    progress_listeners: Mutex<ProgressListeners>,
     /// Authoritative writer token. Only the worker holding the current token
     /// may mutate the store, enforced by checking it under the inner lock in
     /// [`with_writer`](HeaderStore::with_writer). `restart` bumps it so a
@@ -143,6 +144,32 @@ pub enum HeaderValidationState {
     Invalid(InvalidCause),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderProgressPhase {
+    Replay,
+    InitialSync,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderProgressEvent {
+    Started {
+        phase: HeaderProgressPhase,
+        start: u32,
+        end: u32,
+    },
+    Progress {
+        phase: HeaderProgressPhase,
+        current: u32,
+        end: u32,
+    },
+    Completed {
+        phase: HeaderProgressPhase,
+    },
+    Failed {
+        phase: HeaderProgressPhase,
+    },
+}
+
 /// Failure from a chain mutator: either the incoming header failed
 /// validation, or persisting the change failed. Persist failures must
 /// surface so the in-memory chain and the on-disk file cannot silently
@@ -161,6 +188,12 @@ pub(crate) enum MutateError {
 struct Inner<S> {
     store: S,
     validation_state: HeaderValidationState,
+}
+
+#[derive(Debug, Default)]
+struct ProgressListeners {
+    latest: Option<HeaderProgressEvent>,
+    listeners: Vec<mpsc::Sender<HeaderProgressEvent>>,
 }
 
 impl HeaderStore<RamStore<Arc<dyn PersistenceBackend>, u32, [u8; Header::SIZE]>> {
@@ -227,6 +260,7 @@ impl HeaderStore<RamStore<Arc<dyn PersistenceBackend>, u32, [u8; Header::SIZE]>>
                 validation_state: HeaderValidationState::Valid,
             }),
             listeners: Mutex::new(Vec::new()),
+            progress_listeners: Mutex::new(ProgressListeners::default()),
             writer_token: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             worker: Mutex::new(None),
@@ -343,6 +377,7 @@ where
                 validation_state: HeaderValidationState::Unchecked,
             }),
             listeners: Mutex::new(Vec::new()),
+            progress_listeners: Mutex::new(ProgressListeners::default()),
             writer_token: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             worker: Mutex::new(None),
@@ -377,28 +412,49 @@ where
                 log::error!("HeaderStore::start_replay_validation: clear after sanity fail: {e}");
             }
             self.set_validation_state(HeaderValidationState::Invalid(InvalidCause::Sanity));
+            self.publish_progress(HeaderProgressEvent::Failed {
+                phase: HeaderProgressPhase::Replay,
+            });
             self.notify_listeners();
             return;
         }
 
         self.set_validation_state(HeaderValidationState::Validating);
+        let start = *snapshot.keys().next().expect("non-empty");
+        let end = *snapshot.keys().last().expect("non-empty");
+        self.publish_progress(HeaderProgressEvent::Started {
+            phase: HeaderProgressPhase::Replay,
+            start,
+            end,
+        });
         let store = self.clone();
         let network = self.network;
-        thread::spawn(move || match replay_validate(network, &snapshot) {
-            Ok(()) => store.finish_replay_validation_success(),
-            Err(e) => {
-                // Wipe before publishing Invalid (see start_replay_validation):
-                // the parked worker unparks as soon as state leaves
-                // `Validating`, so the store must be empty first.
-                if let Err(clear_err) = store.clear_store() {
-                    log::error!(
-                        "HeaderStore::replay_validate: clear after invalid chain: {clear_err}"
-                    );
+        thread::spawn(move || {
+            match replay_validate(network, &snapshot, |current, end| {
+                store.publish_progress(HeaderProgressEvent::Progress {
+                    phase: HeaderProgressPhase::Replay,
+                    current,
+                    end,
+                });
+            }) {
+                Ok(()) => store.finish_replay_validation_success(),
+                Err(e) => {
+                    // Wipe before publishing Invalid (see start_replay_validation):
+                    // the parked worker unparks as soon as state leaves
+                    // `Validating`, so the store must be empty first.
+                    if let Err(clear_err) = store.clear_store() {
+                        log::error!(
+                            "HeaderStore::replay_validate: clear after invalid chain: {clear_err}"
+                        );
+                    }
+                    store.set_validation_state(HeaderValidationState::Invalid(
+                        InvalidCause::Validator(e),
+                    ));
+                    store.publish_progress(HeaderProgressEvent::Failed {
+                        phase: HeaderProgressPhase::Replay,
+                    });
+                    store.notify_listeners();
                 }
-                store.set_validation_state(HeaderValidationState::Invalid(
-                    InvalidCause::Validator(e),
-                ));
-                store.notify_listeners();
             }
         });
     }
@@ -438,6 +494,9 @@ where
             notify
         };
         if notify {
+            self.publish_progress(HeaderProgressEvent::Completed {
+                phase: HeaderProgressPhase::Replay,
+            });
             self.notify_listeners();
         }
     }
@@ -518,6 +577,7 @@ where
     /// low-difficulty chain from the anchor upward. Sparse-start operation
     /// assumes an honest server for the anchor's chain context; only a
     /// genesis-anchored chain is fully self-validating.
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn append_anchor(
         &self,
         token: u64,
@@ -540,6 +600,67 @@ where
                 return Err(MutateError::BadAnchor);
             }
             inner.store.insert(h, raw)?;
+            inner.store.flush()?;
+            inner.validation_state = HeaderValidationState::Valid;
+            Ok(())
+        });
+        match res {
+            Some(Ok(())) => {
+                self.notify_listeners();
+                Ok(())
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    fn append_batch(
+        &self,
+        token: u64,
+        start: u32,
+        raws: &[[u8; Header::SIZE]],
+    ) -> Result<(), MutateError> {
+        if raws.is_empty() {
+            return Ok(());
+        }
+        let network = self.network;
+        let res = self.with_writer(token, |inner| -> Result<(), MutateError> {
+            let was_empty = inner.store.keys()?.next().is_none();
+            let mut ancestors = if was_empty {
+                VecDeque::new()
+            } else {
+                collect_ancestors(start, retarget_interval(network), |k| {
+                    inner.store.get(&k).ok().flatten()
+                })
+                .into()
+            };
+            let params = Params::new(network);
+
+            for (i, raw) in raws.iter().enumerate() {
+                let h = start + i as u32;
+                let header: Header =
+                    deserialize(raw).map_err(|_| ValidatorError::MalformedHeader)?;
+                if was_empty && i == 0 && h > 0 {
+                    if h % retarget_interval(network) as u32 != 0 {
+                        return Err(MutateError::BadAnchor);
+                    }
+                    header_validator::check_pow(&params, &header)?;
+                } else {
+                    header_validator::validate_append(
+                        network,
+                        ancestors.make_contiguous(),
+                        h,
+                        &header,
+                        now_secs(),
+                    )?;
+                }
+                inner.store.insert(h, *raw)?;
+                ancestors.push_back(header);
+                if ancestors.len() > retarget_interval(network) {
+                    ancestors.pop_front();
+                }
+            }
+
             inner.store.flush()?;
             inner.validation_state = HeaderValidationState::Valid;
             Ok(())
@@ -603,6 +724,14 @@ where
         // lets `listeners` stay unbounded-but-leak-free without a deregister.
         let mut listeners = self.listeners.lock().expect("poisoned");
         listeners.retain(|tx| tx.send(()).is_ok());
+    }
+
+    fn publish_progress(&self, event: HeaderProgressEvent) {
+        let mut progress = self.progress_listeners.lock().expect("poisoned");
+        progress.latest = Some(event.clone());
+        progress
+            .listeners
+            .retain(|tx| tx.send(event.clone()).is_ok());
     }
 
     /// Wipe the in-memory chain (and persisted file if applicable). Used by
@@ -697,6 +826,18 @@ where
     pub fn register(&self) -> mpsc::Receiver<()> {
         let (tx, rx) = mpsc::channel();
         self.listeners.lock().expect("poisoned").push(tx);
+        rx
+    }
+
+    /// Register a listener for header validation progress. If a lifecycle event
+    /// already happened, the receiver gets it before any future events.
+    pub fn register_progress(&self) -> mpsc::Receiver<HeaderProgressEvent> {
+        let (tx, rx) = mpsc::channel();
+        let mut progress = self.progress_listeners.lock().expect("poisoned");
+        if let Some(event) = progress.latest.clone() {
+            let _ = tx.send(event);
+        }
+        progress.listeners.push(tx);
         rx
     }
 
@@ -842,26 +983,42 @@ fn sanity_check(network: Network, headers: &BTreeMap<u32, [u8; Header::SIZE]>) -
 fn replay_validate(
     network: Network,
     headers: &BTreeMap<u32, [u8; Header::SIZE]>,
+    mut progress: impl FnMut(u32, u32),
 ) -> Result<(), ValidatorError> {
     if headers.is_empty() {
         return Ok(());
     }
     let now_secs = now_secs();
     let min = *headers.keys().next().expect("non-empty");
-    let mut raw_validated: BTreeMap<u32, [u8; Header::SIZE]> = BTreeMap::new();
+    let max = *headers.keys().last().expect("non-empty");
+    let max_ancestors = retarget_interval(network);
+    let mut ancestors = VecDeque::new();
+    let mut checked = 0usize;
 
     for (h, raw) in headers {
         let header: Header = deserialize(raw).map_err(|_| ValidatorError::MalformedHeader)?;
         if *h == 0 {
             header_validator::validate_append(network, &[], *h, &header, now_secs)?;
         } else if *h > min {
-            let ancestors = decode_ancestors(&raw_validated, *h, retarget_interval(network));
-            header_validator::validate_append(network, &ancestors, *h, &header, now_secs)?;
+            header_validator::validate_append(
+                network,
+                ancestors.make_contiguous(),
+                *h,
+                &header,
+                now_secs,
+            )?;
         } else {
             let params = Params::new(network);
             header_validator::check_pow(&params, &header)?;
         }
-        raw_validated.insert(*h, *raw);
+        ancestors.push_back(header);
+        if ancestors.len() > max_ancestors {
+            ancestors.pop_front();
+        }
+        checked += 1;
+        if checked % max_ancestors == 0 || *h == max {
+            progress(*h, max);
+        }
     }
     Ok(())
 }
@@ -1302,6 +1459,16 @@ fn initial_sync(
         .map(|t| t.saturating_add(1))
         .unwrap_or(low)
         .max(low);
+    let progress_end = tip_h.saturating_sub(1);
+    let mut progress_started = false;
+    if start < tip_h {
+        progress_started = true;
+        store.publish_progress(HeaderProgressEvent::Started {
+            phase: HeaderProgressPhase::InitialSync,
+            start,
+            end: progress_end,
+        });
+    }
 
     while start < tip_h {
         let remaining = tip_h - start;
@@ -1311,22 +1478,30 @@ fn initial_sync(
                 Some(r) => r,
                 None => {
                     log::warn!("HeaderStore::initial_sync: no response at start={start}");
+                    store.publish_progress(HeaderProgressEvent::Failed {
+                        phase: HeaderProgressPhase::InitialSync,
+                    });
                     return false;
                 }
             };
-        for (i, raw) in raws.iter().enumerate() {
-            let h = start + i as u32;
-            let res = if store.tip().is_none() && h > 0 {
-                store.append_anchor(token, h, *raw)
-            } else {
-                store.append(token, h, *raw)
-            };
-            if let Err(e) = res {
-                log::warn!("HeaderStore::initial_sync: append {h}: {e:?}");
-                return false;
-            }
+        if let Err(e) = store.append_batch(token, start, &raws) {
+            log::warn!("HeaderStore::initial_sync: append batch at {start}: {e:?}");
+            store.publish_progress(HeaderProgressEvent::Failed {
+                phase: HeaderProgressPhase::InitialSync,
+            });
+            return false;
         }
         start += raws.len() as u32;
+        store.publish_progress(HeaderProgressEvent::Progress {
+            phase: HeaderProgressPhase::InitialSync,
+            current: start.saturating_sub(1),
+            end: progress_end,
+        });
+    }
+    if progress_started {
+        store.publish_progress(HeaderProgressEvent::Completed {
+            phase: HeaderProgressPhase::InitialSync,
+        });
     }
 
     true
@@ -2494,6 +2669,7 @@ mod tests {
                 validation_state: HeaderValidationState::Validating,
             }),
             listeners: Mutex::new(Vec::new()),
+            progress_listeners: Mutex::new(ProgressListeners::default()),
             writer_token: AtomicU64::new(0),
             stopped: AtomicBool::new(false),
             worker: Mutex::new(None),

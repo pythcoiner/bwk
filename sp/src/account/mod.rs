@@ -46,7 +46,7 @@ use {
         collections::BTreeMap,
         str::FromStr,
         sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
-        thread::JoinHandle,
+        thread::{self, JoinHandle},
     },
 };
 
@@ -123,6 +123,21 @@ pub enum AccountError {
 // Re-use unified Notification from bwk
 #[cfg(feature = "mnemonic")]
 pub use bwk::{Notification, SpNotification};
+
+#[cfg(feature = "mnemonic")]
+fn forward_header_progress(
+    header_store: &Arc<bwk::header_store::HeaderStore>,
+    sender: mpsc::Sender<Notification>,
+) {
+    let rx = header_store.register_progress();
+    thread::spawn(move || {
+        for event in rx {
+            if sender.send(Notification::HeaderProgress(event)).is_err() {
+                break;
+            }
+        }
+    });
+}
 
 // ScanMode
 
@@ -296,6 +311,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
         let (coin_store, label_store, tx_store, scan_state) = Self::create_or_load_stores(&config)?;
 
         let header_store_endpoint = Self::header_store_endpoint(&config);
+        forward_header_progress(&header_store, sender.clone());
 
         // Create sub-accounts from config descriptors
         let sub_accounts = config

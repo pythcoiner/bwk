@@ -98,6 +98,7 @@ pub enum Notification {
     /// A chain-tip-advance (CTA) pass mutated tx state in response to a
     /// HeaderStore update.
     HeaderStoreUpdated,
+    HeaderProgress(crate::header_store::HeaderProgressEvent),
     /// A merkle proof failed verification, or the header store itself
     /// failed validation; the affected entry was refused promotion.
     ValidationFailed(ValidationFailure),
