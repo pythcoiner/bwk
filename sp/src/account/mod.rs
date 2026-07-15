@@ -1792,6 +1792,9 @@ impl<P: crate::profile::SpStorageProfile> bwk::history::AccountHistory for Accou
                 if received.height.is_none() {
                     received.height = Some(entry.height() as u64);
                 }
+                received.status = received
+                    .status
+                    .merge(bwk::coin_store::PaymentStatus::Verified);
                 if let crate::receiver::OutputSpendStatus::Spent { txid, .. } = entry.status() {
                     let spent_in = bitcoin::Txid::from_byte_array(*txid);
                     let spent = map.entry(spent_in).or_default();
@@ -1809,6 +1812,7 @@ impl<P: crate::profile::SpStorageProfile> bwk::history::AccountHistory for Accou
                 let c = map.entry(e.txid).or_default();
                 if let Some(h) = e.height {
                     c.height = Some(h as u64);
+                    c.status = c.status.merge(bwk::coin_store::PaymentStatus::Verified);
                 }
                 if c.timestamp.is_none() {
                     c.timestamp = e.timestamp;

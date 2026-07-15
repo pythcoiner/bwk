@@ -43,10 +43,50 @@ pub enum PaymentType {
     Send,
     ToSelf,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentStatus {
+    Unconfirmed,
+    ConfirmedUnverified,
+    Verified,
+    VerifyFailed,
+}
+
+impl Default for PaymentStatus {
+    fn default() -> Self {
+        Self::Unconfirmed
+    }
+}
+
+impl PaymentStatus {
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::VerifyFailed, _) | (_, Self::VerifyFailed) => Self::VerifyFailed,
+            (Self::ConfirmedUnverified, _) | (_, Self::ConfirmedUnverified) => {
+                Self::ConfirmedUnverified
+            }
+            (Self::Verified, _) | (_, Self::Verified) => Self::Verified,
+            (Self::Unconfirmed, Self::Unconfirmed) => Self::Unconfirmed,
+        }
+    }
+}
+
+impl From<&Inclusion> for PaymentStatus {
+    fn from(inclusion: &Inclusion) -> Self {
+        match inclusion {
+            Inclusion::Unconfirmed => Self::Unconfirmed,
+            Inclusion::ConfirmedUnverified { .. } => Self::ConfirmedUnverified,
+            Inclusion::Verified { .. } => Self::Verified,
+            Inclusion::VerifyFailed { .. } => Self::VerifyFailed,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Payment {
     pub txid: String,
     pub payment_type: PaymentType,
+    pub status: PaymentStatus,
     pub amount: u64,
     pub label: String,
     /// Confirmation height, `None` while unconfirmed.

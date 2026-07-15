@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use miniscript::bitcoin::{Transaction, Txid};
 
-use crate::coin_store::{Payment, PaymentType};
+use crate::coin_store::{Payment, PaymentStatus, PaymentType};
 
 /// One account's additive ownership inside a single transaction.
 #[derive(Debug, Clone, Default)]
@@ -28,6 +28,8 @@ pub struct TxContribution {
     pub owned_vouts: BTreeSet<u32>,
     /// Confirmation height this account has seen for the tx.
     pub height: Option<u64>,
+    /// Verification state this account has seen for the tx.
+    pub status: PaymentStatus,
     /// Confirming block time this account has seen for the tx.
     pub timestamp: Option<u64>,
     /// A user label for the tx, if this account has one.
@@ -69,6 +71,7 @@ pub fn aggregate_payments<'a>(
             if f.height.is_none() {
                 f.height = contrib.height;
             }
+            f.status = f.status.merge(contrib.status);
             if f.timestamp.is_none() {
                 f.timestamp = contrib.timestamp;
             }
@@ -109,6 +112,7 @@ pub fn aggregate_payments<'a>(
             Some(Payment {
                 txid: txid.to_string(),
                 payment_type,
+                status: f.status,
                 amount,
                 label: f.label.unwrap_or_default(),
                 height: f.height,

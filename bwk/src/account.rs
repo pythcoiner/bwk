@@ -26,7 +26,7 @@ use crate::{
     address_store::{AddressEntry, AddressStatus, AddressTip},
     coin_store::{
         ChainUpdateOutcome, ChangeTipUpdater, ClaimAt, CoinEntry, CoinStore, CoinStoreSource,
-        Payment, PaymentType,
+        Payment, PaymentStatus, PaymentType,
     },
     config::{Config, Tip},
     header_store::{HeaderStore, InvalidCause},
@@ -839,6 +839,7 @@ impl<P: StorageProfile> AccountHistory for Account<P> {
                     owned_out,
                     owned_vouts,
                     height: entry.height(),
+                    status: PaymentStatus::from(entry.inclusion()),
                     timestamp: entry.timestamp(),
                     label,
                     tx: Some(entry.tx().clone()),
