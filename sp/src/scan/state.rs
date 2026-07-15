@@ -168,6 +168,12 @@ impl ScanState {
         }
     }
 
+    pub fn clear_progress(&mut self) {
+        self.last_scanned_height = None;
+        self.last_block_hash = None;
+        self.last_spend_height = None;
+    }
+
     /// Advance the contiguous receive frontier monotonically with its block hash.
     ///
     /// Used by the two-phase receive pass as its contiguous tip fills in.
@@ -219,28 +225,31 @@ impl ScanState {
     /// Writes the three scalar fields as individual rows under the
     /// [`persist::ACCOUNT_STORE_KEY`] store.
     pub fn persist(&self) {
-        let write = |row: &str, bytes: &[u8]| {
-            if let Err(e) = self.backend.put_row(persist::ACCOUNT_STORE_KEY, row, bytes) {
-                log::error!("ScanState::persist() put {row}: {e}");
-            }
-        };
+        if let Err(e) = self.try_persist() {
+            log::error!("ScanState::persist(): {e}");
+        }
+    }
 
-        match serde_json::to_vec(&self.last_scanned_height) {
-            Ok(b) => write(LAST_SCANNED_HEIGHT_ROW, &b),
-            Err(e) => log::error!("ScanState::persist() encode last_scanned_height: {e}"),
-        }
-        match serde_json::to_vec(&self.last_block_hash) {
-            Ok(b) => write(LAST_BLOCK_HASH_ROW, &b),
-            Err(e) => log::error!("ScanState::persist() encode last_block_hash: {e}"),
-        }
-        match serde_json::to_vec(&self.birthday_height) {
-            Ok(b) => write(BIRTHDAY_HEIGHT_ROW, &b),
-            Err(e) => log::error!("ScanState::persist() encode birthday_height: {e}"),
-        }
-        match serde_json::to_vec(&self.last_spend_height) {
-            Ok(b) => write(LAST_SPEND_HEIGHT_ROW, &b),
-            Err(e) => log::error!("ScanState::persist() encode last_spend_height: {e}"),
-        }
+    pub fn try_persist(&self) -> Result<(), PersistError> {
+        let last_scanned_height = serde_json::to_vec(&self.last_scanned_height)
+            .map_err(|e| PersistError::Serde(format!("scan_state last_scanned_height: {e}")))?;
+        let last_block_hash = serde_json::to_vec(&self.last_block_hash)
+            .map_err(|e| PersistError::Serde(format!("scan_state last_block_hash: {e}")))?;
+        let birthday_height = serde_json::to_vec(&self.birthday_height)
+            .map_err(|e| PersistError::Serde(format!("scan_state birthday_height: {e}")))?;
+        let last_spend_height = serde_json::to_vec(&self.last_spend_height)
+            .map_err(|e| PersistError::Serde(format!("scan_state last_spend_height: {e}")))?;
+
+        self.backend.flush_batch(
+            persist::ACCOUNT_STORE_KEY,
+            &[
+                (LAST_SCANNED_HEIGHT_ROW.to_string(), last_scanned_height),
+                (LAST_BLOCK_HASH_ROW.to_string(), last_block_hash),
+                (BIRTHDAY_HEIGHT_ROW.to_string(), birthday_height),
+                (LAST_SPEND_HEIGHT_ROW.to_string(), last_spend_height),
+            ],
+            &[],
+        )
     }
 }
 
@@ -304,6 +313,22 @@ mod tests {
 
         // After sweeping to 150, next spend sweep starts at 151.
         assert_eq!(state.next_spend_start(), 151);
+    }
+
+    #[test]
+    fn test_clear_progress_preserves_birthday() {
+        let mut state = ScanState::new(100);
+
+        state.advance_frontier(150, [0xAB; 32]);
+        state.advance_spend_frontier(140);
+        state.clear_progress();
+
+        assert_eq!(state.birthday_height(), 100);
+        assert_eq!(state.last_scanned_height(), None);
+        assert_eq!(state.last_block_hash(), None);
+        assert_eq!(state.last_spend_height(), None);
+        assert_eq!(state.next_scan_start(), 100);
+        assert_eq!(state.next_spend_start(), 100);
     }
 
     #[test]

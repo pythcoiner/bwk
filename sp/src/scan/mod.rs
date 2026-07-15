@@ -681,10 +681,15 @@ fn record_outputs<P: SpStorageProfile>(
     let mut by_tx: HashMap<Txid, u32> = HashMap::new();
     {
         let mut store = stores.coin_store.lock().expect("poisoned");
-        for (outpoint, output) in outputs {
+        for (outpoint, mut output) in outputs {
             by_tx
                 .entry(outpoint.txid)
                 .or_insert(output.blockheight.to_consensus_u32());
+            if let Some(existing) = store.get(&outpoint) {
+                if !matches!(existing.status(), OutputSpendStatus::Unspent) {
+                    output.spend_status = existing.status().clone();
+                }
+            }
             store.insert(outpoint, output);
             let _ = stores
                 .sender
@@ -1775,6 +1780,16 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             .unwrap_or(false)
     }
 
+    pub fn clear_scan_state(&mut self) -> Result<(), AccountError> {
+        if self.is_scanning() {
+            return Err(AccountError::ScannerAlreadyRunning);
+        }
+        let mut state = self.scan_state.lock().expect("poisoned");
+        state.clear_progress();
+        state.try_persist()?;
+        Ok(())
+    }
+
     /// Returns a clone of the scanner cancellation flag.
     ///
     /// Setting this `AtomicBool` to `true` causes any in-flight OneShot or
@@ -2006,6 +2021,30 @@ mod tests {
         fn jump_to(&mut self, to: u32) {
             self.cursor = to;
         }
+    }
+
+    #[test]
+    fn record_outputs_preserves_spent_status_on_rediscovery() {
+        let outpoint = op(1);
+        let (stores, _rx) = test_stores(&[(outpoint, 100)]);
+        stores
+            .coin_store
+            .lock()
+            .unwrap()
+            .mark_spent(&outpoint, [2; 32]);
+
+        record_outputs(&stores, HashMap::from([(outpoint, owned_unspent(100))])).unwrap();
+
+        assert!(
+            !stores
+                .coin_store
+                .lock()
+                .unwrap()
+                .get(&outpoint)
+                .unwrap()
+                .is_spendable(),
+            "rediscovery must not resurrect a spent output"
+        );
     }
 
     #[test]
