@@ -22,15 +22,107 @@ use crate::core::{
     },
     utils::{
         common::{calculate_P_n, calculate_t_n, Network, SilentPaymentAddress},
-        hash::LabelHash,
+        hash::{calculate_input_hash, LabelHash},
     },
 };
 use bimap::BiMap;
+use bitcoin::{
+    hashes::{hash160, Hash},
+    ScriptBuf, TxIn, TxOut,
+};
 use serde::{
     de::{self, SeqAccess, Visitor},
     ser::{SerializeStruct, SerializeTuple},
     Deserialize, Deserializer, Serialize,
 };
+
+/// Calculate a transaction's BIP352 tweak data from its eligible input keys.
+pub fn calculate_tweak_data(
+    input_pubkeys: &[&PublicKey],
+    outpoints: &[(String, u32)],
+) -> Result<PublicKey, Error> {
+    let secp = Secp256k1::verification_only();
+    let input_sum = PublicKey::combine_keys(input_pubkeys)?;
+    let input_hash = calculate_input_hash(outpoints, input_sum)?;
+    Ok(input_sum.mul_tweak(&secp, &input_hash)?)
+}
+
+fn compressed_pubkey(bytes: &[u8], key_hash: &[u8]) -> Option<PublicKey> {
+    if bytes.len() != 33 || hash160::Hash::hash(bytes).as_byte_array() != key_hash {
+        return None;
+    }
+    PublicKey::from_slice(bytes).ok()
+}
+
+/// Extract a BIP352-eligible public key from a finalized transaction input.
+pub fn eligible_input_pubkey(input: &TxIn, prevout: &TxOut) -> Result<Option<PublicKey>, Error> {
+    let spk = prevout.script_pubkey.as_bytes();
+    let script_sig = input.script_sig.as_bytes();
+    let witness: Vec<_> = input.witness.iter().collect();
+
+    if prevout.script_pubkey.is_p2pkh() {
+        if !witness.is_empty() || script_sig.is_empty() {
+            return Err(Error::InvalidInput("invalid P2PKH spend".to_string()));
+        }
+        return Ok(script_sig
+            .windows(33)
+            .rev()
+            .find_map(|bytes| compressed_pubkey(bytes, &spk[3..23])));
+    }
+
+    if prevout.script_pubkey.is_p2sh() {
+        if script_sig.len() != 23 || script_sig[0] != 22 {
+            return Ok(None);
+        }
+        let redeem_script = &script_sig[1..];
+        if !ScriptBuf::from_bytes(redeem_script.to_vec()).is_p2wpkh()
+            || hash160::Hash::hash(redeem_script).as_byte_array() != &spk[2..22]
+        {
+            return Ok(None);
+        }
+        let pubkey = witness
+            .last()
+            .and_then(|bytes| compressed_pubkey(bytes, &redeem_script[2..22]));
+        return pubkey
+            .map(Some)
+            .ok_or_else(|| Error::InvalidInput("invalid P2SH-P2WPKH spend".to_string()));
+    }
+
+    if prevout.script_pubkey.is_p2wpkh() {
+        if !script_sig.is_empty() {
+            return Err(Error::InvalidInput(
+                "non-empty P2WPKH scriptSig".to_string(),
+            ));
+        }
+        let pubkey = witness
+            .last()
+            .and_then(|bytes| compressed_pubkey(bytes, &spk[2..22]));
+        return pubkey
+            .map(Some)
+            .ok_or_else(|| Error::InvalidInput("invalid P2WPKH spend".to_string()));
+    }
+
+    if prevout.script_pubkey.is_p2tr() {
+        if !script_sig.is_empty() {
+            return Err(Error::InvalidInput("non-empty P2TR scriptSig".to_string()));
+        }
+        let has_annex = witness
+            .last()
+            .and_then(|item| item.first())
+            .is_some_and(|byte| *byte == 0x50);
+        let stack_len = witness.len() - usize::from(has_annex);
+        if stack_len == 0 {
+            return Err(Error::InvalidInput("empty P2TR witness".to_string()));
+        }
+        if stack_len != 1 {
+            return Ok(None);
+        }
+        let xonly = XOnlyPublicKey::from_slice(&spk[2..34])?;
+        return Ok(Some(PublicKey::from_x_only_public_key(xonly, Parity::Even)));
+    }
+
+    Ok(None)
+}
 
 /// A Silent payment receiving label.
 #[derive(Eq, PartialEq, Clone)]

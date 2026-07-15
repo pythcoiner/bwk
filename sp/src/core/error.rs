@@ -17,6 +17,8 @@ pub enum Error {
     TxidLength(usize),
     #[error("unexpected empty outpoints vector")]
     EmptyOutpoints,
+    #[error("invalid transaction input: {0}")]
+    InvalidInput(String),
     #[error(transparent)]
     InvalidLabel(#[from] hex::FromHexError),
     #[error("label must be 32 bytes (256 bits) long")]

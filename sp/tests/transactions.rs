@@ -8,6 +8,8 @@
 mod common;
 
 use bitcoin::Network;
+use bwk::coin_store::PaymentType;
+use bwk_sign::HotSigner;
 use bwk_sp::account::recipient::{SpRecipientAddress, TxBuilderSpExt};
 use bwk_tx::{transaction::Amount, Recipient};
 
@@ -40,6 +42,135 @@ fn test_insufficient_funds() {
     let coins = builder.select_coins(100_000, 1000);
     assert!(coins.is_empty());
     assert!(builder.generate().is_err());
+}
+
+/// BIP32-only inputs with automatic SP change retain the change metadata until
+/// scanning records the SP coin and its spend tweak.
+#[test]
+fn test_bip32_only_sp_change_bookkeeping() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test-bip32-only-sp-change");
+    env.add_taproot_sub_account(&mut account);
+    env.add_segwit_sub_account(&mut account);
+    let coin = env.create_taproot_coin(0.1);
+    let funding_tx = bwk_utils::test::get_tx(&mut env.bitcoind.client, coin.outpoint.txid).unwrap();
+    account.sub_accounts()[0].record_unconfirmed_spend(&funding_tx);
+    let input_value = coin.txout.value;
+
+    let external_signer =
+        HotSigner::new_taproot_from_mnemonics(Network::Regtest, test_mnemonic_2()).unwrap();
+    let (external, _) = external_signer.taproot_receive_address_and_key(0);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to(external.clone(), 100_000);
+    builder.add_input(coin);
+
+    let mut psbt = builder.generate().unwrap();
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    let change: u64 = tx
+        .output
+        .iter()
+        .find(|output| output.script_pubkey != external.script_pubkey())
+        .unwrap()
+        .value
+        .to_sat();
+    let txid = account.record_unconfirmed_spend(&tx).unwrap();
+
+    let entry = account
+        .tx_history()
+        .into_iter()
+        .find(|entry| entry.txid == txid)
+        .unwrap();
+    assert_eq!(entry.change, change);
+    assert_eq!(entry.tx.unwrap(), tx);
+    assert!(!account.sub_accounts()[1]
+        .tx_history()
+        .iter()
+        .any(|entry| entry.txid() == txid));
+    assert!(account.coins().is_empty());
+    let payment = account
+        .payment_history()
+        .into_iter()
+        .find(|payment| payment.txid == txid.to_string())
+        .unwrap();
+    assert!(matches!(payment.payment_type, PaymentType::Send));
+    assert_eq!(payment.amount, input_value.to_sat() - change);
+
+    env.broadcast_and_mine(&tx);
+    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+
+    let change_coins: Vec<_> = account
+        .coins()
+        .into_iter()
+        .filter(|(outpoint, _)| outpoint.txid == txid)
+        .collect();
+    assert_eq!(change_coins.len(), 1);
+    let (_, change_coin) = &change_coins[0];
+    assert_eq!(change_coin.amount_sat(), change);
+    assert!(change_coin.label().is_some());
+    assert!(change_coin.is_spendable());
+    let payment = account
+        .payment_history()
+        .into_iter()
+        .find(|payment| payment.txid == txid.to_string())
+        .unwrap();
+    assert!(matches!(payment.payment_type, PaymentType::Send));
+    assert_eq!(payment.amount, input_value.to_sat() - change);
+
+    let mut spend_change = account.tx_builder().feerate(1000);
+    spend_change.add_output(drain_to(env.taproot_addr(2)));
+    let mut psbt = spend_change.generate().unwrap();
+    account.sign_and_finalize(&mut psbt).unwrap();
+}
+
+#[test]
+fn test_standard_output_ownership_is_counted_once() {
+    let mut env = TestEnv::new();
+    let mut account = env.sp_account("test-standard-output-ownership");
+    env.add_taproot_sub_account(&mut account);
+    env.add_segwit_sub_account(&mut account);
+    let coin = env.create_taproot_coin(0.1);
+    let funding_tx = bwk_utils::test::get_tx(&mut env.bitcoind.client, coin.outpoint.txid).unwrap();
+    account.sub_accounts()[0].record_unconfirmed_spend(&funding_tx);
+    let input_value = coin.txout.value.to_sat();
+    let standard_output = env.segwit_addr(0);
+
+    let mut builder = account.tx_builder().feerate(1000);
+    builder.send_to(standard_output.clone(), 100_000);
+    builder.add_input(coin);
+    let mut psbt = builder.generate().unwrap();
+    let tx = account.sign_and_finalize(&mut psbt).unwrap();
+    let txid = account.record_unconfirmed_spend(&tx).unwrap();
+    let output_value: u64 = tx.output.iter().map(|output| output.value.to_sat()).sum();
+    let fee = input_value - output_value;
+    let change: u64 = tx
+        .output
+        .iter()
+        .filter(|output| output.script_pubkey != standard_output.script_pubkey())
+        .map(|output| output.value.to_sat())
+        .sum();
+
+    let entry = account
+        .tx_history()
+        .into_iter()
+        .find(|entry| entry.txid == txid)
+        .unwrap();
+    assert_eq!(entry.change, change);
+    assert!(account.sub_accounts()[0]
+        .tx_history()
+        .iter()
+        .any(|entry| entry.txid() == txid));
+    assert!(account.sub_accounts()[1]
+        .tx_history()
+        .iter()
+        .any(|entry| entry.txid() == txid));
+    let payment = account
+        .payment_history()
+        .into_iter()
+        .find(|payment| payment.txid == txid.to_string())
+        .unwrap();
+    assert!(matches!(payment.payment_type, PaymentType::Send));
+    assert_eq!(payment.amount, fee);
 }
 
 /// Drain uses all UTXOs.

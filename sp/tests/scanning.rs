@@ -5,7 +5,11 @@
 
 mod common;
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use bitcoin::OutPoint;
 use blindbitd::BlindbitD;
@@ -1668,24 +1672,32 @@ fn test_unconfirmed_spend_injection() {
     // Build + sign a spend of the SP coin (change returns to our SP address).
     let dest = env.taproot_addr(0);
     let mut builder = account.tx_builder().feerate(1000);
-    builder.send_to(dest, 100_000);
+    builder.send_to(dest.clone(), 100_000);
     for coin in builder.select_coins(100_000, 1000) {
         builder.add_input(coin);
     }
-    // The builder knows the SP change; thread it so the unconfirmed send nets it.
-    let change = builder.simulate().change.map(|a| a.to_sat()).unwrap_or(0);
-    assert!(change > 0, "this spend should produce SP change");
     let tx = {
         let mut psbt = builder.generate().expect("build spend tx");
         account.sign_and_finalize(&mut psbt).expect("sign spend tx")
     };
     let spend_txid = tx.compute_txid();
+    let change = tx
+        .output
+        .iter()
+        .find(|output| output.script_pubkey != dest.script_pubkey())
+        .expect("SP change output")
+        .value
+        .to_sat();
 
     // Inject as unconfirmed (no broadcast/mine yet).
-    account
-        .record_unconfirmed_spend(&tx, change)
-        .expect("inject spend");
+    account.record_unconfirmed_spend(&tx).expect("inject spend");
     {
+        let tx_entry = account
+            .tx_history()
+            .into_iter()
+            .find(|entry| entry.txid == spend_txid)
+            .expect("outgoing SP tx entry");
+        assert_eq!(tx_entry.change, change);
         let entry = account.get_coin(&owned).expect("coin still tracked");
         assert!(!entry.is_spendable(), "spent coin must drop from spendable");
         assert_eq!(
@@ -1733,8 +1745,8 @@ fn test_unconfirmed_spend_injection() {
     }
 }
 
-/// A spend that references no SP coin must succeed yet record nothing in the SP
-/// stores (the `sp_matched == false` path of `record_unconfirmed_spend`).
+/// A spend with an input absent from every wallet coin store is refused before
+/// any state changes.
 #[test]
 fn test_unconfirmed_spend_no_sp_coin() {
     use bitcoin::hashes::Hash;
@@ -1774,9 +1786,13 @@ fn test_unconfirmed_spend_no_sp_coin() {
     };
     let txid = tx.compute_txid();
 
-    account
-        .record_unconfirmed_spend(&tx, 0)
-        .expect("record spend of foreign coin");
+    let err = account
+        .record_unconfirmed_spend(&tx)
+        .expect_err("foreign input must be refused");
+    assert!(matches!(
+        err,
+        bwk_sp::account::AccountError::MissingInputCoin(outpoint) if outpoint == foreign
+    ));
 
     // No SP record: neither an SpTxStore entry nor a payment_history row.
     assert!(
@@ -1802,7 +1818,6 @@ fn test_unconfirmed_spend_no_sp_coin() {
 /// recording anything, so a real spend of an SP coin must not be injected.
 #[test]
 fn test_broadcast_requires_electrum_endpoint() {
-    use bwk_sp::account::AccountError;
     use common::TestEnv;
 
     // Reachable blindbit (to fund/scan) but no Electrum endpoint configured.
@@ -1824,18 +1839,33 @@ fn test_broadcast_requires_electrum_endpoint() {
     for coin in builder.select_coins(100_000, 1000) {
         builder.add_input(coin);
     }
-    let change = builder.simulate().change.map(|a| a.to_sat()).unwrap_or(0);
-    assert!(change > 0, "this spend should produce SP change");
     let tx = {
         let mut psbt = builder.generate().expect("build spend tx");
         account.sign_and_finalize(&mut psbt).expect("sign spend tx")
     };
     let spend_txid = tx.compute_txid();
 
-    let err = account
-        .broadcast(&tx, change)
-        .expect_err("broadcast without an endpoint must fail");
-    assert!(matches!(err, AccountError::NoElectrumEndpoint));
+    let receiver = account.receiver().expect("notification receiver");
+    account.broadcast(tx);
+    // The scanner shares this channel, so skip its progress notifications until
+    // the broadcast outcome lands.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let message = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "no broadcast outcome in time");
+        match receiver.recv_timeout(remaining) {
+            Ok(Notification::Sp(SpNotification::FailBroadcast { message })) => break message,
+            Ok(Notification::Sp(SpNotification::Broadcasted { txid })) => {
+                panic!("broadcast without an endpoint must fail, got {txid}")
+            }
+            Ok(_) => continue,
+            Err(e) => panic!("broadcast outcome never arrived: {e}"),
+        }
+    };
+    assert!(
+        message.contains("no electrum endpoint"),
+        "unexpected failure message: {message}"
+    );
 
     // The refusal left state untouched: the spent SP coin is still spendable and
     // no SP record exists for the refused spend.

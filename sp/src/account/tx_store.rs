@@ -26,9 +26,9 @@ pub struct SpTxEntry {
     pub height: Option<u32>,
     pub timestamp: Option<u64>,
     pub label: Option<String>,
-    /// For an outgoing send we built, the SP change amount returning to us
-    /// (builder-known; 0 otherwise). Lets the history aggregator net the send
-    /// amount while unconfirmed, before the scan records the change coin.
+    /// SP-owned outputs derived when recording an outgoing send. Lets the
+    /// history aggregator net the send amount while unconfirmed, before the
+    /// block scan records the coins.
     pub change: u64,
 }
 

@@ -32,10 +32,10 @@ use {
     },
     bitcoin::{
         hashes::Hash,
-        secp256k1::{Keypair, Message, Secp256k1, SecretKey},
+        secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey},
         sighash::{Prevouts, SighashCache},
         taproot::Signature,
-        Amount, Network, OutPoint, TapSighashType, Txid,
+        Amount, Network, OutPoint, ScriptBuf, TapSighashType, TxOut, Txid,
     },
     bwk::{
         label_store::LabelStore,
@@ -43,7 +43,7 @@ use {
     },
     miniscript::psbt::PsbtExt,
     std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         str::FromStr,
         sync::{atomic::AtomicBool, mpsc, Arc, Mutex},
         thread::{self, JoinHandle},
@@ -118,6 +118,45 @@ pub enum AccountError {
     Persist(#[from] bwk::persist::PersistError),
     #[error("invalid scan runtime config: {0}")]
     ScanRuntimeConfig(#[from] ScanRuntimeConfigError),
+    #[error("input coin not found: {0}")]
+    MissingInputCoin(OutPoint),
+    #[error("BIP32 input is not owned by a sub-account: {0}")]
+    InputNotOwned(OutPoint),
+    #[error("silent payment derivation failed: {0}")]
+    SilentPayment(#[from] crate::core::error::Error),
+}
+
+#[cfg(feature = "mnemonic")]
+struct SpendAnalysis {
+    sp_inputs: Vec<OutPoint>,
+    sub_accounts: BTreeSet<usize>,
+    sp_change: u64,
+}
+
+#[cfg(feature = "mnemonic")]
+struct SubAccountSpendRecorder {
+    scripts: BTreeSet<ScriptBuf>,
+    recorder: bwk::account::SpendRecorder,
+}
+
+#[cfg(feature = "mnemonic")]
+struct BroadcastWorker<P: crate::profile::SpStorageProfile> {
+    tx: bitcoin::Transaction,
+    url: String,
+    port: u16,
+    sp_receiver: SpReceiver,
+    coin_store: Arc<Mutex<SpCoinStore<P>>>,
+    tx_store: Arc<Mutex<SpTxStore<P>>>,
+    sub_accounts: Vec<SubAccountSpendRecorder>,
+    sender: mpsc::Sender<Notification>,
+}
+
+#[cfg(feature = "mnemonic")]
+fn p2tr_output_key(script: &ScriptBuf) -> Option<XOnlyPublicKey> {
+    script
+        .is_p2tr()
+        .then(|| XOnlyPublicKey::from_slice(&script.as_bytes()[2..34]).ok())
+        .flatten()
 }
 
 // Re-use unified Notification from bwk
@@ -137,6 +176,194 @@ fn forward_header_progress(
             }
         }
     });
+}
+
+#[cfg(feature = "mnemonic")]
+impl<P: crate::profile::SpStorageProfile> BroadcastWorker<P> {
+    fn run(self) {
+        let result = self.run_inner();
+        let notification = match result {
+            Ok(txid) => SpNotification::Broadcasted { txid },
+            Err(e) => SpNotification::FailBroadcast {
+                message: e.to_string(),
+            },
+        };
+        let _ = self.sender.send(Notification::Sp(notification));
+    }
+
+    fn run_inner(&self) -> Result<Txid, AccountError> {
+        let analysis = analyze_unconfirmed_spend(
+            &self.sp_receiver,
+            &self.coin_store,
+            &self.sub_accounts,
+            &self.tx,
+        )?;
+        let mut client = bwk::bwk_electrum::client::Client::new(&self.url, self.port)?;
+        client.broadcast_tx(&self.tx)?;
+        Ok(apply_unconfirmed_spend(
+            &self.coin_store,
+            &self.tx_store,
+            &self.sub_accounts,
+            &self.sender,
+            &self.tx,
+            analysis,
+        ))
+    }
+}
+
+#[cfg(feature = "mnemonic")]
+fn analyze_unconfirmed_spend<P: crate::profile::SpStorageProfile>(
+    sp_receiver: &SpReceiver,
+    coin_store: &Arc<Mutex<SpCoinStore<P>>>,
+    sub_accounts: &[SubAccountSpendRecorder],
+    tx: &bitcoin::Transaction,
+) -> Result<SpendAnalysis, AccountError> {
+    let sp_coins = coin_store.lock().expect("poisoned");
+    let mut sp_inputs = Vec::new();
+    let mut owned_sub_accounts = BTreeSet::new();
+    let mut prevouts = Vec::with_capacity(tx.input.len());
+
+    for input in &tx.input {
+        let outpoint = input.previous_output;
+        if let Some(coin) = sp_coins.get(&outpoint) {
+            sp_inputs.push(outpoint);
+            prevouts.push(TxOut {
+                value: coin.amount(),
+                script_pubkey: coin.script().clone(),
+            });
+            continue;
+        }
+
+        let coin = sub_accounts
+            .iter()
+            .find_map(|sub| sub.recorder.get_coin(&outpoint))
+            .ok_or(AccountError::MissingInputCoin(outpoint))?;
+        let owners: Vec<_> = sub_accounts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, sub)| {
+                sub.scripts
+                    .contains(&coin.txout.script_pubkey)
+                    .then_some(index)
+            })
+            .collect();
+        if owners.is_empty() {
+            return Err(AccountError::InputNotOwned(outpoint));
+        }
+        owned_sub_accounts.extend(owners);
+        prevouts.push(coin.txout);
+    }
+    drop(sp_coins);
+
+    for output in &tx.output {
+        owned_sub_accounts.extend(sub_accounts.iter().enumerate().filter_map(|(index, sub)| {
+            sub.scripts.contains(&output.script_pubkey).then_some(index)
+        }));
+    }
+
+    let sp_change = sp_owned_output_value(sp_receiver, tx, &prevouts)?;
+    Ok(SpendAnalysis {
+        sp_inputs,
+        sub_accounts: owned_sub_accounts,
+        sp_change,
+    })
+}
+
+#[cfg(feature = "mnemonic")]
+fn sp_owned_output_value(
+    sp_receiver: &SpReceiver,
+    tx: &bitcoin::Transaction,
+    prevouts: &[TxOut],
+) -> Result<u64, AccountError> {
+    let outputs: Vec<_> = tx
+        .output
+        .iter()
+        .filter_map(|output| p2tr_output_key(&output.script_pubkey))
+        .collect();
+    if outputs.is_empty() {
+        return Ok(0);
+    }
+
+    let input_pubkeys: Vec<PublicKey> = tx
+        .input
+        .iter()
+        .zip(prevouts)
+        .map(|(input, prevout)| crate::core::receiving::eligible_input_pubkey(input, prevout))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    if input_pubkeys.is_empty() {
+        return Ok(0);
+    }
+    let outpoints: Vec<_> = tx
+        .input
+        .iter()
+        .map(|input| {
+            (
+                input.previous_output.txid.to_string(),
+                input.previous_output.vout,
+            )
+        })
+        .collect();
+    let input_refs: Vec<_> = input_pubkeys.iter().collect();
+    let tweak = crate::core::receiving::calculate_tweak_data(&input_refs, &outpoints)?;
+    let shared_secret =
+        crate::core::receiving::calculate_ecdh_shared_secret(&tweak, &sp_receiver.get_scan_key());
+    let owned = sp_receiver
+        .receiver
+        .scan_transaction(&shared_secret, outputs.clone())?;
+    let owned_keys: BTreeSet<XOnlyPublicKey> = owned
+        .values()
+        .flat_map(|outputs| outputs.keys().copied())
+        .collect();
+
+    Ok(tx
+        .output
+        .iter()
+        .filter_map(|output| {
+            p2tr_output_key(&output.script_pubkey)
+                .filter(|key| owned_keys.contains(key))
+                .map(|_| output.value.to_sat())
+        })
+        .sum())
+}
+
+#[cfg(feature = "mnemonic")]
+fn apply_unconfirmed_spend<P: crate::profile::SpStorageProfile>(
+    coin_store: &Arc<Mutex<SpCoinStore<P>>>,
+    tx_store: &Arc<Mutex<SpTxStore<P>>>,
+    sub_accounts: &[SubAccountSpendRecorder],
+    sender: &mpsc::Sender<Notification>,
+    tx: &bitcoin::Transaction,
+    analysis: SpendAnalysis,
+) -> Txid {
+    let txid = tx.compute_txid();
+    let has_sp_inputs = !analysis.sp_inputs.is_empty();
+    if !analysis.sp_inputs.is_empty() {
+        let mut coins = coin_store.lock().expect("poisoned");
+        for outpoint in analysis.sp_inputs {
+            coins.mark_spent(&outpoint, txid.to_byte_array());
+            let _ = sender.send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
+        }
+        coins.persist();
+    }
+    if has_sp_inputs || analysis.sp_change > 0 {
+        let mut txs = tx_store.lock().expect("poisoned");
+        let mut entry = txs
+            .get(&txid)
+            .unwrap_or_else(|| SpTxEntry::with_tx(txid, tx.clone()));
+        if entry.tx.is_none() {
+            entry.tx = Some(tx.clone());
+        }
+        entry.change = analysis.sp_change;
+        txs.insert(entry);
+        txs.persist();
+    }
+    for index in analysis.sub_accounts {
+        sub_accounts[index].recorder.record_unconfirmed_spend(tx);
+    }
+    txid
 }
 
 // ScanMode
@@ -187,6 +414,7 @@ pub struct Account<
     pub(crate) sender: mpsc::Sender<Notification>,
     receiver: Option<mpsc::Receiver<Notification>>,
     pub(crate) scanner_handle: Option<JoinHandle<()>>,
+    pub(crate) broadcast_handle: Option<JoinHandle<()>>,
     pub(crate) scanner_stop: Arc<AtomicBool>,
     // Sub-accounts use the default bwk RAM profile — independent of sp's P.
     sub_accounts: Vec<bwk::Account>,
@@ -359,6 +587,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
             sender,
             receiver: Some(receiver),
             scanner_handle: None,
+            broadcast_handle: None,
             scanner_stop: Arc::new(AtomicBool::new(false)),
             sub_accounts,
             header_store,
@@ -1057,71 +1286,76 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
         Self::finalize(psbt)
     }
 
-    /// Broadcast a signed spend via Electrum and, on success, inject it into
-    /// local state as unconfirmed (see [`Account::record_unconfirmed_spend`]).
-    ///
-    /// Returns `AccountError::NoElectrumEndpoint` if no Electrum endpoint is
-    /// configured, or `AccountError::Broadcast` if the send fails; nothing is
-    /// injected unless the broadcast succeeds.
-    pub fn broadcast(&self, tx: &bitcoin::Transaction, change: u64) -> Result<Txid, AccountError> {
-        let (url, port) = self
-            .config
-            .electrum_endpoint()
-            .ok_or(AccountError::NoElectrumEndpoint)?;
-        let mut client = bwk::bwk_electrum::client::Client::new(url, port)?;
-        client.broadcast_tx(tx)?;
-        // Reflect the spend in every store that owns part of it: SP inputs/change
-        // here, and each sub-account's own inputs/change. The aggregator then
-        // sums their contributions into one payment.
-        let txid = self.record_unconfirmed_spend(tx, change)?;
-        for sub in &self.sub_accounts {
-            sub.record_unconfirmed_spend(tx);
+    /// Broadcast a signed spend in the background. Completion is reported via
+    /// `SpNotification::Broadcasted` or `SpNotification::FailBroadcast`.
+    pub fn broadcast(&mut self, tx: bitcoin::Transaction) {
+        if let Some(handle) = self.broadcast_handle.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                self.broadcast_handle = Some(handle);
+                let _ = self
+                    .sender
+                    .send(Notification::Sp(SpNotification::FailBroadcast {
+                        message: "broadcast already running".to_string(),
+                    }));
+                return;
+            }
         }
-        Ok(txid)
+        let Some((url, port)) = self.config.electrum_endpoint() else {
+            let _ = self
+                .sender
+                .send(Notification::Sp(SpNotification::FailBroadcast {
+                    message: AccountError::NoElectrumEndpoint.to_string(),
+                }));
+            return;
+        };
+
+        let worker = BroadcastWorker {
+            tx,
+            url: url.to_string(),
+            port,
+            sp_receiver: self.sp_receiver.clone(),
+            coin_store: self.coin_store.clone(),
+            tx_store: self.tx_store.clone(),
+            sub_accounts: self.sub_account_spend_recorders(),
+            sender: self.sender.clone(),
+        };
+        self.broadcast_handle = Some(thread::spawn(move || worker.run()));
     }
 
     /// Inject a just-broadcast spend into local state as unconfirmed.
     ///
-    /// Marks each spent SP input `Spent(txid)` (dropping it from spendable) and
-    /// inserts the outgoing transaction with no height. A later scan confirms the
-    /// inputs and sets the transaction height. Only SP coins are touched;
-    /// sub-account inputs are left to their own listeners. The send amount is
-    /// derived by the history aggregator from coin ownership; `change` (the
-    /// builder-known SP change, 0 if none) nets the amount while unconfirmed,
-    /// before the scan records the change coin.
+    /// Resolves every input from wallet stores, derives owned SP outputs, and
+    /// then records the transaction in each relevant store.
     pub fn record_unconfirmed_spend(
         &self,
         tx: &bitcoin::Transaction,
-        change: u64,
     ) -> Result<Txid, AccountError> {
-        let txid = tx.compute_txid();
-        let mut sp_matched = false;
-        {
-            let mut coin_store = self.coin_store.lock().expect("poisoned");
-            for input in &tx.input {
-                let outpoint = input.previous_output;
-                if coin_store.get(&outpoint).is_some() {
-                    sp_matched = true;
-                    coin_store.mark_spent(&outpoint, txid.to_byte_array());
-                    let _ = self
-                        .sender
-                        .send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
+        let sub_accounts = self.sub_account_spend_recorders();
+        let analysis =
+            analyze_unconfirmed_spend(&self.sp_receiver, &self.coin_store, &sub_accounts, tx)?;
+        Ok(apply_unconfirmed_spend(
+            &self.coin_store,
+            &self.tx_store,
+            &sub_accounts,
+            &self.sender,
+            tx,
+            analysis,
+        ))
+    }
+
+    fn sub_account_spend_recorders(&self) -> Vec<SubAccountSpendRecorder> {
+        self.sub_accounts
+            .iter()
+            .map(|account| {
+                let recorder = account.spend_recorder();
+                SubAccountSpendRecorder {
+                    scripts: recorder.address_scripts(),
+                    recorder,
                 }
-            }
-            coin_store.persist();
-        }
-        // Only carry the tx in the SP store when an SP coin was actually spent;
-        // a tx spending no SP coin must not create an SP record (its history
-        // comes from the sub-account that owns the inputs). Direction and amount
-        // are derived later by the history aggregator from coin ownership.
-        if sp_matched {
-            let mut entry = SpTxEntry::with_tx(txid, tx.clone());
-            entry.change = change;
-            let mut tx_store = self.tx_store.lock().expect("poisoned");
-            tx_store.insert(entry);
-            tx_store.persist();
-        }
-        Ok(txid)
+            })
+            .collect()
     }
 
     /// Finalize a signed PSBT into a broadcast-ready transaction.
@@ -1328,6 +1562,9 @@ pub struct OwnedAddress {
 impl<P: crate::profile::SpStorageProfile> Drop for Account<P> {
     fn drop(&mut self) {
         self.stop_scan();
+        if let Some(handle) = self.broadcast_handle.take() {
+            let _ = handle.join();
+        }
         self.persist();
     }
 }
@@ -1399,7 +1636,7 @@ pub fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx:
 mod tests {
     use super::*;
     use crate::receiver::OwnedOutput;
-    use bitcoin::absolute::Height;
+    use bitcoin::{absolute::Height, hashes::hash160, secp256k1::Parity};
     use std::path::PathBuf;
 
     fn test_config() -> Config {
@@ -1428,6 +1665,151 @@ mod tests {
 
         let err = AccountError::ScannerAlreadyRunning;
         assert!(err.to_string().contains("already running"));
+    }
+
+    #[test]
+    fn rerecord_unconfirmed_spend_preserves_tx_metadata() {
+        let account = Account::new(test_config()).unwrap();
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let previous_body = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::ONE,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let txid = tx.compute_txid();
+        let mut entry = SpTxEntry::with_tx(txid, previous_body.clone());
+        entry.fee = Some(2);
+        entry.height = Some(3);
+        entry.timestamp = Some(4);
+        entry.label = Some("label".to_string());
+        account.tx_store.lock().expect("poisoned").insert(entry);
+
+        apply_unconfirmed_spend(
+            &account.coin_store,
+            &account.tx_store,
+            &[],
+            &account.sender,
+            &tx,
+            SpendAnalysis {
+                sp_inputs: Vec::new(),
+                sub_accounts: BTreeSet::new(),
+                sp_change: 5,
+            },
+        );
+
+        let entry = account
+            .tx_store
+            .lock()
+            .expect("poisoned")
+            .get(&txid)
+            .unwrap();
+        assert_eq!(entry.tx, Some(previous_body));
+        assert_eq!(entry.fee, Some(2));
+        assert_eq!(entry.height, Some(3));
+        assert_eq!(entry.timestamp, Some(4));
+        assert_eq!(entry.label.as_deref(), Some("label"));
+        assert_eq!(entry.change, 5);
+    }
+
+    #[test]
+    fn extracts_bip352_eligible_input_pubkeys() {
+        let secp = Secp256k1::new();
+        let secret = SecretKey::from_slice(&[1; 32]).unwrap();
+        let pubkey = secret.public_key(&secp);
+        let pubkey_bytes = pubkey.serialize();
+        let pubkey_hash = hash160::Hash::hash(&pubkey_bytes);
+        let txout = |script_pubkey| TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey,
+        };
+        let txin = |script_sig, witness| bitcoin::TxIn {
+            previous_output: OutPoint::null(),
+            script_sig,
+            sequence: bitcoin::Sequence::ZERO,
+            witness,
+        };
+
+        let mut p2pkh = vec![0x76, 0xa9, 0x14];
+        p2pkh.extend(pubkey_hash.as_byte_array());
+        p2pkh.extend([0x88, 0xac]);
+        let mut script_sig = vec![1, 0];
+        script_sig.extend(pubkey_bytes);
+        let input = txin(ScriptBuf::from_bytes(script_sig), bitcoin::Witness::new());
+        assert_eq!(
+            crate::core::receiving::eligible_input_pubkey(
+                &input,
+                &txout(ScriptBuf::from_bytes(p2pkh)),
+            )
+            .unwrap(),
+            Some(pubkey)
+        );
+
+        let mut p2wpkh = vec![0, 0x14];
+        p2wpkh.extend(pubkey_hash.as_byte_array());
+        let witness = bitcoin::Witness::from_slice(&[vec![0; 64], pubkey_bytes.to_vec()]);
+        let input = txin(ScriptBuf::new(), witness.clone());
+        assert_eq!(
+            crate::core::receiving::eligible_input_pubkey(
+                &input,
+                &txout(ScriptBuf::from_bytes(p2wpkh.clone())),
+            )
+            .unwrap(),
+            Some(pubkey)
+        );
+
+        let redeem_hash = hash160::Hash::hash(&p2wpkh);
+        let mut p2sh = vec![0xa9, 0x14];
+        p2sh.extend(redeem_hash.as_byte_array());
+        p2sh.push(0x87);
+        let mut script_sig = vec![22];
+        script_sig.extend(p2wpkh);
+        let input = txin(ScriptBuf::from_bytes(script_sig), witness);
+        assert_eq!(
+            crate::core::receiving::eligible_input_pubkey(
+                &input,
+                &txout(ScriptBuf::from_bytes(p2sh)),
+            )
+            .unwrap(),
+            Some(pubkey)
+        );
+
+        let (xonly, _) = pubkey.x_only_public_key();
+        let mut p2tr = vec![0x51, 0x20];
+        p2tr.extend(xonly.serialize());
+        let input = txin(
+            ScriptBuf::new(),
+            bitcoin::Witness::from_slice(&[vec![0; 64]]),
+        );
+        assert_eq!(
+            crate::core::receiving::eligible_input_pubkey(
+                &input,
+                &txout(ScriptBuf::from_bytes(p2tr.clone())),
+            )
+            .unwrap(),
+            Some(PublicKey::from_x_only_public_key(xonly, Parity::Even))
+        );
+
+        let script_path = txin(
+            ScriptBuf::new(),
+            bitcoin::Witness::from_slice(&[vec![0; 64], vec![0x51], vec![0; 33]]),
+        );
+        assert_eq!(
+            crate::core::receiving::eligible_input_pubkey(
+                &script_path,
+                &txout(ScriptBuf::from_bytes(p2tr)),
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

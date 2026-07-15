@@ -643,6 +643,19 @@ impl<P: StorageProfile> CoinStore<P> {
     /// `Unconfirmed` coin. A later listener/scan confirmation upgrades it. No-op
     /// on the tx body if it is already known (do not clobber a confirmed entry).
     pub fn record_unconfirmed_tx(&mut self, tx: bitcoin::Transaction) {
+        let owns_input = tx
+            .input
+            .iter()
+            .any(|input| self.store.contains_key(&input.previous_output));
+        let owns_output = tx.output.iter().any(|output| {
+            self.address_store
+                .lock()
+                .expect("poisoned")
+                .contains_spk(&output.script_pubkey)
+        });
+        if !owns_input && !owns_output {
+            return;
+        }
         let txid = tx.compute_txid();
         if self.tx_store.get(&txid).is_none() {
             self.tx_store.update(TxEntry::unconfirmed(tx));

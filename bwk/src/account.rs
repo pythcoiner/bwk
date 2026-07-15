@@ -79,10 +79,56 @@ pub enum SpNotification {
     NewOutput(OutPoint),
     /// An output was spent
     OutputSpent(OutPoint),
+    /// Broadcast completed and local state was updated
+    Broadcasted { txid: Txid },
+    /// Broadcast failed before local state was updated
+    FailBroadcast { message: String },
     /// Continuous mode: at chain tip, waiting for new blocks
     WaitingForBlocks { tip_height: u32 },
     /// Continuous mode: new block(s) detected
     NewBlocksDetected { from_height: u32, to_height: u32 },
+}
+
+pub struct SpendRecorder<P: StorageProfile = RamProfile<DefaultBackend>> {
+    coin_store: Arc<Mutex<CoinStore<P>>>,
+}
+
+impl<P: StorageProfile> Clone for SpendRecorder<P> {
+    fn clone(&self) -> Self {
+        Self {
+            coin_store: self.coin_store.clone(),
+        }
+    }
+}
+
+impl<P: StorageProfile> SpendRecorder<P> {
+    pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .get(outpoint)
+            .map(|e| e.coin)
+    }
+
+    pub fn address_scripts(&self) -> BTreeSet<ScriptBuf> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .address_store()
+            .lock()
+            .expect("poisoned")
+            .entries()
+            .into_iter()
+            .map(|entry| entry.script())
+            .collect()
+    }
+
+    pub fn record_unconfirmed_spend(&self, tx: &bitcoin::Transaction) {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .record_unconfirmed_tx(tx.clone());
+    }
 }
 
 /// Notifications sent by an Account to signal events.
@@ -737,6 +783,12 @@ impl<P: StorageProfile> Account<P> {
             .lock()
             .expect("poisoned")
             .record_unconfirmed_tx(tx.clone());
+    }
+
+    pub fn spend_recorder(&self) -> SpendRecorder<P> {
+        SpendRecorder {
+            coin_store: self.coin_store.clone(),
+        }
     }
 
     /// Updates the label of a coin identified by the given outpoint.
