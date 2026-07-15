@@ -981,7 +981,8 @@ impl<P: StorageProfile> CoinStore<P> {
     }
 
     /// Queue server-reported heights without promoting against the header store.
-    pub fn queue_reported_heights(&mut self, reported: &[ClaimAt]) {
+    pub fn queue_reported_heights(&mut self, reported: &[ClaimAt]) -> bool {
+        let before = self.pending_claims.clone();
         for &claim in reported {
             self.prune_pending_claim(claim);
             match self
@@ -993,6 +994,7 @@ impl<P: StorageProfile> CoinStore<P> {
                 Some(_) => {}
             }
         }
+        before != self.pending_claims
     }
 
     /// Drops `keep.txid` from every pending-claim height set other than
@@ -1020,6 +1022,12 @@ impl<P: StorageProfile> CoinStore<P> {
     /// Snapshot of the pending-claims queue.
     pub(crate) fn pending_claims_snapshot(&self) -> BTreeMap<u32, BTreeSet<Txid>> {
         self.pending_claims.clone()
+    }
+
+    pub fn pending_claim_height(&self, txid: &Txid) -> Option<u32> {
+        self.pending_claims
+            .iter()
+            .find_map(|(height, txids)| txids.contains(txid).then_some(*height))
     }
 
     /// Clear `claim` from the in-flight merkle-fetch set. Called when a

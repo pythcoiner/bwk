@@ -91,6 +91,7 @@ pub enum Notification {
     Electrum(TxListenerNotif),
     AddressTipChanged,
     CoinUpdate,
+    PaymentHistoryUpdated,
     InvalidElectrumConfig,
     InvalidLookAhead,
     Stopped,
@@ -799,9 +800,19 @@ impl<P: StorageProfile> AccountHistory for Account<P> {
         // lock. On the listener thread CoinStore::generate holds coin_store and
         // then locks label_store; taking the two in the opposite order here
         // would deadlock the two threads.
-        let history = self.tx_history();
+        let history = {
+            let store = self.coin_store().lock().expect("poisoned");
+            store
+                .tx_history()
+                .into_iter()
+                .map(|entry| {
+                    let pending_height = store.pending_claim_height(&entry.txid());
+                    (entry, pending_height)
+                })
+                .collect::<Vec<_>>()
+        };
         let labels = self.label_store().lock().expect("poisoned");
-        for entry in history {
+        for (entry, pending_height) in history {
             let txid = entry.txid();
             let owned_in = entry
                 .inputs
@@ -832,14 +843,20 @@ impl<P: StorageProfile> AccountHistory for Account<P> {
                     .iter()
                     .find_map(|vout| labels.outpoint(OutPoint::new(txid, *vout)))
             });
+            let projected_height = pending_height
+                .map(|height| height as u64)
+                .or(entry.height());
+            let projected_status = pending_height
+                .map(|_| PaymentStatus::ConfirmedUnverified)
+                .unwrap_or_else(|| PaymentStatus::from(entry.inclusion()));
             map.insert(
                 txid,
                 TxContribution {
                     owned_in,
                     owned_out,
                     owned_vouts,
-                    height: entry.height(),
-                    status: PaymentStatus::from(entry.inclusion()),
+                    height: projected_height,
+                    status: projected_status,
                     timestamp: entry.timestamp(),
                     label,
                     tx: Some(entry.tx().clone()),
@@ -1660,10 +1677,14 @@ fn handle_history_response_msg<P: StorageProfile>(
     // heights against an unvalidated header is not. When the store is not
     // validated, persist any folded height changes but skip promotion.
     if !header_store_ready::<P>(header_store, notification) {
-        store.queue_reported_heights(&outcome.reported);
+        let pending_changed = store.queue_reported_heights(&outcome.reported);
         if outcome.height_updated {
             store.tx_store_mut().persist();
             store.generate();
+        }
+        drop(store);
+        if pending_changed || outcome.height_updated {
+            let _ = notification.send(Notification::PaymentHistoryUpdated);
         }
         return ControlFlow::Continue(());
     }
@@ -3057,6 +3078,54 @@ mod tests {
         assert_eq!(coin.height(), None);
         assert_eq!(coin.status(), CoinStatus::Unconfirmed);
         (tx_0, mock)
+    }
+
+    #[test]
+    fn payment_history_projects_pending_claim_as_confirmed_unverified() {
+        let mnemo = Mnemonic::generate(12).unwrap();
+        let config = Config::new(
+            Some(mnemo.to_string()),
+            "dummy".into(),
+            Network::Regtest,
+            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
+            PathBuf::default(),
+            String::new(),
+            false,
+        )
+        .unwrap();
+        let header_store = HeaderStore::new_in_memory(Network::Regtest);
+        let (sender, _receiver) = mpsc::channel();
+        let stores =
+            profile::open_ram_stores(Arc::new(NoopBackend) as DefaultBackend).expect("open stores");
+        let account = Account::from_ram_stores(config, header_store, sender, stores);
+        let spk = account.derivator().receive_spk_at(0);
+        let tx = funding_tx(spk.clone(), 0.1);
+        let txid = tx.compute_txid();
+
+        {
+            let mut store = account.coin_store.lock().expect("poisoned");
+            let mut history = BTreeMap::new();
+            history.insert(spk, vec![(txid, None)]);
+            let _ = store.handle_history_response(history);
+            store.handle_txs_response(vec![tx]);
+            assert!(store.queue_reported_heights(&[ClaimAt { txid, height: 1 }]));
+            store.generate();
+        }
+
+        let tx_entry = account
+            .tx_history()
+            .into_iter()
+            .find(|entry| entry.txid() == txid)
+            .expect("tx entry");
+        assert!(matches!(tx_entry.inclusion(), Inclusion::Unconfirmed));
+
+        let payment = account
+            .payment_history()
+            .into_iter()
+            .find(|payment| payment.txid == txid.to_string())
+            .expect("payment");
+        assert_eq!(payment.status, PaymentStatus::ConfirmedUnverified);
+        assert_eq!(payment.height, Some(1));
     }
 
     #[test]
