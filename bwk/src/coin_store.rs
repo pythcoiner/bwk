@@ -940,6 +940,21 @@ impl<P: StorageProfile> CoinStore<P> {
             .insert(claim.txid);
     }
 
+    /// Queue server-reported heights without promoting against the header store.
+    pub fn queue_reported_heights(&mut self, reported: &[ClaimAt]) {
+        for &claim in reported {
+            self.prune_pending_claim(claim);
+            match self
+                .tx_store
+                .get(&claim.txid)
+                .map(|e| e.inclusion().clone())
+            {
+                Some(Inclusion::Unconfirmed) | None => self.insert_pending_claim(claim),
+                Some(_) => {}
+            }
+        }
+    }
+
     /// Drops `keep.txid` from every pending-claim height set other than
     /// `keep.height`. A reorg can re-report the same tx at a new height;
     /// this keeps at most one pending claim per txid so a later CTA never

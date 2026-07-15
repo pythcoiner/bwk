@@ -1603,6 +1603,7 @@ fn handle_history_response_msg<P: StorageProfile>(
     // heights against an unvalidated header is not. When the store is not
     // validated, persist any folded height changes but skip promotion.
     if !header_store_ready::<P>(header_store, notification) {
+        store.queue_reported_heights(&outcome.reported);
         if outcome.height_updated {
             store.tx_store_mut().persist();
             store.generate();
@@ -2438,12 +2439,12 @@ mod tests {
     }
 
     #[test]
-    fn chain_update_waits_for_header_validation_then_retries_pending_claim() {
+    fn history_waits_for_header_validation_then_promotes_reported_claim() {
         use crate::header_store::{HeaderStore, HeaderValidationState};
-        use crate::tx_store::TxEntry;
 
-        let (coin_store, _derivator) = bare_coin_store();
-        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let (coin_store, derivator) = bare_coin_store();
+        let spk = derivator.receive_spk_at(0);
+        let tx = funding_tx(spk.clone(), 0.1);
         let txid = tx.compute_txid();
         let h: u32 = 4;
 
@@ -2453,31 +2454,45 @@ mod tests {
 
         {
             let mut store = coin_store.lock().unwrap();
-            let tx_store = store.tx_store_mut();
-            tx_store.update(TxEntry::for_test(tx.clone()));
-            tx_store.update_inclusion(&txid, Inclusion::Unconfirmed);
+            store.insert_pending_claim(ClaimAt {
+                txid,
+                height: h - 1,
+            });
         }
-        coin_store
-            .lock()
-            .unwrap()
-            .insert_pending_claim(ClaimAt { txid, height: h });
 
         let (req_tx, req_rx) = mpsc::channel();
         let (notif_tx, _notif_rx) = mpsc::channel();
 
-        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
-        assert!(
-            req_rx.try_recv().is_err(),
-            "validation-gated update queued merkle proof too early"
+        handle_history_response_msg(
+            BTreeMap::from([(spk, vec![(txid, Some(h as u64))])]),
+            &coin_store,
+            &header_store,
+            &req_tx,
+            &notif_tx,
         );
+        assert!(matches!(
+            req_rx.try_recv(),
+            Ok(CoinRequest::Txs(txids)) if txids == vec![txid]
+        ));
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
         {
             let mut store = coin_store.lock().unwrap();
-            let entry = store.tx_store_mut().get(&txid).expect("tx present");
-            assert!(matches!(entry.inclusion(), Inclusion::Unconfirmed));
+            assert!(store.tx_store_mut().get(&txid).is_none());
+            assert_eq!(
+                store.pending_claims_snapshot(),
+                BTreeMap::from([(h, BTreeSet::from([txid]))])
+            );
         }
 
         header_store.set_validation_state_for_test(HeaderValidationState::Valid);
         on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(
+            coin_store.lock().unwrap().pending_claims_snapshot(),
+            BTreeMap::from([(h, BTreeSet::from([txid]))])
+        );
+
+        handle_txs_response_msg(vec![tx], &coin_store, &header_store, &req_tx, &notif_tx);
 
         let req = req_rx
             .recv_timeout(Duration::from_secs(1))
