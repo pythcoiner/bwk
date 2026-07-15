@@ -51,11 +51,7 @@ impl<P: StorageProfile> ChangeTipUpdater<P> {
 
 impl<P: StorageProfile> ChangeTip for ChangeTipUpdater<P> {
     fn next_index(&mut self) -> u32 {
-        let mut store = self.0.lock().expect("poisoned");
-        store.change_generated_tip += 1;
-        let tip = store.change_generated_tip;
-        store.update_change(tip);
-        tip
+        self.0.lock().expect("poisoned").next_change_index()
     }
 }
 
@@ -322,9 +318,15 @@ impl<P: StorageProfile> AddressStore<P> {
     /// # Returns
     /// The newly generated change address.
     pub fn new_change_addr(&mut self) -> bitcoin::Address {
+        let index = self.next_change_index();
+        self.derivator.change_at(index)
+    }
+
+    pub fn next_change_index(&mut self) -> u32 {
         self.change_generated_tip += 1;
-        self.update_change(self.change_generated_tip);
-        self.derivator.change_at(self.change_generated_tip)
+        let index = self.change_generated_tip;
+        self.update_change(index);
+        index
     }
 
     /// Returns the current change watch tip index.

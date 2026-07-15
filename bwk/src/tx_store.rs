@@ -260,13 +260,13 @@ impl<P: StorageProfile> TxStore<P> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputMetadata {
     pub value: Option<u64>,
     pub owned: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputMetadata {
     pub owned: bool,
 }

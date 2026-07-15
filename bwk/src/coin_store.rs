@@ -2,7 +2,7 @@ use bwk_descriptor::derivator::SpkDerivator;
 use bwk_tx::{
     coin::{self, KeyChain},
     transaction::max_input_satisfaction_size,
-    tx_builder::CoinSource,
+    tx_builder::{ChangeTip, CoinSource},
     Coin, CoinStatus,
 };
 use miniscript::{
@@ -62,6 +62,35 @@ pub struct CoinStoreSource<P: StorageProfile = RamProfile<DefaultBackend>>(
 impl<P: StorageProfile> CoinStoreSource<P> {
     pub fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
         Self(store)
+    }
+}
+
+pub struct ChangeTipUpdater<P: StorageProfile = RamProfile<DefaultBackend>>(
+    Arc<Mutex<CoinStore<P>>>,
+);
+
+impl<P: StorageProfile> Clone for ChangeTipUpdater<P> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<P: StorageProfile> ChangeTipUpdater<P> {
+    pub(crate) fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
+        Self(store)
+    }
+}
+
+impl<P: StorageProfile> ChangeTip for ChangeTipUpdater<P> {
+    fn next_index(&mut self) -> u32 {
+        let mut store = self.0.lock().expect("poisoned");
+        let index = store
+            .address_store
+            .lock()
+            .expect("poisoned")
+            .next_change_index();
+        store.generate();
+        index
     }
 }
 
@@ -325,7 +354,9 @@ impl<P: StorageProfile> CoinStore<P> {
     /// # Returns
     /// A new `bitcoin::Address` for receiving funds.
     pub fn new_recv_addr(&mut self) -> bitcoin::Address {
-        self.address_store.lock().expect("poisoned").new_recv_addr()
+        let address = self.address_store.lock().expect("poisoned").new_recv_addr();
+        self.generate();
+        address
     }
 
     /// Returns the current receiving address tip index.
@@ -341,10 +372,13 @@ impl<P: StorageProfile> CoinStore<P> {
     /// # Returns
     /// A new `bitcoin::Address` for change outputs.
     pub fn new_change_addr(&mut self) -> bitcoin::Address {
-        self.address_store
+        let address = self
+            .address_store
             .lock()
             .expect("poisoned")
-            .new_change_addr()
+            .new_change_addr();
+        self.generate();
+        address
     }
 
     /// Retrieves information about an address associated with the given script public key (SPK).
@@ -364,7 +398,7 @@ impl<P: StorageProfile> CoinStore<P> {
     ///
     /// # Parameters
     /// - `spk`: The script public key of the received coin.
-    pub fn recv_coin_at(&mut self, spk: &ScriptBuf) {
+    fn recv_coin_at(&mut self, spk: &ScriptBuf) {
         self.address_store
             .lock()
             .expect("poisoned")
@@ -386,6 +420,7 @@ impl<P: StorageProfile> CoinStore<P> {
         &mut self,
         hist: BTreeMap<ScriptBuf, Vec<(bitcoin::Txid, Option<u64>)>>,
     ) -> HistoryOutcome {
+        let watch_tips = (self.recv_watch_tip(), self.change_watch_tip());
         let mut updates = vec![];
         let mut height_updated = false;
 
@@ -453,6 +488,9 @@ impl<P: StorageProfile> CoinStore<P> {
         } // <- release &mut tx_store
 
         self.updates.append(&mut updates);
+        if (self.recv_watch_tip(), self.change_watch_tip()) != watch_tips {
+            self.generate();
+        }
         HistoryOutcome {
             height_updated,
             missing_txs: txids,
@@ -709,74 +747,64 @@ impl<P: StorageProfile> CoinStore<P> {
     }
 
     pub fn populate_tx_metadata(&mut self) {
-        let unpopulated: Vec<_> = self
-            .tx_store
-            .transactions()
-            .into_iter()
-            .filter_map(|tx| (!tx.is_complete()).then_some(tx.txid()))
-            .collect();
-
-        if unpopulated.is_empty() {
-            return;
-        }
-
-        // We get all outpoints info first
-        let mut outpoints = BTreeSet::new();
-        for txid in &unpopulated {
-            if let Some(tx) = self.tx_store.get(txid) {
-                for inp in &tx.tx().input {
-                    outpoints.insert(inp.previous_output);
-                }
-            }
-        }
+        let transactions = self.tx_store.transactions();
         let mut txouts = BTreeMap::new();
-        for op in outpoints {
-            if let Some(tx) = self.tx_store.get(&op.txid) {
-                let index = op.vout as usize;
-                txouts.insert(op, tx.tx().output[index].clone());
+        for tx in &transactions {
+            let txid = tx.txid();
+            for (vout, txout) in tx.tx().output.iter().enumerate() {
+                txouts.insert(
+                    OutPoint {
+                        txid,
+                        vout: vout as u32,
+                    },
+                    txout.clone(),
+                );
             }
         }
 
-        // Populate all transactions metadata
-        for txid in unpopulated {
-            let mut tx = self.tx_store.get(&txid).expect("present").clone();
-            if tx.is_complete() {
-                continue;
+        let address_store = self.address_store.lock().expect("poisoned");
+        for mut tx in transactions {
+            let outputs = tx
+                .tx()
+                .output
+                .iter()
+                .enumerate()
+                .map(|(i, txout)| {
+                    (
+                        i,
+                        OutputMetadata {
+                            owned: address_store.contains_spk(&txout.script_pubkey),
+                        },
+                    )
+                })
+                .collect();
+            let inputs = tx
+                .tx()
+                .input
+                .iter()
+                .enumerate()
+                .map(|(i, txin)| {
+                    let input = if let Some(txout) = txouts.get(&txin.previous_output) {
+                        let owned = address_store.contains_spk(&txout.script_pubkey);
+                        InputMetadata {
+                            value: owned.then_some(txout.value.to_sat()),
+                            owned,
+                        }
+                    } else {
+                        InputMetadata {
+                            value: None,
+                            owned: false,
+                        }
+                    };
+                    (i, input)
+                })
+                .collect();
+
+            if tx.outputs != outputs || tx.inputs != inputs {
+                tx.outputs = outputs;
+                tx.inputs = inputs;
+                self.tx_store.update(tx);
             }
-            // Populate all outputs (looking for received coins)
-            for (i, txout) in tx.tx().output.clone().iter().enumerate() {
-                let spk = txout.script_pubkey.clone();
-                let owned = self
-                    .address_store
-                    .lock()
-                    .expect("poisoned")
-                    .contains_spk(&spk);
-                let output = OutputMetadata { owned };
-                tx.outputs.insert(i, output);
-            }
-            // Populate all inputs
-            for (i, txin) in tx.tx().input.clone().iter().enumerate() {
-                let input = if let Some(txout) = txouts.get(&txin.previous_output) {
-                    let spk = txout.script_pubkey.clone();
-                    let owned = self
-                        .address_store
-                        .lock()
-                        .expect("poisoned")
-                        .contains_spk(&spk);
-                    InputMetadata {
-                        value: owned.then_some(txout.value.to_sat()),
-                        owned,
-                    }
-                } else {
-                    InputMetadata {
-                        value: None,
-                        owned: false,
-                    }
-                };
-                tx.inputs.insert(i, input);
-            }
-            // Update the store (replace the entry entirely)
-            self.tx_store.update(tx);
         }
     }
 
@@ -1544,6 +1572,134 @@ mod tests {
         assert_eq!(entry.funding_txids().len(), 2);
         assert!(entry.funding_txids().contains(&txid_a));
         assert!(entry.funding_txids().contains(&txid_b));
+    }
+
+    #[test]
+    fn complete_output_reclassified_after_address_expansion() {
+        let (mut cs, deriv) = build_coin_store();
+        let index = cs.change_watch_tip() + 1;
+        let spk = deriv.change_spk_at(index);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        let vout = tx.output.len() - 1;
+        let outpoint = OutPoint {
+            txid,
+            vout: vout as u32,
+        };
+        cs.tx_store.update(TxEntry::for_test(tx));
+
+        cs.generate();
+        let entry = cs.tx_store.get(&txid).unwrap();
+        assert!(entry.is_complete());
+        assert!(!entry.outputs.get(&vout).unwrap().owned);
+        assert!(!cs.coins().contains_key(&outpoint));
+
+        cs.new_change_addr();
+
+        assert!(
+            cs.tx_store
+                .get(&txid)
+                .unwrap()
+                .outputs
+                .get(&vout)
+                .unwrap()
+                .owned
+        );
+        assert!(cs.coins().contains_key(&outpoint));
+    }
+
+    #[test]
+    fn change_tip_updater_repairs_metadata_and_coin_view() {
+        let (mut cs, deriv) = build_coin_store();
+        let index = cs.change_watch_tip() + 1;
+        let tx = funding_tx(deriv.change_spk_at(index), 0.5);
+        let txid = tx.compute_txid();
+        let vout = tx.output.len() - 1;
+        let outpoint = OutPoint::new(txid, vout as u32);
+        cs.tx_store.update(TxEntry::for_test(tx));
+        cs.generate();
+        assert!(!cs.tx_store.get(&txid).unwrap().outputs[&vout].owned);
+
+        let cs = Arc::new(Mutex::new(cs));
+        assert_eq!(ChangeTipUpdater::new(cs.clone()).next_index(), 1);
+
+        let cs = cs.lock().unwrap();
+        assert!(cs.tx_store.get(&txid).unwrap().outputs[&vout].owned);
+        assert!(cs.coins().contains_key(&outpoint));
+    }
+
+    #[test]
+    fn complete_input_refreshed_when_parent_arrives() {
+        let (mut cs, deriv) = build_coin_store();
+        let parent = funding_tx(deriv.receive_spk_at(2), 0.5);
+        let parent_txid = parent.compute_txid();
+        let outpoint = OutPoint {
+            txid: parent_txid,
+            vout: (parent.output.len() - 1) as u32,
+        };
+        let child = spending_tx(outpoint);
+        let child_txid = child.compute_txid();
+        cs.tx_store.update(TxEntry::for_test(child));
+
+        cs.generate();
+        let entry = cs.tx_store.get(&child_txid).unwrap();
+        assert!(entry.is_complete());
+        assert_eq!(entry.inputs.get(&0).unwrap().value, None);
+        assert!(!entry.inputs.get(&0).unwrap().owned);
+
+        cs.tx_store.update(TxEntry::for_test(parent));
+        cs.generate();
+
+        let input = cs
+            .tx_store
+            .get(&child_txid)
+            .unwrap()
+            .inputs
+            .get(&0)
+            .unwrap()
+            .clone();
+        assert_eq!(input.value, Some(50_000_000));
+        assert!(input.owned);
+    }
+
+    #[test]
+    fn known_tx_history_extension_repairs_metadata_and_coin_view() {
+        let (mut cs, deriv) = build_coin_store();
+        let index = cs.change_watch_tip() + 2;
+        let spk = deriv.change_spk_at(index);
+        let tx = funding_tx(spk.clone(), 0.5);
+        let txid = tx.compute_txid();
+        let vout = tx.output.len() - 1;
+        let outpoint = OutPoint {
+            txid,
+            vout: vout as u32,
+        };
+        cs.tx_store.update(TxEntry::for_test(tx));
+        cs.generate();
+        assert!(
+            !cs.tx_store
+                .get(&txid)
+                .unwrap()
+                .outputs
+                .get(&vout)
+                .unwrap()
+                .owned
+        );
+
+        let outcome = cs.handle_history_response(BTreeMap::from([(spk, vec![(txid, None)])]));
+
+        assert!(outcome.missing_txs.is_empty());
+        assert!(
+            cs.tx_store
+                .get(&txid)
+                .unwrap()
+                .outputs
+                .get(&vout)
+                .unwrap()
+                .owned
+        );
+        assert!(cs.coins().contains_key(&outpoint));
+        assert_eq!(cs.spendable_coins().unconfirmed_balance, 50_000_000);
     }
 
     #[test]

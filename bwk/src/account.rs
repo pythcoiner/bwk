@@ -23,9 +23,10 @@ use miniscript::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    address_store::{AddressEntry, AddressStatus, AddressTip, ChangeTipUpdater},
+    address_store::{AddressEntry, AddressStatus, AddressTip},
     coin_store::{
-        ChainUpdateOutcome, ClaimAt, CoinEntry, CoinStore, CoinStoreSource, Payment, PaymentType,
+        ChainUpdateOutcome, ChangeTipUpdater, ClaimAt, CoinEntry, CoinStore, CoinStoreSource,
+        Payment, PaymentType,
     },
     config::{Config, Tip},
     header_store::{HeaderStore, InvalidCause},
@@ -661,8 +662,7 @@ impl<P: StorageProfile> Account<P> {
 // Locking API
 impl<P: StorageProfile> Account<P> {
     pub fn tx_builder(&self) -> TxBuilder {
-        let tip_updater =
-            ChangeTipUpdater::new(self.coin_store().lock().expect("poisoned").address_store());
+        let tip_updater = ChangeTipUpdater::new(self.coin_store().clone());
         let change_provider = Box::new(ChangeRecipientProvider::new_with_updater(
             tip_updater,
             self.descriptor(),
