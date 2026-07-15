@@ -1003,7 +1003,11 @@ fn needs_reanchor(min_stored: Option<u32>, stored_tip: Option<u32>, low: u32) ->
 }
 
 const REORG_WALK_CHUNK: u32 = 20;
+#[cfg(not(test))]
 const RECV_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(test)]
+const RECV_TIMEOUT: Duration = Duration::from_millis(200);
+const INITIAL_SYNC_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// Upper bound on the deferred tip/notif queue. A chatty (or malicious)
 /// server could otherwise flood notifications during a `GetHeaders`
 /// round-trip and grow this queue without limit.
@@ -1216,8 +1220,8 @@ fn fetch_and_verify_genesis(
     resp_rx: &mpsc::Receiver<HeaderResponse>,
     deferred: &mut VecDeque<(u32, [u8; Header::SIZE])>,
 ) -> Option<[u8; Header::SIZE]> {
-    match request_headers(req_tx, resp_rx, 0, 1, deferred) {
-        Some(raws) if !raws.is_empty() => match deserialize::<Header>(&raws[0]) {
+    match request_initial_headers(store, token, req_tx, resp_rx, 0, 1, deferred) {
+        Some(raws) => match deserialize::<Header>(&raws[0]) {
             Ok(hdr) if hdr.block_hash() == expected => Some(raws[0]),
             Ok(hdr) => {
                 log::warn!(
@@ -1302,17 +1306,14 @@ fn initial_sync(
     while start < tip_h {
         let remaining = tip_h - start;
         let count = remaining.min(backfill_chunk(network));
-        let raws = match request_headers(req_tx, resp_rx, start, count, deferred) {
-            Some(r) => r,
-            None => {
-                log::warn!("HeaderStore::initial_sync: no response at start={start}");
-                return false;
-            }
-        };
-        if raws.is_empty() {
-            log::warn!("HeaderStore::initial_sync: empty batch at start={start}");
-            return false;
-        }
+        let raws =
+            match request_initial_headers(store, token, req_tx, resp_rx, start, count, deferred) {
+                Some(r) => r,
+                None => {
+                    log::warn!("HeaderStore::initial_sync: no response at start={start}");
+                    return false;
+                }
+            };
         for (i, raw) in raws.iter().enumerate() {
             let h = start + i as u32;
             let res = if store.tip().is_none() && h > 0 {
@@ -1608,25 +1609,28 @@ fn resolve_reorg(
     }
 }
 
-/// Send a `GetHeaders` request and block-recv until the matching `Batch`
-/// arrives. Returns `None` if the channel closes or a `Stopped` arrives.
-fn request_headers(
-    req_tx: &mpsc::Sender<HeaderRequest>,
+enum RequestHeadersOutcome {
+    Batch(Vec<[u8; Header::SIZE]>),
+    Failed,
+    Timeout,
+    Cancelled,
+}
+
+fn receive_headers(
     resp_rx: &mpsc::Receiver<HeaderResponse>,
     start: u32,
-    count: u32,
     deferred: &mut VecDeque<(u32, [u8; Header::SIZE])>,
-) -> Option<Vec<[u8; Header::SIZE]>> {
-    if req_tx
-        .send(HeaderRequest::GetHeaders { start, count })
-        .is_err()
-    {
-        return None;
-    }
+) -> RequestHeadersOutcome {
     loop {
-        let resp = resp_rx.recv_timeout(RECV_TIMEOUT).ok()?;
+        let resp = match resp_rx.recv_timeout(RECV_TIMEOUT) {
+            Ok(resp) => resp,
+            Err(mpsc::RecvTimeoutError::Timeout) => return RequestHeadersOutcome::Timeout,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return RequestHeadersOutcome::Cancelled,
+        };
         match resp {
-            HeaderResponse::Batch { start: s, raws } if s == start => return Some(raws),
+            HeaderResponse::Batch { start: s, raws } if s == start => {
+                return RequestHeadersOutcome::Batch(raws)
+            }
             HeaderResponse::Batch { start: s, raws } => {
                 log::debug!(
                     "HeaderStore::request_headers: ignoring unrelated batch start={s} len={}",
@@ -1646,12 +1650,84 @@ fn request_headers(
                 log::warn!(
                     "HeaderStore::request_headers: get_headers at start={start} failed: {error}"
                 );
-                return None;
+                return RequestHeadersOutcome::Failed;
+            }
+            HeaderResponse::Error(HeaderError::GetHeadersDecode { start: s, source })
+                if s == start =>
+            {
+                log::warn!(
+                    "HeaderStore::request_headers: decode get_headers at start={start}: {source}"
+                );
+                return RequestHeadersOutcome::Failed;
             }
             HeaderResponse::Error(e) => {
                 log::warn!("HeaderStore::request_headers: server error: {e}");
             }
-            HeaderResponse::Stopped => return None,
+            HeaderResponse::Stopped => return RequestHeadersOutcome::Cancelled,
+        }
+    }
+}
+
+/// Send a `GetHeaders` request and block-recv until the matching `Batch`
+/// arrives. Returns `None` if the request fails, times out, or is cancelled.
+fn request_headers(
+    req_tx: &mpsc::Sender<HeaderRequest>,
+    resp_rx: &mpsc::Receiver<HeaderResponse>,
+    start: u32,
+    count: u32,
+    deferred: &mut VecDeque<(u32, [u8; Header::SIZE])>,
+) -> Option<Vec<[u8; Header::SIZE]>> {
+    req_tx
+        .send(HeaderRequest::GetHeaders { start, count })
+        .ok()?;
+    match receive_headers(resp_rx, start, deferred) {
+        RequestHeadersOutcome::Batch(raws) => Some(raws),
+        _ => None,
+    }
+}
+
+fn request_initial_headers(
+    store: &Arc<HeaderStore>,
+    token: u64,
+    req_tx: &mpsc::Sender<HeaderRequest>,
+    resp_rx: &mpsc::Receiver<HeaderResponse>,
+    start: u32,
+    count: u32,
+    deferred: &mut VecDeque<(u32, [u8; Header::SIZE])>,
+) -> Option<Vec<[u8; Header::SIZE]>> {
+    let mut send = true;
+    loop {
+        if store.stopped.load(Ordering::SeqCst)
+            || store.writer_token.load(Ordering::SeqCst) != token
+        {
+            return None;
+        }
+        if send {
+            req_tx
+                .send(HeaderRequest::GetHeaders { start, count })
+                .ok()?;
+            send = false;
+        }
+
+        let outcome = receive_headers(resp_rx, start, deferred);
+        if store.stopped.load(Ordering::SeqCst)
+            || store.writer_token.load(Ordering::SeqCst) != token
+        {
+            return None;
+        }
+        let retry = match outcome {
+            RequestHeadersOutcome::Batch(raws) if raws.is_empty() => {
+                log::warn!("HeaderStore::initial_sync: empty batch at start={start}; retrying");
+                true
+            }
+            RequestHeadersOutcome::Batch(raws) => return Some(raws),
+            RequestHeadersOutcome::Failed => true,
+            RequestHeadersOutcome::Timeout => false,
+            RequestHeadersOutcome::Cancelled => return None,
+        };
+        if retry {
+            thread::sleep(INITIAL_SYNC_RETRY_DELAY);
+            send = true;
         }
     }
 }
@@ -1659,6 +1735,7 @@ fn request_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bwk_electrum::electrum::response::{ErrorResponse, ErrorResult};
     use miniscript::bitcoin::{
         block::{Header, Version},
         consensus::serialize,
@@ -1747,6 +1824,19 @@ mod tests {
             store.insert_unchecked(i as u32, raw_header(h));
         }
         store
+    }
+
+    fn recv_get_headers(rx: &mpsc::Receiver<HeaderRequest>, start: u32, count: u32) {
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            HeaderRequest::GetHeaders {
+                start: request_start,
+                count: request_count,
+            } => {
+                assert_eq!(request_start, start);
+                assert_eq!(request_count, count);
+            }
+            other => panic!("expected GetHeaders, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1919,6 +2009,150 @@ mod tests {
             deferred.back().map(|(h, _)| *h),
             Some(MAX_DEFERRED as u32 - 1)
         );
+    }
+
+    #[test]
+    fn initial_headers_retries_error_then_accepts_batch() {
+        let store = HeaderStore::new_in_memory(Network::Regtest);
+        let (req_tx, req_rx) = mpsc::channel::<HeaderRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<HeaderResponse>();
+        let raw = [1u8; Header::SIZE];
+        let responder = thread::spawn(move || {
+            recv_get_headers(&req_rx, 10, 20);
+            resp_tx
+                .send(HeaderResponse::Error(HeaderError::GetHeaders {
+                    start: 10,
+                    error: ErrorResponse {
+                        id: 1,
+                        error: ErrorResult {
+                            code: 1,
+                            message: "temporary".to_string(),
+                        },
+                    },
+                }))
+                .unwrap();
+            recv_get_headers(&req_rx, 10, 20);
+            resp_tx
+                .send(HeaderResponse::Batch {
+                    start: 10,
+                    raws: vec![raw],
+                })
+                .unwrap();
+        });
+        let mut deferred = VecDeque::new();
+
+        assert_eq!(
+            request_initial_headers(&store, 0, &req_tx, &resp_rx, 10, 20, &mut deferred),
+            Some(vec![raw])
+        );
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn initial_headers_retries_empty_then_accepts_batch() {
+        let store = HeaderStore::new_in_memory(Network::Regtest);
+        let (req_tx, req_rx) = mpsc::channel::<HeaderRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<HeaderResponse>();
+        let raw = [2u8; Header::SIZE];
+        let responder = thread::spawn(move || {
+            recv_get_headers(&req_rx, 30, 40);
+            resp_tx
+                .send(HeaderResponse::Batch {
+                    start: 30,
+                    raws: Vec::new(),
+                })
+                .unwrap();
+            recv_get_headers(&req_rx, 30, 40);
+            resp_tx
+                .send(HeaderResponse::Batch {
+                    start: 30,
+                    raws: vec![raw],
+                })
+                .unwrap();
+        });
+        let mut deferred = VecDeque::new();
+
+        assert_eq!(
+            request_initial_headers(&store, 0, &req_tx, &resp_rx, 30, 40, &mut deferred),
+            Some(vec![raw])
+        );
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn initial_headers_retries_decode_error_then_accepts_batch() {
+        let store = HeaderStore::new_in_memory(Network::Regtest);
+        let (req_tx, req_rx) = mpsc::channel::<HeaderRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<HeaderResponse>();
+        let raw = [3u8; Header::SIZE];
+        let responder = thread::spawn(move || {
+            recv_get_headers(&req_rx, 70, 80);
+            resp_tx
+                .send(HeaderResponse::Error(HeaderError::GetHeadersDecode {
+                    start: 70,
+                    source: bwk_electrum::client::DecodeError::HeadersAlignment(1),
+                }))
+                .unwrap();
+            recv_get_headers(&req_rx, 70, 80);
+            resp_tx
+                .send(HeaderResponse::Batch {
+                    start: 70,
+                    raws: vec![raw],
+                })
+                .unwrap();
+        });
+        let mut deferred = VecDeque::new();
+
+        assert_eq!(
+            request_initial_headers(&store, 0, &req_tx, &resp_rx, 70, 80, &mut deferred),
+            Some(vec![raw])
+        );
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn initial_headers_timeout_waits_for_original_request() {
+        let store = HeaderStore::new_in_memory(Network::Regtest);
+        let (req_tx, req_rx) = mpsc::channel::<HeaderRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<HeaderResponse>();
+        let raw = [4u8; Header::SIZE];
+        let responder = thread::spawn(move || {
+            recv_get_headers(&req_rx, 90, 100);
+            thread::sleep(RECV_TIMEOUT + Duration::from_millis(50));
+            assert!(req_rx.try_recv().is_err());
+            resp_tx
+                .send(HeaderResponse::Batch {
+                    start: 90,
+                    raws: vec![raw],
+                })
+                .unwrap();
+        });
+        let mut deferred = VecDeque::new();
+
+        assert_eq!(
+            request_initial_headers(&store, 0, &req_tx, &resp_rx, 90, 100, &mut deferred),
+            Some(vec![raw])
+        );
+        responder.join().unwrap();
+    }
+
+    #[test]
+    fn initial_headers_stops_on_cancellation() {
+        let store = HeaderStore::new_in_memory(Network::Regtest);
+        let (req_tx, req_rx) = mpsc::channel::<HeaderRequest>();
+        let (resp_tx, resp_rx) = mpsc::channel::<HeaderResponse>();
+        let responder = thread::spawn(move || {
+            recv_get_headers(&req_rx, 50, 60);
+            resp_tx.send(HeaderResponse::Stopped).unwrap();
+            assert!(req_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        });
+        let mut deferred = VecDeque::new();
+
+        assert_eq!(
+            request_initial_headers(&store, 0, &req_tx, &resp_rx, 50, 60, &mut deferred),
+            None
+        );
+        responder.join().unwrap();
     }
 
     #[test]

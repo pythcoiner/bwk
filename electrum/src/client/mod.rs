@@ -240,6 +240,8 @@ pub enum HeaderError {
     Server(ErrorResponse),
     #[error("get_headers starting at {start} failed: {error}")]
     GetHeaders { start: u32, error: ErrorResponse },
+    #[error("failed to decode get_headers response starting at {start}: {source}")]
+    GetHeadersDecode { start: u32, source: DecodeError },
     #[error("transport error: {0}")]
     Transport(#[source] raw_client::Error),
 }

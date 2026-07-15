@@ -93,7 +93,10 @@ fn handle_header_response(
             };
             match chunk_raw_headers(&raw_headers) {
                 Ok(raws) => sender(HeaderResponse::Batch { start, raws }),
-                Err(e) => sender(HeaderResponse::Error(e.into())),
+                Err(source) => sender(HeaderResponse::Error(HeaderError::GetHeadersDecode {
+                    start,
+                    source,
+                })),
             }
         }
         Response::Error(e) => {
@@ -381,6 +384,32 @@ mod tests {
             other => panic!("expected Batch, got {other:?}"),
         }
         // start tracking should have been consumed.
+        assert!(state.get_headers_starts.is_empty());
+    }
+
+    #[test]
+    fn dispatch_headers_decode_error_uses_tracked_start() {
+        let mut state = HeaderState::default();
+        state.get_headers_starts.insert(42, 1_000);
+        let response = Response::Headers(HeadersResponse {
+            id: 42,
+            headers: Headers {
+                count: 1,
+                raw_headers: "11".to_string(),
+                max: 2016,
+            },
+        });
+        let mut out = Vec::new();
+
+        handle_header_response(&mut state, response, &mut |hr| out.push(hr));
+
+        assert!(matches!(
+            &out[0],
+            HeaderResponse::Error(HeaderError::GetHeadersDecode {
+                start: 1_000,
+                source: DecodeError::HeadersAlignment(1),
+            })
+        ));
         assert!(state.get_headers_starts.is_empty());
     }
 
