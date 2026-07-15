@@ -128,11 +128,11 @@ pub struct CoinStore<P: StorageProfile = RamProfile<DefaultBackend>> {
     /// here when the server reports it at height H but the HeaderStore
     /// doesn't yet have a header at H; the next CTA resolves it.
     pending_claims: BTreeMap<u32, BTreeSet<Txid>>,
-    /// Txids with a `GetTxMerkle` fetch in flight, so a chain tick does not
+    /// Claims with a `GetTxMerkle` fetch in flight, so a chain tick does not
     /// re-queue a proof already being fetched (fetch-storm guard). Cleared
     /// when the response lands (`clear_merkle_in_flight`) or the entry leaves
     /// `ConfirmedUnverified`. In-memory runtime state, never persisted.
-    merkle_in_flight: BTreeSet<Txid>,
+    merkle_in_flight: BTreeSet<ClaimAt>,
 }
 
 #[derive(Debug, Default)]
@@ -157,7 +157,7 @@ pub struct HistoryDiff {
 
 /// A claim that transaction `txid` is confirmed at block `height`, awaiting
 /// header lookup and merkle-proof verification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ClaimAt {
     pub txid: Txid,
     pub height: u32,
@@ -550,7 +550,7 @@ impl<P: StorageProfile> CoinStore<P> {
         // A tx removed or demoted out of ConfirmedUnverified frees its
         // in-flight merkle slot so the set does not leak.
         for txid in diff.removed.keys().chain(diff.changed.keys()) {
-            self.merkle_in_flight.remove(txid);
+            self.merkle_in_flight.retain(|claim| claim.txid != *txid);
         }
 
         (!diff.changed.is_empty(), Update::from_diff(spk, diff))
@@ -982,11 +982,11 @@ impl<P: StorageProfile> CoinStore<P> {
         self.pending_claims.clone()
     }
 
-    /// Clear `txid` from the in-flight merkle-fetch set. Called when a
+    /// Clear `claim` from the in-flight merkle-fetch set. Called when a
     /// `TxMerkle` response lands (the fetch resolved), so a later CTA can
     /// re-queue it if the entry is still `ConfirmedUnverified`.
-    pub(crate) fn clear_merkle_in_flight(&mut self, txid: &Txid) {
-        self.merkle_in_flight.remove(txid);
+    pub fn clear_merkle_in_flight(&mut self, claim: &ClaimAt) {
+        self.merkle_in_flight.remove(claim);
     }
 
     /// Removes a single resolved claim from the queue.
@@ -1013,18 +1013,19 @@ impl<P: StorageProfile> CoinStore<P> {
     /// and the queued-claim resolver.
     fn promote_claim(
         tx_store: &mut TxStore<P>,
-        merkle_in_flight: &mut BTreeSet<Txid>,
+        merkle_in_flight: &mut BTreeSet<ClaimAt>,
         txid: &Txid,
         height: u32,
         block_hash: bitcoin::BlockHash,
         to_fetch: &mut Vec<ClaimAt>,
     ) {
         tx_store.update_inclusion(txid, Inclusion::ConfirmedUnverified { height, block_hash });
-        merkle_in_flight.insert(*txid);
-        to_fetch.push(ClaimAt {
+        let claim = ClaimAt {
             txid: *txid,
             height,
-        });
+        };
+        merkle_in_flight.insert(claim);
+        to_fetch.push(claim);
     }
 
     /// Promote server-reported `(txid, height)` claims with a known header,
@@ -1106,13 +1107,18 @@ impl<P: StorageProfile> CoinStore<P> {
                         // bursts). A hard proof failure moves it to
                         // VerifyFailed and stops the re-queue.
                         Some(current) if current == block_hash => {
-                            if self.merkle_in_flight.insert(txid) {
-                                to_fetch.push(ClaimAt { txid, height });
+                            let claim = ClaimAt { txid, height };
+                            if self.merkle_in_flight.insert(claim) {
+                                to_fetch.push(claim);
                             }
                         }
                         // A reorg re-stamped this height: refresh the stored
                         // hash and re-queue the proof fetch.
                         Some(current) => {
+                            let claim = ClaimAt { txid, height };
+                            if self.merkle_in_flight.contains(&claim) {
+                                continue;
+                            }
                             self.tx_store.update_inclusion(
                                 &txid,
                                 Inclusion::ConfirmedUnverified {
@@ -1120,9 +1126,9 @@ impl<P: StorageProfile> CoinStore<P> {
                                     block_hash: current,
                                 },
                             );
-                            self.merkle_in_flight.insert(txid);
+                            self.merkle_in_flight.insert(claim);
                             changed = true;
-                            to_fetch.push(ClaimAt { txid, height });
+                            to_fetch.push(claim);
                         }
                         // Header missing (pruned): retried on a later CTA once
                         // a header is present at this height again.
@@ -1145,7 +1151,7 @@ impl<P: StorageProfile> CoinStore<P> {
                                     block_hash: current,
                                 },
                             );
-                            self.merkle_in_flight.insert(txid);
+                            self.merkle_in_flight.insert(ClaimAt { txid, height });
                             changed = true;
                             to_fetch.push(ClaimAt { txid, height });
                         }

@@ -1349,6 +1349,15 @@ where
                         return statuses;
                     }
                     CoinResponse::Error(e) => {
+                        if let Some(claim) = clear_merkle_in_flight_on_error(&coin_store, &e) {
+                            retry_reorged_merkle_claim(
+                                &coin_store,
+                                &header_store,
+                                &request,
+                                &notification,
+                                claim,
+                            );
+                        }
                         send_notif!(
                             notification,
                             request,
@@ -1438,6 +1447,52 @@ fn header_store_ready<P: StorageProfile>(
         ));
     }
     false
+}
+
+fn clear_merkle_in_flight_on_error<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    error: &CoinError,
+) -> Option<ClaimAt> {
+    let claim = match error {
+        CoinError::MerkleDecode { txid, height, .. }
+        | CoinError::MerkleFetch { txid, height, .. } => ClaimAt {
+            txid: *txid,
+            height: *height,
+        },
+        _ => return None,
+    };
+    coin_store
+        .lock()
+        .expect("poisoned")
+        .clear_merkle_in_flight(&claim);
+    Some(claim)
+}
+
+fn retry_reorged_merkle_claim<P: StorageProfile>(
+    coin_store: &Mutex<CoinStore<P>>,
+    header_store: &HeaderStore<P::HeaderStore>,
+    request: &mpsc::Sender<CoinRequest>,
+    notification: &mpsc::Sender<Notification>,
+    claim: ClaimAt,
+) {
+    let stored_hash = coin_store
+        .lock()
+        .expect("poisoned")
+        .tx_store_mut()
+        .get(&claim.txid)
+        .and_then(|entry| match entry.inclusion() {
+            Inclusion::ConfirmedUnverified { height, block_hash } if *height == claim.height => {
+                Some(*block_hash)
+            }
+            _ => None,
+        });
+    if stored_hash.is_some_and(|hash| {
+        header_store
+            .block_hash(claim.height)
+            .is_some_and(|current| current != hash)
+    }) {
+        on_chain_update(coin_store, header_store, request, notification);
+    }
 }
 
 /// Apply a resolved [`ChainUpdateOutcome`]: persist and regenerate when it
@@ -1664,12 +1719,14 @@ fn handle_tx_merkle<P: StorageProfile>(
     coin_store
         .lock()
         .expect("poisoned")
-        .clear_merkle_in_flight(&txid);
+        .clear_merkle_in_flight(&ClaimAt { txid, height });
 
     if !header_store_ready::<P>(header_store, notification) {
         return;
     }
+    let claim = ClaimAt { txid, height };
     let Some(target) = resolve_tx_merkle_target(coin_store, header_store, txid, height) else {
+        retry_reorged_merkle_claim(coin_store, header_store, request, notification, claim);
         return;
     };
     apply_tx_merkle(coin_store, request, notification, target, &branch, pos);
@@ -1883,6 +1940,10 @@ mod tests {
     use crate::tx_store::TxStore;
     use bip39::Mnemonic;
     use bwk_descriptor::descriptor::{wpkh, ScriptType};
+    use bwk_electrum::{
+        client::DecodeError,
+        electrum::response::{ErrorResponse, ErrorResult},
+    };
     use bwk_persist::NoopBackend;
     use bwk_sign::hot_signer::HotSigner;
     use bwk_tx::CoinStatus;
@@ -2508,6 +2569,105 @@ mod tests {
             Inclusion::ConfirmedUnverified { height, block_hash: bh }
                 if *height == h && *bh == block_hash
         ));
+    }
+
+    #[test]
+    fn merkle_errors_release_only_their_in_flight_fetch() {
+        use crate::header_store::HeaderStore;
+        use crate::tx_store::TxEntry;
+
+        let (coin_store, _derivator) = bare_coin_store();
+        let tx = funding_tx(bitcoin::ScriptBuf::new(), 0.1);
+        let txid = tx.compute_txid();
+        let h: u32 = 4;
+        let (map, block_hash) = build_header_map(h + 1);
+        let header_store = HeaderStore::from_map(Network::Regtest, map);
+        {
+            let mut store = coin_store.lock().unwrap();
+            store.tx_store_mut().update(TxEntry::for_test(tx));
+            store.tx_store_mut().update_inclusion(
+                &txid,
+                Inclusion::ConfirmedUnverified {
+                    height: h,
+                    block_hash,
+                },
+            );
+        }
+        let (req_tx, req_rx) = mpsc::channel();
+        let (notif_tx, _notif_rx) = mpsc::channel();
+
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(
+            req_rx.try_recv(),
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) if t == txid && height == h
+        ));
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let server_error = ErrorResponse {
+            id: 1,
+            error: ErrorResult {
+                code: 1,
+                message: "failed".to_string(),
+            },
+        };
+        clear_merkle_in_flight_on_error(&coin_store, &CoinError::Server(server_error.clone()));
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        clear_merkle_in_flight_on_error(
+            &coin_store,
+            &CoinError::MerkleFetch {
+                txid,
+                height: h - 1,
+                error: server_error.clone(),
+            },
+        );
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        clear_merkle_in_flight_on_error(
+            &coin_store,
+            &CoinError::MerkleFetch {
+                txid,
+                height: h,
+                error: server_error,
+            },
+        );
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(
+            req_rx.try_recv(),
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) if t == txid && height == h
+        ));
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        clear_merkle_in_flight_on_error(
+            &coin_store,
+            &CoinError::MerkleDecode {
+                txid,
+                height: h,
+                source: DecodeError::MerkleHashLength { index: 0, got: 1 },
+            },
+        );
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+        on_chain_update(&coin_store, &header_store, &req_tx, &notif_tx);
+        assert!(matches!(
+            req_rx.try_recv(),
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) if t == txid && height == h
+        ));
+        assert!(matches!(req_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let mut store = coin_store.lock().unwrap();
+        let entry = store.tx_store_mut().get(&txid).unwrap();
+        assert_eq!(
+            entry.inclusion(),
+            &Inclusion::ConfirmedUnverified {
+                height: h,
+                block_hash,
+            }
+        );
     }
 
     // Regression for the stale-pending-claim wedge: a tx queued at an OLD
@@ -3268,12 +3428,10 @@ mod tests {
         );
     }
 
-    // Reorg race: the entry's stored hash no longer matches the header at
-    // its height (a reorg landed between the fetch and the response). This
-    // must stay silent, no notification and no state change; the reorg
-    // re-queue (reverify_remined_entries) owns recovery.
+    // A stale proof response after a same-height reorg must requeue against
+    // the replacement block instead of marking the transaction failed.
     #[test]
-    fn handle_tx_merkle_hash_mismatch_stays_silent() {
+    fn handle_tx_merkle_hash_mismatch_requeues_replacement() {
         use crate::header_store::HeaderStore;
         use crate::tx_store::TxEntry;
         use miniscript::bitcoin::hashes::Hash;
@@ -3305,7 +3463,8 @@ mod tests {
             );
         }
 
-        let (req_tx, _req_rx) = mpsc::channel();
+        let current_hash = header_store.block_hash(h).unwrap();
+        let (req_tx, req_rx) = mpsc::channel();
         let (notif_tx, notif_rx) = mpsc::channel();
         handle_tx_merkle(
             &coin_store,
@@ -3318,10 +3477,15 @@ mod tests {
             0,
         );
 
-        assert!(
-            notif_rx.try_recv().is_err(),
-            "reorg race must stay silent, got a notification"
-        );
+        assert!(matches!(
+            req_rx.try_recv(),
+            Ok(CoinRequest::GetTxMerkle { txid: t, height }) if t == txid && height == h
+        ));
+        assert!(matches!(
+            notif_rx.try_recv(),
+            Ok(Notification::HeaderStoreUpdated)
+        ));
+        assert!(matches!(notif_rx.try_recv(), Err(TryRecvError::Empty)));
 
         let mut store = coin_store.lock().unwrap();
         let entry = store.tx_store_mut().get(&txid).expect("tx present");
@@ -3329,9 +3493,9 @@ mod tests {
             matches!(
                 entry.inclusion(),
                 Inclusion::ConfirmedUnverified { height, block_hash: b }
-                    if *height == h && *b == stale_hash
+                    if *height == h && *b == current_hash
             ),
-            "entry state changed on hash mismatch: {:?}",
+            "entry was not restamped after hash mismatch: {:?}",
             entry.inclusion(),
         );
     }
