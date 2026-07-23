@@ -137,10 +137,6 @@ impl Client {
         self
     }
 
-    pub fn connect(&mut self) {
-        self.try_connect(None).unwrap()
-    }
-
     pub fn is_connected(&self) -> bool {
         match self {
             Client::None => false,
