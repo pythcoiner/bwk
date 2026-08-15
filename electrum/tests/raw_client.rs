@@ -47,7 +47,7 @@ fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
 fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
     let (url, port, electrs, bitcoind) = bootstrap_electrs();
     let mut c = Client::new().tcp(&url, port);
-    c.connect();
+    c.try_connect(None).unwrap();
     (c, electrs, bitcoind)
 }
 
@@ -119,8 +119,7 @@ fn ssl_client_wo_certificate() {
         let mut client = Client::new().ssl(&url, port);
         assert!(client.try_connect(None).is_err());
         let mut client = client.verif_certificate(false);
-        client.connect();
-
+        client.try_connect(None).unwrap();
         // blocking recv
         client.send_str("ping");
         let _ = client.recv_str().unwrap();
@@ -139,7 +138,7 @@ fn ssl_client_wo_certificate() {
 fn ssl_client_with_certificate() {
     let (url, port) = split_url(ssl_acinq());
     let mut client = Client::new_ssl(&url, port);
-    client.connect();
+    client.try_connect(None).unwrap();
     client.send_str("ping");
     let _ = client.recv_str().unwrap();
     client.close().unwrap();
@@ -149,7 +148,7 @@ fn ssl_client_with_certificate() {
 fn ssl_maybe() {
     let (url, port) = split_url(ssl_acinq());
     let mut client = Client::new_ssl_maybe(&url, port, true);
-    client.connect();
+    client.try_connect(None).unwrap();
     client.send_str("ping");
     let _ = client.recv_str().unwrap();
     client.close().unwrap();
@@ -168,7 +167,7 @@ fn timeout_template(url: &str, port: u16, ssl: bool) {
     let mut client = Client::new_ssl_maybe(url, port, ssl)
         .verif_certificate(false)
         .read_timeout(Some(Duration::from_millis(100)));
-    client.connect();
+    client.try_connect(None).unwrap();
     let start = Instant::now();
     let resp = client.recv_str();
     let duration = (Instant::now() - start).as_millis();
@@ -179,7 +178,7 @@ fn timeout_template(url: &str, port: u16, ssl: bool) {
     );
 
     let mut client = Client::new_ssl_maybe(url, port, ssl).verif_certificate(false);
-    client.connect();
+    client.try_connect(None).unwrap();
     client
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
@@ -372,7 +371,7 @@ fn test_version() {
 // TODO: use tcp_client() instead
 fn tx_get() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let raw_outpoint = "e03a9a4b5c557f6ee3400a29ff1475d1df73e9cddb48c2391abdc391d8c1504a:0";
     let outpoint = OutPoint::from_str(raw_outpoint).unwrap();
@@ -463,7 +462,7 @@ fn tx_get() {
 // TODO: use tcp_client() instead
 fn sh_get_balance() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
@@ -483,7 +482,7 @@ fn sh_get_balance() {
 // TODO: use tcp_client() instead
 fn sh_get_history() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
@@ -519,7 +518,7 @@ fn sh_get_history() {
 // TODO: use tcp_client() instead
 fn sh_list_unspent() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
@@ -570,7 +569,7 @@ fn donation() {
 #[test]
 fn estimate_fee() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let mut index = HashMap::new();
     let request = Request::estimate_fee(10);
@@ -587,7 +586,7 @@ fn estimate_fee() {
 #[test]
 fn fee_histogram() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let mut index = HashMap::new();
     let request = Request::get_fee_histogram();
@@ -604,7 +603,7 @@ fn fee_histogram() {
 #[test]
 fn relay_fee() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let mut index = HashMap::new();
     let request = Request::relay_fee();
@@ -623,7 +622,7 @@ fn relay_fee() {
 // TODO: use tcp_client() instead
 fn tx_get_merkle() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let raw_outpoint = "e03a9a4b5c557f6ee3400a29ff1475d1df73e9cddb48c2391abdc391d8c1504a:0";
     let outpoint = OutPoint::from_str(raw_outpoint).unwrap();
@@ -645,7 +644,7 @@ fn tx_get_merkle() {
 // TODO: use tcp_client() instead
 fn tx_from_position() {
     let mut client = acinq_client();
-    client.connect();
+    client.try_connect(None).unwrap();
 
     let mut index = HashMap::new();
     let request = Request::tx_from_pos(200_000, 3, false);

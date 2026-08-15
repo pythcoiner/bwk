@@ -31,7 +31,7 @@ use tx_listener::listen_txs;
 
 const SEND_MAX_RETRIES: usize = 3;
 const SEND_RETRY_DELAY: Duration = Duration::from_millis(300);
-
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MERKLE_HASH_BYTES: usize = 32;
 const SHORT_HEX_BYTES: usize = 8;
 
@@ -309,7 +309,7 @@ impl Client {
         let ssl = address.starts_with("ssl://");
         let address = address.to_string().replace("ssl://", "");
         let mut inner = RawClient::new_ssl_maybe(&address, port, ssl);
-        inner.try_connect(None)?;
+        inner.try_connect(Some(CONNECT_TIMEOUT))?;
         Ok(Client {
             inner,
             index: HashMap::new(),
