@@ -177,13 +177,13 @@ Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
 - [x] Flat `int32_t` codes, `100+` reader, `200+` decode, `300+` encode, `400+` the
   binding, each carrying the static message the Rust `Display` uses
 - [x] Hand-written `include/bwk_qr_protocol.h`; no cbindgen, no build script
-- [ ] `tests/ffi.rs` over the `#[repr(C)]` types, so CI needs no C toolchain;
+- [x] `tests/ffi.rs` over the `#[repr(C)]` types, so CI needs no C toolchain;
   `tests/layout.rs` pins every size and alignment against the header
 
 ### Acceptance (Phase 3.5)
-- [ ] `cargo test -p bwk-qr-protocol --features ffi` green
-- [ ] `cargo +nightly miri test` green over the raw-pointer paths, no leaks
-- [ ] Every mirror type matches what a C compiler computes from the header
+- [x] `cargo test -p bwk-qr-protocol --features ffi` green
+- [x] `cargo +nightly miri test` green over the raw-pointer paths, no leaks
+- [x] Every mirror type matches what a C compiler computes from the header
 - [x] `examples/signer.c` compiles with `-Wall -Wextra`, links against a staticlib
   shim and round-trips a real request
 
