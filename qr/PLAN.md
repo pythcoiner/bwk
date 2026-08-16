@@ -311,6 +311,10 @@ bwk/qr/
 bwk/qr-protocol/
   Cargo.toml
   ENCODING.md        <- the authoritative wire format
+  include/
+    bwk_qr_protocol.h  <- hand-written C header       (feature: ffi)
+  examples/
+    signer.c         <- hand-compiled C smoke test
   src/
     lib.rs           <- envelope types, Message, free encode/decode fns
     types.rs         <- the byte-level leaf types, plus bitcoin adapters
@@ -319,9 +323,16 @@ bwk/qr-protocol/
     reader.rs        <- byte cursor + compactsize
     encode.rs        <- hand-rolled binary encode
     decode.rs        <- hand-rolled binary decode + version rule
+    ffi/             <- the C binding                 (feature: ffi)
+      mod.rs         <- the four exported functions and their error codes
+      types.rs       <- #[repr(C)] mirrors of the message tree
+      owned.rs       <- the handle backing a decoded request
+      read.rs        <- reads a C response back into the Rust types
   tests/
     codec.rs         <- codec round-trip, version compat, rejection cases
     vectors.rs       <- the ENCODING.md test vectors, checked both directions
+    ffi.rs           <- the C binding, over the #[repr(C)] types
+    layout.rs        <- pins the C layout so the header cannot drift
     *.json           <- the vectors themselves, one file per message group
 ```
 
@@ -384,8 +395,8 @@ pub enum Error {
 
 `bwk-qr-protocol` keeps its own `reader::Error`, `decode::Error` and `encode::Error`.
 None of their messages interpolate a payload, so a single `info()` method per enum
-yields both the message and a stable numeric code. The messages carry a trailing nul
-so a nul-terminated consumer can be handed the very same literal.
+yields both the message and a stable numeric code, which is what the C binding hands
+back. The messages carry a trailing nul so C gets the very same literal.
 
 ---
 
@@ -408,7 +419,13 @@ sentinel/empty returns). Planned surface (added per phase):
 Each bwk change bumps the pinned `bwk` git `rev` in `silent/Cargo.toml`, refreshes
 `Cargo.lock`, and updates `flake.lock` + the `importCargoLock` `outputHashes`.
 
-### 9.2 Other Rust callers
+### 9.2 A C signer
+Firmware links `bwk-qr-protocol` (features `ffi`) as an rlib from its own `staticlib`
+crate, which supplies the global allocator and the panic handler a library cannot.
+`include/bwk_qr_protocol.h` covers the signer direction: decode a request, encode a
+response. See `qr-protocol/README.md`.
+
+### 9.3 Other Rust callers
 ```rust
 // plain QR (generation only, zero transitive deps):
 use bwk_qr::{Config, Encoder};

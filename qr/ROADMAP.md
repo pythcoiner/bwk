@@ -30,7 +30,7 @@ commit as the work it describes.
   `quircs` (behind `scan`),
   `bwk-qr-protocol` (behind `protocol`); no serde/CBOR, no build script
 - [x] `qr-protocol/Cargo.toml`: package `bwk-qr-protocol`; `no_std` + `alloc`, no
-  dependency by default; feature `bitcoin` for the type adapters
+  dependency by default; features `bitcoin` (type adapters) and `ffi` (C binding)
 - [x] `qr/src/lib.rs`: module decls (`config`, `error`, `image`, `gen`, `scan`,
   `encoder`, `decoder`, `bbqr`, `protocol`) feature-gated; crate docs stating the
   two goals
@@ -124,8 +124,8 @@ Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
 ### Acceptance (Phase 2)
 - [x] `cargo test -p bwk-qr-protocol --all-features` and
   `cargo test -p bwk-qr --features protocol` green; clippy/fmt clean
-- [x] `cargo build -p bwk-qr-protocol --target riscv32imac-unknown-none-elf` green;
-  `cargo tree` shows no dependency
+- [x] `cargo build -p bwk-qr-protocol --target riscv32imac-unknown-none-elf` green,
+  with and without `ffi`; `cargo tree` shows no dependency
 - [x] All four message pairs round-trip through the codec + BBQR (encode ->
   reassemble)
 - [x] Version-compat tests pass both directions (older<->newer)
@@ -165,6 +165,27 @@ Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
 - [ ] Linux `-DSILENT_ENABLE_CAMERA=ON`; scanning a printed address QR fills the
   recipient field
 - [ ] Static `qtmultimedia` proven on Linux (Windows/macOS tracked separately)
+
+---
+
+## Phase 3.5 - C binding for a bare-metal signer (feature `ffi`)
+
+- [x] `#[repr(C)]` mirrors of the message tree in `qr-protocol/src/ffi/types.rs`,
+  tagged unions keyed by the existing wire codes; `NULL`/`-1` for absent
+- [x] `bwk_qr_request_decode` + `bwk_qr_request_free` (Rust to C) and
+  `bwk_qr_response_encode` + `bwk_qr_buf_free` (C to Rust), the signer direction
+- [x] Flat `int32_t` codes, `100+` reader, `200+` decode, `300+` encode, `400+` the
+  binding, each carrying the static message the Rust `Display` uses
+- [x] Hand-written `include/bwk_qr_protocol.h`; no cbindgen, no build script
+- [ ] `tests/ffi.rs` over the `#[repr(C)]` types, so CI needs no C toolchain;
+  `tests/layout.rs` pins every size and alignment against the header
+
+### Acceptance (Phase 3.5)
+- [ ] `cargo test -p bwk-qr-protocol --features ffi` green
+- [ ] `cargo +nightly miri test` green over the raw-pointer paths, no leaks
+- [ ] Every mirror type matches what a C compiler computes from the header
+- [x] `examples/signer.c` compiles with `-Wall -Wextra`, links against a staticlib
+  shim and round-trips a real request
 
 ---
 
@@ -212,7 +233,8 @@ Wires goal 2 into Silent. Needs Phase 2 (protocol) + Phase 3 (camera/scan).
   no `cc`, no build script
 - [x] `protocol` wire format is versioned and append-only; the `since` convention is
   stated at the top of `qr-protocol/src/lib.rs` and matches `ENCODING.md`
-- [x] `bwk-qr-protocol` stays `no_std` and dependency-free by default
+- [x] `bwk-qr-protocol` stays `no_std` and dependency-free by default, and the C
+  header stays in step with `ffi::types`
 - [ ] Each bwk change: bump `silent/Cargo.toml` rev + refresh `Cargo.lock` +
   `flake.lock` + `flake.nix` `outputHashes`
 - [x] PLAN.md and ROADMAP.md kept in sync with reality
