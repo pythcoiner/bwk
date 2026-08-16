@@ -52,6 +52,8 @@ Blindbit).
 | bwk-descriptor | Descriptor construction, SpkDerivator                 |
 | bwk-keys       | Key derivation (OXpriv, OXpub)                        |
 | bwk-p2p        | Bitcoin P2P client                                    |
+| bwk-qr         | QR generation, scanning, BBQR framing                 |
+| bwk-qr-protocol| Signing-flow message codec (no_std, C binding)        |
 | bwk-backoff    | Exponential backoff                                   |
 | bwk-utils      | Test helpers                                          |
 +----------------+-------------------------------------------------------+
@@ -66,6 +68,8 @@ See crate READMEs:
 [bwk-descriptor](descriptor/README.md),
 [bwk-keys](keys/README.md),
 [bwk-p2p](p2p/README.md),
+[bwk-qr](qr/README.md),
+[bwk-qr-protocol](qr-protocol/README.md),
 [bwk-backoff](backoff/README.md),
 [bwk-utils](utils/README.md)
 

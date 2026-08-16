@@ -4,10 +4,11 @@ Single source of truth for progress. Check items off (`[x]`) as they land. Each
 phase has explicit acceptance criteria; do not mark a phase done until every
 criterion passes. See `PLAN.md` for the design these items implement.
 
-The crate has two goals: (1) provide QR generation + scanning via pure-Rust
-crates; (2) implement the miniscript QR signing-flow protocol with our own
-hand-rolled, versioned binary encoding, framed over the `bbqr` crate. Phases below
-build both, interleaved with Silent integration.
+There are two goals: (1) provide QR generation + scanning via pure-Rust crates;
+(2) implement the miniscript QR signing-flow protocol with our own hand-rolled,
+versioned binary encoding, framed over BBQR. Phases below build both, interleaved
+with Silent integration. The codec lives in `bwk-qr-protocol` so a bare-metal signer
+can take it without the QR layer; `bwk-qr` is the QR and framing layer on top.
 
 Legend: `[ ]` todo, `[~]` in progress, `[x]` done. Update this file in the same
 commit as the work it describes.
@@ -20,47 +21,51 @@ commit as the work it describes.
 - [x] Write `qr/PLAN.md` (design)
 - [x] Write `qr/ROADMAP.md` (this checklist)
 - [x] Write `qr-protocol/ENCODING.md` (authoritative, transport-agnostic encoding)
-- [ ] Have the docs reviewed by pythcoiner before any code
+- [x] Have the docs reviewed by pythcoiner before any code
 
 ### Crate skeleton (only after docs are approved)
-- [ ] Add `"qr"` to `members` in `bwk/Cargo.toml`
-- [ ] `qr/Cargo.toml`: package `bwk-qr`; features `gen` (default), `scan`,
-  `protocol` (implies `gen`+`scan`); optional deps `qrcodegen` (behind `gen`),
+- [x] Add `"qr"` and `"qr-protocol"` to `members` in `bwk/Cargo.toml`
+- [x] `qr/Cargo.toml`: package `bwk-qr`; features `gen`, `scan`, `protocol`
+  (implies `gen`+`scan`), all on by default; optional deps `qrcodegen` (behind `gen`),
   `quircs` (behind `scan`),
-  `bbqr` (`default-features = false`) + `bitcoin` (behind `protocol`); no serde/CBOR,
-  no build script
-- [ ] `qr/src/lib.rs`: module decls (`error`, `gen`, `scan`, `protocol`)
-  feature-gated; crate docs stating the two goals
-- [ ] `qr/src/error.rs`: `Error` enum (with `None` variant) + `Display`/`std::error::Error`
-- [ ] `qr/src/{gen,scan}.rs` (internal helpers) and
-  `qr/src/protocol/{mod,message,codec,frame}.rs` (public surface): types +
-  signatures with `todo!()` bodies so the API compiles
+  `bwk-qr-protocol` (behind `protocol`); no serde/CBOR, no build script
+- [x] `qr-protocol/Cargo.toml`: package `bwk-qr-protocol`; `no_std` + `alloc`, no
+  dependency by default; feature `bitcoin` for the type adapters
+- [x] `qr/src/lib.rs`: module decls (`config`, `error`, `image`, `gen`, `scan`,
+  `encoder`, `decoder`, `bbqr`, `protocol`) feature-gated; crate docs stating the
+  two goals
+- [x] `qr/src/error.rs`: `Error` enum + `Display`/`std::error::Error`
+- [x] `qr/src/{gen,scan}.rs` (internal helpers), `qr/src/{encoder,decoder,bbqr}.rs`
+  (Encoder/Decoder and the BBQR framing) and
+  `qr-protocol/src/{lib,types,request,response,reader,encode,decode}.rs`
+  (the codec)
 
 ### Acceptance (Phase 0)
-- [ ] `cargo check -p bwk-qr` clean across: default, `--features scan`,
+- [x] `cargo check -p bwk-qr` clean across: default, `--features scan`,
   `--features protocol`, `--all-features`
-- [ ] `cargo clippy -p bwk-qr --all-features` clean; `cargo fmt --check` clean
-- [ ] No Silent repo changes
+- [x] `cargo clippy -p bwk-qr --all-features` clean; `cargo fmt --check` clean
+- [x] No Silent repo changes
 
 ---
 
 ## Phase 1 - Generation (feature `gen`) + Silent Receive QR
 
 ### bwk-qr
-- [ ] Add `qrcodegen` (feature `gen`) to `qr/Cargo.toml`
-- [ ] `gen.rs` (internal): `CorrectionLevel`, `Image`, `encode -> Option<Image>`;
+- [x] Add `qrcodegen` (feature `gen`) to `qr/Cargo.toml`
+- [x] `gen.rs` (internal): `CorrectionLevel`, `Image`, `encode -> Result<Image>`;
   rasterize the qrcodegen modules (`get_module`) into a grayscale `Image`; `None` if
   too long
-- [ ] Public plain-QR path `Encoder::from_str(&str) -> Vec<Image>` (in
-  `frame.rs`/protocol): a single plain frame for anything that fits one QR
-  (addresses always do), BBQR-animated only when too large for one code
-- [ ] `tests/gen.rs`: known-vector sizes; long SP-address payload within v40
-- [ ] `cargo test -p bwk-qr --features gen` green; clippy/fmt clean
+- [x] Public plain-QR path `Encoder::encode_text(&str) -> Result<Image>` (in
+  `encoder.rs`): a single plain frame for anything that fits one QR (addresses
+  always do), BBQR-animated only when too large for one code
+- [x] `tests/gen.rs`: known-vector sizes; long SP-address payload within
+  `max_qr_version`
+- [x] `cargo test -p bwk-qr --features gen` green; clippy/fmt clean
 
 ### Silent (separate repo; bumps bwk rev)
 - [ ] Add `bwk-qr` (features `gen`) to `silent/Cargo.toml`; bump `bwk` git `rev`
 - [ ] Bridge: `struct Image { data, width, height }` +
-  `fn qr_encode(data: &str) -> Image` via `Encoder::from_str` (empty `data` =
+  `fn qr_encode(data: &str) -> Image` via `Encoder::encode_text` (empty `data` =
   failure) in `lib.rs` + `account.rs`
 - [ ] `./build.sh` regenerates `lib/include/silent.h`
 - [ ] Rewrite `src/catalog/panels/receive/QrCode.cpp::paintEvent` to blit the raster
@@ -69,7 +74,7 @@ commit as the work it describes.
 - [ ] Refresh `Cargo.lock`, `flake.lock`, `flake.nix` `outputHashes`
 
 ### Acceptance (Phase 1)
-- [ ] `cargo test -p bwk-qr` green; clippy/fmt clean
+- [x] `cargo test -p bwk-qr` green; clippy/fmt clean
 - [ ] `just br`: Receive shows real QR for SP / segwit / taproot addresses
 - [ ] Phone wallet scan decodes to exactly the displayed address
 - [ ] Address-history modal QRs render; empty state still blank
@@ -81,55 +86,69 @@ commit as the work it describes.
 
 Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
 
-- [ ] Pin `bbqr` version; confirm `Split` / `SplitOptions` / `ContinuousJoiner` /
-  `FileType::Binary` API against the pinned release
-- [ ] `protocol/message.rs`: `Request`/`Response` enums + payload structs for Get
-  Xpubs, Register Descriptor, Address Verification, Signing (per PLAN 4.1); plain
-  types (no serde); reuse `bitcoin` types (`Psbt`, `Xpub`, `Fingerprint`,
-  `DerivationPath`); descriptors as `DescriptorBody` (BIP-380 string or BIP-388
-  keys+policy); silent-payment `SpShare`/`SpOutput` in the Signing response
-- [ ] `protocol/codec.rs`: internal binary encode/decode implementing `ENCODING.md`
-  exactly; varint (CompactSize) + primitive helpers; envelope magic + `version` +
-  `msg_type`; append-only field ordering with each field's `since` documented inline
-- [ ] Validation: at most one `bip380`/`bip388` per Register request; signing
-  response is exactly one of Psbt / Signatures; `SigKind` mapping (incl. silent
-  payment); truncated/garbage -> `Error::Decode`
-- [ ] `protocol/frame.rs`: `Encoder` (`config`; `from_str` for plain QRs;
-  `from_request`/`from_response` -> `Vec<Image>` via
-  `Split::try_from_data(.., FileType::Binary, ..)`); `Config` with sane QR-density
+- [x] Implement the generic-binary BBQR subset using the `B` file type
+- [x] `qr-protocol/src/lib.rs`: `Request`/`Response` (request id + body enum) and the
+  `Message` the decoder returns, with the payload structs for Get Xpubs, Register
+  Descriptor, Address Verification, Signing split across `request.rs` and
+  `response.rs` (per PLAN 4.1); plain types (no serde); byte-level leaf types in
+  `types.rs` (`Xpub`, `Fingerprint`, `PublicKey`, `DerivationPath`, and the PSBT as an
+  opaque `Vec<u8>`) so the crate needs no `bitcoin` dependency, with `From`/`TryFrom`
+  adapters behind the `bitcoin` feature;
+  descriptors as `DescriptorBody` (BIP-380 string or BIP-388 keys+policy);
+  a silent-payment send is answered with the full PSBT, which already carries its
+  BIP-375 fields
+- [x] `qr-protocol/src/{reader,encode,decode}.rs`: binary encode/decode implementing
+  `ENCODING.md` exactly; varint (CompactSize) + primitive helpers; envelope magic +
+  `version` + `msg_type` + `request_id`; append-only field ordering, with the `since`
+  convention stated once at the top of `lib.rs` (every field there is v1)
+- [x] Strings are nul-free UTF-8 on both sides, so a nul-terminated consumer cannot
+  truncate one; a vector `COUNT` never reserves before its items are read
+- [x] Validation: at most one `bip380`/`bip388` per Register request; signing
+  response is exactly one of Psbt / Signatures; per-kind `SIG_KIND` mapping;
+  reserved capability bits and colliding error codes rejected on encode;
+  truncated/garbage -> `Error::Decode`
+- [x] `Encoder` (`new`; `encode_text` for plain QRs;
+  `encode_request`/`encode_response` -> `Vec<Image>`); `Config` with sane QR-density
   defaults
-- [ ] `protocol/frame.rs`: `Decoder` wrapping `ContinuousJoiner` + `quircs` scan
-  (`process(&Image)`; `progress`/`error`/`request`/`response`/`string`/`reset`,
-  running the codec on `Joined.data`; `string()` returns decoded plain-QR text)
-- [ ] Map `bbqr` errors into `Error::Bbqr`
-- [ ] `tests/protocol.rs`: round-trip per message (`Encoder::from_* -> render ->
-  Decoder`); version-compat (internal codec: v1 ignores a synthetic newer trailing
-  field; newer reads a v1 blob); ordered + shuffled frames; malformed frame ->
-  `Decoder::error()`; assert BBQR header (`B$`, `FileType::Binary`)
+- [x] `Decoder` wrapping BBQR reassembly + `quircs` scan
+  (`process(&Image)`; `progress`/`reset`, running the codec on joined data)
+- [x] Map BBQR errors into `Error::Bbqr`
+- [x] `tests/protocol.rs`: round-trip per message (`Encoder::encode_* -> render ->
+  Decoder`); version-compat (a v1 parser accepts a newer version and ignores its
+  trailing field, and still reads a plain v1 blob); ordered, shuffled and duplicate
+  frames; two messages through one `Decoder`; malformed and truncated blobs; the
+  encode-side capability and error-code invariants. The BBQR header (`B$`, generic
+  binary file type `B`) is asserted by the unit tests in `src/bbqr.rs`, the only
+  place the raw part string is reachable.
 
 ### Acceptance (Phase 2)
-- [ ] `cargo test -p bwk-qr --features protocol` green; clippy/fmt clean
-- [ ] All four message pairs round-trip through the codec + BBQR (encode ->
+- [x] `cargo test -p bwk-qr-protocol --all-features` and
+  `cargo test -p bwk-qr --features protocol` green; clippy/fmt clean
+- [x] `cargo build -p bwk-qr-protocol --target riscv32imac-unknown-none-elf` green;
+  `cargo tree` shows no dependency
+- [x] All four message pairs round-trip through the codec + BBQR (encode ->
   reassemble)
-- [ ] Version-compat tests pass both directions (older<->newer)
+- [x] Version-compat tests pass both directions (older<->newer)
 
 ---
 
 ## Phase 3 - Scanning (feature `scan`) + Silent camera
 
 ### bwk-qr
-- [ ] Add `quircs` (feature `scan`) to `qr/Cargo.toml`
-- [ ] `scan.rs` (internal): `Decoded { text, bytes }`,
-  `decode(&Image, bool)`; assert `data.len() == width*height` ->
-  `BadFrame`; run `Quirc::identify` + `Code::decode`; `find_inverted` inverts and
-  rescans. Public plain-scan path is `Decoder::string()`
-- [ ] `tests/scan.rs`: render generated `Image` (already grayscale) -> decode ->
-  equals original (needs `gen` + `scan`)
+- [x] Add `quircs` (feature `scan`) to `qr/Cargo.toml`
+- [x] `scan.rs` (internal): `Scanned { text, bytes }`,
+  `scan(&Image, bool, usize)`; assert `data.len() == width*height` ->
+  `BadFrame`; run `Quirc::identify` + `Code::decode`, skipping a candidate that
+  fails to decode; `find_inverted` inverts and rescans. Public plain-scan path is
+  `Decoder::process()`
+- [x] `tests/scan.rs`: render generated `Image` (already grayscale) -> decode ->
+  equals original (needs `gen` + `scan`); inverted frames; a frame with no code
+  decodes to nothing; the pixel bound is enforced
 
 ### Silent (camera; gated)
 - [ ] Enable `scan`; bump rev + lock/flake hashes
 - [ ] Bridge: `fn qr_decode_grayscale(gray: &[u8], width: u32, height: u32) ->
-  Vec<String>` via a `Decoder` (`process` the frame, read `string()`)
+  Vec<String>` via a `Decoder` (`process` the frame)
 - [ ] `CMakeLists.txt`: `option(SILENT_ENABLE_CAMERA OFF)`; when ON
   `find_package(Qt6 ... Multimedia MultimediaWidgets)`, link `Qt6::Multimedia`,
   define `SILENT_ENABLE_CAMERA=1`, update whole-archive lists
@@ -142,7 +161,7 @@ Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
   `#ifdef SILENT_ENABLE_CAMERA`
 
 ### Acceptance (Phase 3)
-- [ ] `cargo test -p bwk-qr --features "gen scan"` green (render->decode)
+- [x] `cargo test -p bwk-qr --features "gen scan"` green (render->decode)
 - [ ] Linux `-DSILENT_ENABLE_CAMERA=ON`; scanning a printed address QR fills the
   recipient field
 - [ ] Static `qtmultimedia` proven on Linux (Windows/macOS tracked separately)
@@ -154,12 +173,12 @@ Pure bwk-qr; no camera, no Silent UI. The heart of goal 2.
 Wires goal 2 into Silent. Needs Phase 2 (protocol) + Phase 3 (camera/scan).
 
 ### bwk-qr
-- [ ] Confirm `Decoder` covers frame-loss / out-of-order / duplicate parts;
+- [x] Confirm `Decoder` covers frame-loss / out-of-order / duplicate parts;
   add tests
 
 ### Silent
-- [ ] Bridge: build a `Sign` request from the prepared PSBT + wallet refs ->
-  `Encoder::from_request` -> animated frames
+- [ ] Bridge: build a `Sign` request from the prepared PSBT + `Descriptor` entries ->
+  `Encoder::encode_request` -> animated frames
 - [ ] Bridge: opaque `Box<Decoder>` (`process`, `progress`, `error`; extract the
   signed PSBT from `response()`)
 - [ ] Spike: can `bitcoin`/miniscript `finalize_mut()` finalize an
@@ -187,11 +206,13 @@ Wires goal 2 into Silent. Needs Phase 2 (protocol) + Phase 3 (camera/scan).
 ---
 
 ## Cross-cutting / done-when-shipping
-- [ ] `cargo clippy -p bwk-qr --all-features` + `cargo fmt --check` clean each phase
-- [ ] `gen` pulls a zero-dependency crate; `scan` adds only `quircs`' small tree;
+- [x] `cargo clippy --workspace --all-targets --all-features` + workspace-wide
+  `cargo fmt --check` clean each phase
+- [x] `gen` pulls a zero-dependency crate; `scan` adds only `quircs`' small tree;
   no `cc`, no build script
-- [ ] `protocol` wire format is versioned and append-only; each field's
-  introduction version documented in `codec.rs`, matching `ENCODING.md`
+- [x] `protocol` wire format is versioned and append-only; the `since` convention is
+  stated at the top of `qr-protocol/src/lib.rs` and matches `ENCODING.md`
+- [x] `bwk-qr-protocol` stays `no_std` and dependency-free by default
 - [ ] Each bwk change: bump `silent/Cargo.toml` rev + refresh `Cargo.lock` +
   `flake.lock` + `flake.nix` `outputHashes`
-- [ ] PLAN.md and ROADMAP.md kept in sync with reality
+- [x] PLAN.md and ROADMAP.md kept in sync with reality

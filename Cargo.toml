@@ -7,6 +7,7 @@ members = [
     "electrum",
     "backoff",
     "keys", "utils", "sign", "descriptor", "tx",
+    "qr", "qr-protocol",
     "persist",
     "p2p",
     "hwi", "hwi/cli",
@@ -55,6 +56,8 @@ thiserror = "2.0.0"
 getrandom = "0.2"
 corepc-node = { version = "0.10", features = ["download", "29_0"] }
 dns-lookup = "2.0"
+qrcodegen = "=1.8.0"
+quircs = "=0.10.3"
 
 # spdk dependencies
 secp256k1_spscan-sys = { path = "secp256k1_spscan-sys" }
@@ -76,4 +79,6 @@ bwk-descriptor = { path = "descriptor" }
 bwk-persist = { path = "persist" }
 bwk-utils = { path = "utils" }
 bwk-p2p = { path = "p2p" }
+bwk-qr = { path = "qr" }
+bwk-qr-protocol = { path = "qr-protocol" }
 bwk = { path = "bwk" }

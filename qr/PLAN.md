@@ -12,18 +12,18 @@
    specified in [`ENCODING.md`](../qr-protocol/ENCODING.md): the request/response payloads (Get
    Xpubs, Register Descriptor, Address Verification, Signing), serialized with our
    own hand-rolled, versioned binary encoding and chunked across animated QR frames
-   using the `bbqr` crate.
+   using BBQR generic-binary framing.
 
 The two goals are layered and independently usable: a consumer enables the `gen`
-feature and calls `Encoder::from_str` for a plain QR (zero extra Rust deps), or the
-full `protocol` (which adds only `bbqr` for framing and `bitcoin` for wallet types)
+feature and calls `Encoder::encode_text` for a plain QR, or the full `protocol`
+(which adds `bitcoin` for wallet types)
 for the signing flow. The first consumer is the
 Silent wallet, which reaches the crate through Silent's existing CXX (C++ <->
 Rust) bridge.
 
-> Status: this document and `ROADMAP.md` are the deliverable for now. No crate
-> skeleton or code exists yet. `ROADMAP.md` is the authoritative, living
-> checklist; this file is the authoritative design. Keep both in sync.
+> Status: the crate skeleton, QR generation/scanning, protocol message model,
+> hand-written codec, and generic-binary BBQR framing are implemented. The wire
+> magic still uses `BIPXXX` until a BIP number is assigned.
 
 ---
 
@@ -33,7 +33,7 @@ Rust) bridge.
 - Goal 1: safe `encode` (bytes -> `Image`) and `decode` (frame ->
   payloads) over pure-Rust crates (`qrcodegen`, `quircs`).
 - Goal 2: typed protocol messages for the four payload pairs; our own versioned
-  binary wire format; BBQR framing/reassembly via the `bbqr` crate; a streaming
+  binary wire format; BBQR framing/reassembly; a streaming
   decoder for animated multi-part scans.
 
 ### Out of scope
@@ -43,7 +43,7 @@ Rust) bridge.
   `account.rs` / `bwk-sp`, or a hardware device).
 - No UR (`ur:...`) framing in v1. BBQR is the chosen multi-part format.
 - No async, no threads, no global state. The only stateful type is the protocol
-  stream decoder (which wraps `bbqr`'s `ContinuousJoiner`).
+  stream decoder.
 
 ### A note on the protocol's maturity
 The protocol is an explicit **draft**. `bwk-qr` defines its own wire format (section
@@ -64,7 +64,8 @@ by appending (see the candidates listed in `ENCODING.md`).
    rest of the surface.
 3. The `gen` feature adds **no runtime dependencies**. The `scan` feature adds only
    `quircs` and its small tree (`num-derive`, `num-traits`, `thiserror`); no `image`
-   at runtime.
+   at runtime. Every feature is on by default, so a consumer that wants generation
+   alone builds with `--no-default-features --features gen`.
 4. Both crates are 1:1 ports of the C libraries first considered, so behaviour is on
    par: multi-code-per-frame is preserved; inverted (white-on-black) QRs are not
    auto-detected (the internal scan helper inverts and rescans).
@@ -72,11 +73,12 @@ by appending (see the candidates listed in `ENCODING.md`).
 **Layer 2 (protocol) stays independent too:**
 5. The wire encoding is **hand-rolled binary**, defined here. No `serde`, no CBOR,
    no external serialization crate. We own the byte layout and the versioning.
-6. The `protocol` feature pulls `bbqr` (framing, not reimplemented) and
-   `bitcoin` (for `Psbt`/`Xpub`/`Fingerprint`/`DerivationPath` and their existing
-   byte serializations), and implies `gen` + `scan` (the Encoder renders QR, the
-   Decoder scans it). Descriptors are carried as validated strings (the device
-   parses them), so no `miniscript` dependency.
+6. The `protocol` feature pulls `bwk-qr-protocol` and implies `gen` + `scan` (the
+   Encoder renders QR, the Decoder scans it). The codec itself carries `Psbt`,
+   `Xpub`, `Fingerprint` and `DerivationPath` as their byte serializations rather
+   than as `bitcoin` types, so it needs no dependency at all; `bwk-qr` turns on its
+   `bitcoin` feature for the adapters. Descriptors are carried as validated strings
+   (the device parses them), so no `miniscript` dependency either.
 
 **Both layers:** portable across the targets Silent ships (Linux, Windows/mingw,
 macOS x86_64/arm64) under the existing Nix toolchain, with no per-target C tweaks.
@@ -87,7 +89,8 @@ macOS x86_64/arm64) under the existing Nix toolchain, with no per-target C tweak
 
 ### 3.1 Crates
 - **Generation, `qrcodegen` 1.8.0** (MIT): Nayuki's own Rust port, **zero runtime
-  dependencies**. `QrCode::encode_binary(&[u8], QrCodeEcc)` for byte mode;
+  dependencies**. `QrCode::encode_text` for plain payloads and
+  `encode_segments_advanced` with an alphanumeric segment for BBQR parts;
   `get_module(x, y) -> bool` and `size() -> i32` to rasterize the modules. Behind
   the `gen` feature.
 - **Scanning, `quircs` 0.10.3** (MIT): a faithful `quirc` port.
@@ -98,19 +101,25 @@ macOS x86_64/arm64) under the existing Nix toolchain, with no per-target C tweak
 
 Both are 1:1 ports of the C libraries first considered (Nayuki qrcodegen, quirc), so
 behaviour parity is high. Neither pulls `image`, `nalgebra`, or a C toolchain. BBQR
-is handled by the `bbqr` crate (section 4.2), not reimplemented.
+generic-binary framing is implemented in the crate because the published `bbqr`
+crate does not expose the generic binary file type.
 
 ### 3.2 Implementation notes
-- **Generation:** `encode_binary` takes `&[u8]` and returns an owned `QrCode`; we
-  rasterize its modules (`get_module`) into an `Image` (row-major grayscale, one
-  pixel per module plus the standard quiet zone, `0` = dark, `255` = light).
-  Byte-mode capacity is the v40 limit (2953 bytes); larger payloads are chunked at
-  the BBQR layer, not here. `DataTooLong` -> `Error::TooLong`.
+- **Generation:** qrcodegen returns an owned `QrCode`; we rasterize its modules
+  (`get_module`) into an `Image` (row-major grayscale with a quiet zone, `0` =
+  dark, `255` = light). Generated images use a small module scale so the scanner
+  can consume them directly.
+  A plain payload takes the smallest version that fits within
+  `Config::max_qr_version`; a BBQR part is pinned at `max_qr_version` so every
+  animated frame renders at the same size. Payloads too large for one code are
+  chunked at the BBQR layer, not here. `DataTooLong` -> `Error::TooLong`.
 - **Scanning:** `frame.data` must be exactly `width*height` bytes, else
   `Error::BadFrame`. Feed it to `Quirc::identify`, then collect each decoded `Code`
-  into a `Decoded { text, bytes }` (`bytes` is the raw payload; `text` is its
-  lossy-UTF-8 view). quircs does not auto-detect inverted (white-on-black) frames,
-  so `find_inverted` inverts the buffer and rescans.
+  into a `Scanned { text, bytes }` (`bytes` is the raw payload; `text` is its
+  lossy-UTF-8 view); a candidate code that fails to decode is skipped, since a
+  camera frame routinely holds partial or blurred codes. quircs does not
+  auto-detect inverted (white-on-black) frames, so `find_inverted` inverts the
+  buffer and rescans.
 
 ### 3.3 Internal primitives
 
@@ -123,17 +132,17 @@ pub struct Image { pub data: Vec<u8>, pub width: u32, pub height: u32 }
 
 // internal (feature `gen`): bytes -> QR Image
 enum CorrectionLevel { Low, Medium, Quartile, High }       // -> qrcodegen::QrCodeEcc
-fn encode(data: &[u8], level: CorrectionLevel) -> Option<Image>;   // None if too long
+fn encode_text(data: &str, level: CorrectionLevel, max_version: u8) -> Result<Image, Error>;
 
 // internal (feature `scan`): camera Image -> decoded payloads
-struct Decoded { text: String, bytes: Vec<u8> }
-fn decode(frame: &Image, find_inverted: bool) -> Vec<Decoded>;
+struct Scanned { text: String, bytes: Vec<u8> }
+fn scan(frame: &Image, find_inverted: bool, max_pixels: usize) -> Result<Vec<Scanned>, Error>;
 ```
 
 `Image` is an 8-bit grayscale raster, row-major, `width*height` bytes (camera frame
-in, QR frame out; generated QR `0` = dark, `255` = light, one pixel per module plus
-the quiet zone; the consumer scales for display). `find_inverted` rescans an inverted
-copy (quircs has no built-in inversion).
+in, QR frame out; generated QR `0` = dark, `255` = light, scaled modules plus the
+quiet zone). `find_inverted` rescans an inverted copy (quircs has no built-in
+inversion).
 
 ---
 
@@ -141,49 +150,63 @@ copy (quircs has no built-in inversion).
 
 ### 4.1 Payload model (from ENCODING.md)
 Four request/response pairs. Software wallet -> device for all requests. Field
-names mirror ENCODING.md; types use `bitcoin` where natural.
+names mirror ENCODING.md; the leaf types are the byte-level ones from
+`qr-protocol/src/types.rs`, with `bitcoin` adapters behind a feature.
 
 1. **Get Xpubs**
    - Request: `derivation_paths: Vec<DerivationPath>`
-   - Response: `xpubs: Vec<Xpub>` (order matches request), `fingerprint:
+   - Response: `xpubs: Vec<Xpub>` (78 bytes each, order matches request), `fingerprint:
      Fingerprint`, `model: String` (16-byte NUL-padded), `version: Version { major:
      u16, minor: u16, patch: u32, flag: ReleaseFlag }`, `capabilities: Capabilities`
      (32-bit flags). All mandatory.
 2. **Register Descriptor**
-   - Request: `wallet: String` (alias), `descriptor: Option<DescriptorBody>` (absent
-     = status query); `DescriptorBody` is a `FORM` (BIP-380 descriptor, or BIP-388
-     wallet policy = keys vector + policy template) plus its body
-   - Response: `wallet: String`, `registered: Option<bool>`, `por: Option<Vec<u8>>`
-     (proof of registration). A failed registration is an error response, not a body
-     field.
+   - Request: `descriptor_alias: String`, `descriptor: Option<DescriptorBody>`
+     (absent = status query); `DescriptorBody` is a `FORM` (BIP-380 descriptor, or
+     BIP-388 wallet policy = keys vector + policy template) plus its body
+   - Response: `descriptor_alias: String`, `registered: Option<bool>`,
+     `stored: Option<bool>` (device persisted the descriptor under the alias, so
+     later requests may reference it by alias alone; absent means the device does
+     not report it and the wallet must assume it did not), `por: Option<Vec<u8>>`
+     (proof of registration). A failed registration is an error response, not a body field.
 3. **Address Verification**
-   - Request: `wallet: String`, `deriv: DerivationPath`, `address: Option<String>`,
-     `descriptor: Option<DescriptorBody>`, `por: Option<Vec<u8>>`
+   - Request: `descriptor_alias: String`, `deriv: DerivationPath`,
+     `address: Option<String>`, `descriptor: Option<DescriptorBody>`,
+     `por: Option<Vec<u8>>`
    - Response: `uri: Option<String>` (BIP-21)
 4. **Signing**
-   - Request: `wallets: Vec<WalletRef { alias: String, descr: DescriptorBody, por:
-     Option<Vec<u8>> }>`, `psbt: Psbt`, `want_kind: Option<Kind>` (advisory)
+   - Request: `descriptors: Vec<Descriptor { alias: String, body: DescriptorBody,
+     por: Option<Vec<u8>> }>`, `psbt: Vec<u8>` (BIP-174), `want_kind: Option<Kind>`
    - Response (either `Kind`):
-     - `Psbt(Psbt)`, full PSBT with partial sigs and, for silent-payment sends, the
+     - `Psbt(Vec<u8>)`, full PSBT with partial sigs and, for silent-payment sends, the
        BIP-375 shares/proofs and derived output scripts, or
-     - `Signatures { sigs: Vec<SigEntry>, sp_shares: Vec<SpShare>, sp_outputs:
-       Vec<SpOutput> }`. A `SigEntry` carries the key material the coordinator needs
-       to place the signature in its PSBT, so its fields depend on the kind: segwit
-       has `{ input, public_key, signature }`, tapkey `{ input, signature }`, taptree
-       `{ input, xonly_public_key, tap_leaf_hash, signature }`. No control block is
-       sent, the coordinator rebuilds it from the descriptor at finalize time.
-       `SpShare { input: u32 (0xFFFFFFFF = aggregate), scan_key: [u8; 33],
-       ecdh_share: [u8; 33], dleq_proof: [u8; 64] }`;
-       `SpOutput { index: u32, script_pubkey: Vec<u8> }`
+     - `Signatures(Vec<SignatureEntry>)`. `SignatureEntry` carries the key material
+       the coordinator needs to place the signature in its PSBT, so its fields depend
+       on the kind: `Ecdsa { input, public_key, signature }`, `TapKey { input,
+       signature }`, `TapScript { input, xonly_public_key, tap_leaf_hash, signature
+       }`. No control block is sent, the coordinator rebuilds it from the descriptor
+       at finalize time. A silent-payment send has no signatures-only form, so the
+       signer answers it with the `Psbt` variant whatever `want_kind` asked for
 
-Modeled in Rust as two enums plus the payload structs:
+Modeled in Rust as a request id paired with a body enum, plus the payload structs:
 ```rust
-pub enum Request  { None, GetXpubs(..), RegisterDescriptor(..), VerifyAddress(..), Sign(..) }
-pub enum Response { None, Xpubs(..), Registration(..), AddressUri(..), Signed(..),
-                    Error { code: u8, message: String } }  // 1-byte code, 32-byte msg
+// mod.rs
+pub struct RequestId(pub [u8; 16]);
+pub struct Request  { pub id: RequestId, pub body: request::Body }
+pub struct Response { pub id: RequestId, pub body: response::Body }
+
+// request.rs
+pub enum Body { GetXpubs(..), RegisterDescriptor(..), VerifyAddress(..), Sign(..) }
+
+// response.rs
+pub enum Body { Xpubs(..), Registration(..), AddressUri(..), Signed(..), Error(ErrorBody) }
 ```
-A `Response::Error` encodes with the `STATUS` bit set and the standard error body
-(`ENCODING.md`); the ok variants encode with `STATUS` = 0.
+The responder echoes the request id, so a wallet can pair a response with the
+request it sent. `response::Body::Error` encodes with the `STATUS` bit set and the
+standard error body (`ENCODING.md`); the ok variants encode with `STATUS` = 0.
+`ErrorCode` is typed: the eleven standard codes, `Vendor` (always `0xFF`, meaning
+carried by the message), and `Unknown(u8)` for a code reserved for a future
+version, which decodes and re-encodes unchanged so an older parser never rejects
+a newer signer's code.
 
 ### 4.2 Wire format (hand-rolled, versioned, append-only)
 
@@ -197,7 +220,7 @@ In brief (full detail in `ENCODING.md`):
   + `REQUEST_ID` (16 opaque bytes, echoed by the responder) + a per-type `BODY`.
 - `MSG_TYPE` packs `DIRECTION` (bit 7) | `STATUS` (bit 6, ok/error) | `TYPE` (bits
   5-0). An error response (`STATUS` = 1) carries the standard error body: a 1-byte
-  `ERROR_CODE` (global table, `0xFF` vendor-specific) + a 32-byte NUL-padded
+  `ERROR` (global table, `0xFF` vendor-specific) + a 32-byte NUL-padded
   `ERROR_MESSAGE`.
 - Counts and lengths use compact size; fixed multi-byte integers are big-endian;
   optional fields use a 1-byte presence prefix; vectors use a compact-size count.
@@ -213,32 +236,20 @@ The message bodies, value tables (`TYPE`, `FORM`, `KIND`, `SIG_KIND`, error code
 capability bits), the versioning and error rules, and worked byte examples are all in
 `ENCODING.md`.
 
-### 4.3 Framing: BBQR via the `bbqr` crate
-The encoded message bytes are split into animated parts, tagged
-`FileType::Binary` (our own format, not PSBT/CBOR):
-```rust
-use bbqr::{split::{Split, SplitOptions}, file_type::FileType,
-           continuous::{ContinuousJoiner, ContinuousJoinResult},
-           header::{Encoding, Version}};
-let split = Split::try_from_data(&wire, FileType::Binary, SplitOptions {
-    encoding: Encoding::Zlib,            // BBQR-level deflate; falls back if larger
-    min_split_number: 1, max_split_number: 1295,
-    min_version: Version::V03, max_version: Version::V20, // bound QR density
-})?;
-let parts: Vec<String> = split.parts;    // Encoder rasterizes these into Vec<Image>
-```
-BBQR owns base32/zlib/chunking/ordering and the 8-char `B$..` header; we do not
-reimplement any of it. Raw PSBTs (for signers that speak plain BBQR rather than
-this protocol) can also be framed directly as `FileType::Psbt`.
+### 4.3 Framing: BBQR generic binary
+The current implementation ships a small generic-binary BBQR subset using hex
+encoding and the `B` file type because the published `bbqr` crate does not yet
+expose `FileType::Binary`. Raw PSBT framing can be added once a fixed upstream
+or pinned fork is available.
 
-Reassembly wraps `bbqr::ContinuousJoiner`: feed scanned strings until
-`ContinuousJoinResult::Complete(Joined)`, then decode `Joined.data` with our codec
-back into a `Request`/`Response`.
+Reassembly accepts shuffled frames, rejects conflicting duplicates, and decodes
+the joined bytes with the protocol codec. Completing a message clears the
+reassembly state, so the same `Decoder` can take the next message straight away.
 
-### 4.4 External API (`src/protocol/`)
+### 4.4 External API
 
-Two structs plus `Config`. State is read through accessors that return the
-`None`-variant enums, so no `Result` appears in the surface.
+Two structs plus `Config`, re-exported from the crate root. Rust callers get
+`Result` and typed decoded values.
 
 ```rust
 #[derive(Debug, Clone)]
@@ -248,37 +259,33 @@ impl Default for Config { /* sane density defaults */ }
 // Build the animated frames for a message.
 pub struct Encoder { /* ... */ }
 impl Encoder {
-    pub fn config(cfg: Config) -> Self;
-    pub fn from_str(&self, s: &str)            -> Vec<Image>; // plain string, e.g. an address
-    pub fn from_request(&self, req: Request)   -> Vec<Image>; // one Image per frame
-    pub fn from_response(&self, res: Response) -> Vec<Image>;
+    pub fn new(cfg: Config) -> Result<Self, Error>;
+    pub fn encode_text(&self, s: &str) -> Result<Image, Error>;
+    pub fn encode_request(&self, req: &Request) -> Result<Vec<Image>, Error>;
+    pub fn encode_response(&self, res: &Response) -> Result<Vec<Image>, Error>;
 }
 
 // Feed grayscale camera frames; scans QR -> reassembles BBQR -> decodes the message.
 pub struct Decoder { /* ... */ }
 impl Decoder {
-    pub fn new() -> Self;
-    pub fn process(&mut self, frame: &Image);    // one grayscale camera frame
-    pub fn progress(&self) -> (u8, u8);          // (parts_seen, parts_total)
-    pub fn error(&self) -> Error;                // Error::None while healthy
-    pub fn request(&self) -> Request;            // Request::None until complete
-    pub fn response(&self) -> Response;          // Response::None until complete
-    pub fn string(&self) -> String;              // decoded plain (non-protocol) QR text; empty until one arrives
+    pub fn new(cfg: Config) -> Result<Self, Error>;
+    pub fn process(&mut self, frame: &Image) -> Result<Vec<Decoded>, Error>;
+    pub fn progress(&self) -> Option<Progress>;
     pub fn reset(&mut self);
 }
 ```
 
-`Encoder::from_*` returns one `Image` per animated frame, ready to blit. Dims travel
-with each `Image`, so frame size may vary and `Decoder::new()` needs no dimensions.
-`Decoder::process` takes one grayscale camera frame; once enough parts arrive,
-`request()` or `response()` yields the decoded message (whichever the completed
-message was) and `error()` reports any failure. Use `from_str`/`string()` for plain
-(non-protocol) address QRs; `from_request`/`from_response` with
-`request()`/`response()` for the signing-flow messages.
+Protocol encoding returns one `Image` per animated frame, ready to blit. Dims
+travel with each `Image`. `Decoder::process` takes one grayscale camera frame and
+returns decoded plain text or protocol messages. Use `encode_text` for plain
+address QRs and `encode_request`/`encode_response` for signing-flow messages.
 
 ---
 
 ## 5. Crate layout
+
+```
+The codec is its own crate so a bare-metal signer can take it without the QR layer.
 
 ```
 bwk/qr/
@@ -287,18 +294,35 @@ bwk/qr/
   ROADMAP.md         <- the living checklist
   src/
     lib.rs           <- public API, re-exports, crate docs
+    config.rs        <- Config (QR density and parser bounds)
     error.rs         <- Error enum
-    gen.rs           <- safe QR generation API           (feature: gen)
-    scan.rs          <- safe grayscale decode API         (feature: scan)
-    protocol/
-      mod.rs         <- Request/Response enums, re-exports (feature: protocol)
-      message.rs     <- payload structs (plain types, no serde)
-      codec.rs       <- hand-rolled binary encode/decode + version rule + compactsize
-      frame.rs       <- Encoder + Decoder (BBQR split/join)
+    image.rs         <- Image, the one raw-data type crossing the API
+    gen.rs           <- QR generation                     (feature: gen)
+    scan.rs          <- grayscale decode                  (feature: scan)
+    encoder.rs       <- Encoder (plain text + protocol -> frames)  (feature: gen)
+    decoder.rs       <- Decoder (frames -> Decoded, BBQR join)     (feature: scan)
+    bbqr.rs          <- BBQR generic-binary split/join    (feature: protocol)
   tests/
-    gen.rs           <- encode (+ self-decode where scan on), known vectors
+    plain.rs         <- plain text render -> scan round-trip
+    gen.rs           <- generation known vectors
     scan.rs          <- render -> grayscale -> decode round-trip (feature: scan)
-    protocol.rs      <- codec round-trip; version compat; encode -> scan reassembly
+    protocol.rs      <- encode -> render -> scan -> reassemble round-trip
+
+bwk/qr-protocol/
+  Cargo.toml
+  ENCODING.md        <- the authoritative wire format
+  src/
+    lib.rs           <- envelope types, Message, free encode/decode fns
+    types.rs         <- the byte-level leaf types, plus bitcoin adapters
+    request.rs       <- request payload structs (plain types, no serde)
+    response.rs      <- response payload structs (plain types, no serde)
+    reader.rs        <- byte cursor + compactsize
+    encode.rs        <- hand-rolled binary encode
+    decode.rs        <- hand-rolled binary decode + version rule
+  tests/
+    codec.rs         <- codec round-trip, version compat, rejection cases
+    vectors.rs       <- the ENCODING.md test vectors, checked both directions
+    *.json           <- the vectors themselves, one file per message group
 ```
 
 ---
@@ -308,25 +332,25 @@ bwk/qr/
 ```toml
 [package]
 name = "bwk-qr"
-edition = "2021"
+version = "0.0.1"
+edition.workspace = true
 
 [features]
-default  = ["gen"]
+default  = ["gen", "scan", "protocol"]
 gen      = ["dep:qrcodegen"]  # zero-dependency generation
 scan     = ["dep:quircs"]     # quirc port; pulls num-derive/num-traits/thiserror
-protocol = ["gen", "scan", "dep:bbqr", "dep:bitcoin"]
+protocol = ["gen", "scan", "dep:bwk-qr-protocol"]
 
 [dependencies]
-qrcodegen = { version = "1.8", optional = true }             # zero deps
-quircs    = { version = "0.10", optional = true }            # grayscale decode
-bbqr      = { version = "*", optional = true, default-features = false } # pin a version
-bitcoin   = { workspace = true, optional = true }            # Psbt/Xpub/etc.
+qrcodegen = { workspace = true, optional = true }             # zero deps
+quircs    = { workspace = true, optional = true }             # grayscale decode
+bwk-qr-protocol = { workspace = true, features = ["bitcoin"], optional = true }
 ```
 - `gen` adds a zero-dependency crate; `scan` adds only `quircs`' small tree;
-  `protocol` adds `bbqr` (framing) and `bitcoin` (wallet types) and implies
+  `protocol` adds `bwk-qr-protocol` (itself dependency-free) and implies
   `gen` + `scan` (the Encoder/Decoder do full QR I/O). No `serde`, no CBOR,
   no C toolchain.
-- Confirm and pin the exact `bbqr` version at implementation time.
+- A fixed `bbqr` release or pinned fork can replace the internal framing later.
 
 ---
 
@@ -334,8 +358,13 @@ bitcoin   = { workspace = true, optional = true }            # Psbt/Xpub/etc.
 
 Both `qrcodegen` and `quircs` are pure Rust: no `build.rs`, no `cc`, no C toolchain.
 The feature-gated optional deps keep unused code out (`gen` -> `qrcodegen`, `scan` ->
-`quircs`, `protocol` -> `bbqr`/`bitcoin`). Cross-compilation to the Silent targets is
+`quircs`, `protocol` -> `bwk-qr-protocol`). Cross-compilation to the Silent targets is
 whatever `cargo` does for a pure-Rust crate, nothing target-specific.
+
+`bwk-qr-protocol` goes further: it is `no_std` plus `alloc` with no dependency in its
+default configuration, so it cross-compiles to a bare-metal signer target. That is why
+it carries its own byte-level types instead of the `bitcoin` ones, which would drag in
+`secp256k1-sys` and its vendored C.
 
 ---
 
@@ -344,17 +373,19 @@ whatever `cargo` does for a pure-Rust crate, nothing target-specific.
 ```rust
 #[derive(Debug, Clone)]
 pub enum Error {
-    None,            // no error
-    TooLong,         // payload exceeds QR capacity
-    Encode,          // qrcodegen failed
-    BadFrame,        // grayscale buffer size != width*height
-    Bbqr(String),    // bbqr crate error (split/join)
-    Decode(String),  // truncated/invalid wire bytes
-    Protocol(String) // payload validation (e.g. >1 BIP form, bad sig kind)
+    TooLong,          // payload exceeds QR capacity
+    BadFrame,         // grayscale buffer size != width*height
+    Bbqr(bbqr::Error),          // BBQR split/join error
+    Encode(encode::Error),      // payload validation, from bwk-qr-protocol
+    Decode(decode::Error),      // truncated/invalid wire bytes, from bwk-qr-protocol
 }
-// impl Display + std::error::Error (Error::None renders as "no error").
-// No Result alias: fallible entry points expose state via accessors / Option.
+// impl Display + std::error::Error.
 ```
+
+`bwk-qr-protocol` keeps its own `reader::Error`, `decode::Error` and `encode::Error`.
+None of their messages interpolate a payload, so a single `info()` method per enum
+yields both the message and a stable numeric code. The messages carry a trailing nul
+so a nul-terminated consumer can be handed the very same literal.
 
 ---
 
@@ -366,13 +397,12 @@ and re-exposes a thin surface in its `#[cxx::bridge]` (`silent/src/lib.rs`, impl
 `account.rs`), per Silent's FFI rules (no `Result` across the bridge;
 sentinel/empty returns). Planned surface (added per phase):
 - `struct Image { data: Vec<u8>, width: u32, height: u32 }` + `fn qr_encode(data:
-  &str) -> Image`, implemented via `Encoder::from_str` (take the single plain frame;
-  empty `data` = failure); the Receive screen blits the raster.
+  &str) -> Image`, implemented via `Encoder::encode_text`; the Receive screen blits
+  the raster.
 - `fn qr_decode_grayscale(gray: &[u8], width: u32, height: u32) -> Vec<String>` for
-  the camera scanner, implemented via a `Decoder` (`process` the frame, read
-  `string()`).
-- Signing-flow surface: build a `Sign` request -> `Encoder::from_request` -> frames
-  to animate; an opaque `Box<Decoder>` (`process`/`progress`/`error`/`response`) to
+  the camera scanner, implemented via a `Decoder` (`process` the frame).
+- Signing-flow surface: build a `Sign` request -> `Encoder::encode_request` -> frames
+  to animate; an opaque `Box<Decoder>` (`process`/`progress`) to
   reassemble the response; then `Account::broadcast_signed_psbt(psbt: Vec<u8>)`.
 
 Each bwk change bumps the pinned `bwk` git `rev` in `silent/Cargo.toml`, refreshes
@@ -381,12 +411,12 @@ Each bwk change bumps the pinned `bwk` git `rev` in `silent/Cargo.toml`, refresh
 ### 9.2 Other Rust callers
 ```rust
 // plain QR (generation only, zero transitive deps):
-use bwk_qr::protocol::{Encoder, Config};
-let frames = Encoder::config(Config::default()).from_str("bc1q..."); // Vec<Image>
+use bwk_qr::{Config, Encoder};
+let frame = Encoder::new(Config::default())?.encode_text("bc1q...")?;
 
 // protocol:
-use bwk_qr::protocol::{Encoder, Config};
-let frames = Encoder::config(Config::default()).from_request(req); // animate frames
+use bwk_qr::{Config, Encoder};
+let frames = Encoder::new(Config::default())?.encode_request(&req)?;
 ```
 
 ---
@@ -395,21 +425,21 @@ let frames = Encoder::config(Config::default()).from_request(req); // animate fr
 
 - `gen`/`scan` correctness is exercised via internal (crate-private) tests and
   end-to-end through `Encoder`/`Decoder`; the primitives are not called publicly.
-  The plain-string round-trip is `Encoder::from_str -> Decoder::process ->
-  string()`. Internally: known-vector sizes; long (~100+ char) address encodes
-  within v40; the generated grayscale `Image` feeds the scan helper directly and
-  equals input; synthetic grayscale frames (quiet zone + scale).
+  The plain-string round-trip is `Encoder::encode_text -> Decoder::process`.
+  Internally: known-vector sizes; long (~100+ char) address encodes within
+  `max_qr_version`; the generated grayscale `Image` feeds the scan helper directly
+  and equals input; synthetic grayscale frames (quiet zone + scale).
 - `protocol`:
-  - round-trip per message (`Encoder::from_* -> render -> Decoder` yields the
+  - round-trip per message (`Encoder::encode_* -> render -> Decoder` yields the
     original);
   - **version compatibility** (internal codec tests): a v1 decoder reads a synthetic
     v(next) blob's known fields and ignores the tail; a v(next) decoder reads a v1
     blob (missing trailing field) correctly;
-  - truncated/garbage frame -> `Decoder::error()` is `Error::Decode`; `>1` BIP form
-    -> `Error::Protocol`;
-  - `Encoder::from_request` yields grayscale frames that feed (ordered + shuffled)
-    into a `Decoder` directly; `request()` equals the original;
-  - assert the BBQR header (`B$`, `FileType::Binary`).
+  - truncated/garbage frame -> `Error::Decode`; malformed descriptor form ->
+    `Error::Protocol`;
+  - `Encoder::encode_request` yields grayscale frames that feed (ordered +
+    shuffled) into a `Decoder` directly;
+  - assert the BBQR header (`B$`, generic binary file type `B`).
 - Offline, deterministic, plain `cargo test -p bwk-qr`. Build/test matrix:
   `--no-default-features --features gen`, `--features scan`, `--features protocol`,
   `--all-features`. `cargo clippy --all-features` clean.
@@ -422,11 +452,13 @@ let frames = Encoder::config(Config::default()).from_request(req); // animate fr
   and only append fields. Add the candidates listed in `ENCODING.md` (spend-path
   selection, multi-descriptor registration) as new versions.
 - **Wire-format spec discipline.** The append-only rule only holds if existing
-  fields are never reordered or resized; enforce this in review and document each
-  field's introduction version in `codec.rs`.
-- **`bbqr` crate version/API.** Confirm `Split`/`ContinuousJoiner`/`FileType` and
-  pin a version; map its errors into `Error::Bbqr`.
-- **`bitcoin` byte serializations.** Use stable forms (`Psbt::serialize`, 78-byte
-  `Xpub`, 4-byte `Fingerprint`); keep these out of the version-evolving region by
-  treating them as opaque `bytes`/fixed fields.
+  fields are never reordered or resized; enforce this in review. `qr-protocol/src/lib.rs`
+  states the convention at the top: everything there is version 1, and a field added later
+  is appended at the end of its body with a `// since vN` marker.
+- **External BBQR implementation.** Replace the internal generic-binary subset only
+  when a fixed release or pinned fork exposes the `B` file type and safe parsing.
+- **`bitcoin` byte serializations.** Use stable forms (BIP-174 PSBT, 78-byte `Xpub`,
+  4-byte `Fingerprint`); keep these out of the version-evolving region by treating
+  them as opaque `bytes`/fixed fields. The codec models them exactly that way, which
+  is what lets it drop the `bitcoin` dependency.
 - **UR support** deferred; revisit if a target signer needs `ur:` instead of BBQR.
