@@ -73,9 +73,10 @@ impl Drop for WatchdogGuard {
 /// Dump every thread's backtrace by attaching gdb to our own pid. Best-effort:
 /// prints a note and continues if gdb is unavailable or cannot attach.
 fn dump_threads() {
-    // Let the gdb child ptrace us regardless of the yama ptrace_scope setting.
-    const PR_SET_PTRACER_ANY: libc::c_ulong = libc::c_ulong::MAX;
+    #[cfg(target_os = "linux")]
     unsafe {
+        // Let the gdb child ptrace us regardless of the yama ptrace_scope setting.
+        const PR_SET_PTRACER_ANY: libc::c_ulong = libc::c_ulong::MAX;
         libc::prctl(libc::PR_SET_PTRACER, PR_SET_PTRACER_ANY);
     }
     let pid = std::process::id().to_string();
