@@ -9,7 +9,7 @@ use crate::{
     coin_selection::CoinSelector,
     recipient::{FinalizationContext, PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider},
     tx_builder::CoinSource,
-    Coin, DUST_AMOUNT,
+    Coin,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
@@ -302,13 +302,14 @@ impl TxTemplate {
         network: Network,
         max_fee_percent: u8,
         max_fee_amount: u64,
+        dust_limit: u64,
         skip_checks: bool,
     ) -> Result<Psbt, Error> {
         let outputs = self.prepare_outputs(change)?;
         let (inputs, mut outputs) = self.shuffle_maybe(shuffle, outputs);
 
         if !skip_checks {
-            check_missing_change(&inputs, &outputs, &self.fees)?;
+            check_missing_change(&inputs, &outputs, &self.fees, dust_limit)?;
             check_disproportionate_fee(&inputs, &outputs, max_fee_percent, max_fee_amount)?;
         }
 
@@ -391,6 +392,7 @@ fn check_missing_change(
     inputs: &[Coin],
     outputs: &[Box<dyn RecipientProvider>],
     fees: &Fees,
+    dust_limit: u64,
 ) -> Result<(), Error> {
     if outputs.iter().any(|o| o.is_change()) {
         return Ok(());
@@ -400,7 +402,7 @@ fn check_missing_change(
     let sum_outputs: u64 = sum_output_amounts(outputs);
     let fee = sum_inputs.saturating_sub(sum_outputs);
 
-    if fee <= DUST_AMOUNT {
+    if fee <= dust_limit {
         return Ok(());
     }
 
@@ -418,7 +420,7 @@ fn check_missing_change(
     };
 
     let excess = fee.saturating_sub(estimated_fee);
-    if excess > DUST_AMOUNT {
+    if excess > dust_limit {
         Err(Error::MissingChange { excess })
     } else {
         Ok(())
@@ -536,6 +538,7 @@ pub fn process_fees(
     sum_inputs: u64,
     sum_outputs: u64,
     drain: Drain,
+    dust_limit: u64,
 ) -> FeeResult {
     let mut result = FeeResult {
         fees: None,
@@ -565,7 +568,7 @@ pub fn process_fees(
         return result;
     }
 
-    let fee = if (fee_allowance - fee_wo_change) < DUST_AMOUNT {
+    let fee = if (fee_allowance - fee_wo_change) < dust_limit {
         // Enough for fee but not for drain
         let lost = fee_allowance - fee_wo_change;
         match drain {
@@ -578,8 +581,8 @@ pub fn process_fees(
             Drain::None => {}
         }
         fee_allowance
-    } else if (fee_allowance - fee_with_change) < DUST_AMOUNT {
-        // Create a drain < DUST, so we dont
+    } else if (fee_allowance - fee_with_change) < dust_limit {
+        // Would create a drain below dust, so we dont
         let lost = fee_allowance - fee_wo_change;
         match drain {
             Drain::Change => {
@@ -646,6 +649,7 @@ pub fn process_transaction(
     change_recipient: Option<&dyn RecipientProvider>,
     coin_selection: Option<(&dyn CoinSelector, &dyn CoinSource)>,
     droppable_amount: Option<u64>,
+    dust_limit: u64,
 ) -> TransactionResult {
     let mut tx_template = tx_template;
     let mut result = TransactionResult::from_template(&tx_template);
@@ -725,6 +729,7 @@ pub fn process_transaction(
         inputs_total,
         outputs_total,
         drain,
+        dust_limit,
     );
 
     result.warnings.append(&mut warning);
@@ -810,7 +815,8 @@ mod test {
             template.clone(),
             Some(&change_proto),
             None,
-            Some(DUST_AMOUNT),
+            Some(crate::DEFAULT_DUST_LIMIT),
+            crate::DEFAULT_DUST_LIMIT,
         );
 
         assert!(res.error.is_none());
@@ -818,9 +824,16 @@ mod test {
         assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(212)));
 
         // Test finalize without change - should fail with MissingChange
-        let result =
-            res.tx_template
-                .finalize(None, false, None, Network::Signet, 10, 2_000_000, false);
+        let result = res.tx_template.finalize(
+            None,
+            false,
+            None,
+            Network::Signet,
+            10,
+            2_000_000,
+            crate::DEFAULT_DUST_LIMIT,
+            false,
+        );
         assert!(matches!(result, Err(Error::MissingChange { .. })));
 
         // Test finalize with change
@@ -852,6 +865,7 @@ mod test {
                 Network::Signet,
                 10,
                 2_000_000,
+                crate::DEFAULT_DUST_LIMIT,
                 false,
             )
             .unwrap();
@@ -870,6 +884,7 @@ mod test {
             Network::Signet,
             10,
             2_000_000,
+            crate::DEFAULT_DUST_LIMIT,
             false,
         );
         assert!(matches!(result, Err(Error::ChangeAlreadyAdded)));
@@ -886,31 +901,58 @@ mod test {
         let template = TxTemplate {
             inputs: vec![c1],
             outputs: vec![Box::new(r1)],
-            fees: Fees::Sats(89_000),
+            fees: Fees::Sats(90_000),
         };
 
-        let res = process_transaction(template.clone(), None, None, Some(DUST_AMOUNT));
+        let res = process_transaction(
+            template.clone(),
+            None,
+            None,
+            Some(crate::DEFAULT_DUST_LIMIT),
+            crate::DEFAULT_DUST_LIMIT,
+        );
         assert!(res.error.is_none());
 
         // Should fail: actual fee (90k) > 10% of paid_outputs (1k) AND > max_amount (50k)
-        let result =
-            res.tx_template
-                .finalize(None, false, None, Network::Signet, 10, 50_000, false);
+        let result = res.tx_template.finalize(
+            None,
+            false,
+            None,
+            Network::Signet,
+            10,
+            50_000,
+            crate::DEFAULT_DUST_LIMIT,
+            false,
+        );
         assert!(matches!(
             result,
             Err(Error::DisproportionateFees { fee: 90000, .. })
         ));
 
         // Should succeed with skip_checks
-        let result = res
-            .tx_template
-            .finalize(None, false, None, Network::Signet, 10, 50_000, true);
+        let result = res.tx_template.finalize(
+            None,
+            false,
+            None,
+            Network::Signet,
+            10,
+            50_000,
+            crate::DEFAULT_DUST_LIMIT,
+            true,
+        );
         assert!(result.is_ok());
 
         // Should succeed if only one threshold is exceeded
-        let result =
-            res.tx_template
-                .finalize(None, false, None, Network::Signet, 10, 100_000, false);
+        let result = res.tx_template.finalize(
+            None,
+            false,
+            None,
+            Network::Signet,
+            10,
+            100_000,
+            crate::DEFAULT_DUST_LIMIT,
+            false,
+        );
         assert!(result.is_ok());
     }
 }

@@ -27,4 +27,6 @@ pub use transaction::{
 };
 pub use tx_builder::{ChangeTip, CoinSource, TxBuilder};
 
-pub const DUST_AMOUNT: u64 = 5_000;
+/// Default value below which a change output is not worth creating.
+/// Matches the P2TR dust limit, the highest of the common output types.
+pub const DEFAULT_DUST_LIMIT: u64 = 330;

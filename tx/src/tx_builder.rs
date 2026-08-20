@@ -2,7 +2,7 @@ use crate::{
     coin_selection::{CoinSelector, DefaultCoinSelector},
     recipient::SpPartialSecretProvider,
     transaction::{process_transaction, tx_estimated_weight, Amount, Error},
-    Coin, Fees, Recipient, RecipientProvider, TransactionResult, TxTemplate,
+    Coin, Fees, Recipient, RecipientProvider, TransactionResult, TxTemplate, DEFAULT_DUST_LIMIT,
 };
 use bitcoin::Psbt;
 
@@ -64,6 +64,7 @@ pub struct TxBuilder {
     coin_selector: Box<dyn CoinSelector>,
     max_fee_percent: u8,
     max_fee_amount: u64,
+    dust_limit: u64,
     droppable_amount: Option<u64>,
     #[cfg(feature = "test")]
     derivator: Option<SpkDerivator>,
@@ -83,7 +84,8 @@ impl TxBuilder {
             coin_selector: Box::new(DefaultCoinSelector::default()),
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
-            droppable_amount: Some(crate::DUST_AMOUNT),
+            dust_limit: DEFAULT_DUST_LIMIT,
+            droppable_amount: Some(DEFAULT_DUST_LIMIT),
             #[cfg(feature = "test")]
             derivator: None,
         }
@@ -106,7 +108,8 @@ impl TxBuilder {
             coin_selector: Box::new(DefaultCoinSelector::default()),
             max_fee_percent: 10,
             max_fee_amount: 2_000_000,
-            droppable_amount: Some(crate::DUST_AMOUNT),
+            dust_limit: DEFAULT_DUST_LIMIT,
+            droppable_amount: Some(DEFAULT_DUST_LIMIT),
             derivator: Some(derivator),
         }
     }
@@ -131,6 +134,10 @@ impl TxBuilder {
     }
     pub fn max_fee_amount(mut self, sats: u64) -> Self {
         self.max_fee_amount = sats;
+        self
+    }
+    pub fn dust_limit(mut self, sats: u64) -> Self {
+        self.dust_limit = sats;
         self
     }
     pub fn droppable_amount(mut self, amount: Option<u64>) -> Self {
@@ -226,6 +233,7 @@ impl TxBuilder {
             Some(self.change_provider.as_ref()),
             self.selection(),
             self.droppable_amount,
+            self.dust_limit,
         )
     }
 
@@ -236,6 +244,7 @@ impl TxBuilder {
             Some(self.change_provider.as_ref()),
             self.selection(),
             self.droppable_amount,
+            self.dust_limit,
         );
 
         if let Some(error) = res.error {
@@ -258,6 +267,7 @@ impl TxBuilder {
             self.change_provider.network(),
             self.max_fee_percent,
             self.max_fee_amount,
+            self.dust_limit,
             false,
         )
     }
@@ -905,6 +915,7 @@ mod tests {
             Some(builder.change_provider.as_ref()),
             None,
             builder.droppable_amount,
+            builder.dust_limit,
         );
         assert!(matches!(res.error, Some(Error::NoInputs)));
     }
@@ -940,6 +951,32 @@ mod tests {
         builder.receive_coin(big);
         builder.receive_coin(small);
         assert_eq!(builder.auto_select_coins(99_600, 1_000).len(), 1);
+    }
+
+    #[test]
+    fn dust_limit_setting_gates_the_change_output() {
+        let (_signer, derivator) = wpkh_signer();
+
+        // 100k in, 98.5k out, 500 sats of fee: 1000 sats left for change.
+        let mut builder = test::builder_from_derivator(derivator.clone()).fee(500);
+        builder.funding_input(100_000);
+        builder.dummy_external_output(98_500);
+        let res = builder.simulate();
+        assert!(res.error.is_none());
+        assert_eq!(res.change, Some(bitcoin::Amount::from_sat(1_000)));
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(500)));
+        assert!(res.warnings.is_empty());
+
+        let mut builder = test::builder_from_derivator(derivator)
+            .fee(500)
+            .dust_limit(5_000);
+        builder.funding_input(100_000);
+        builder.dummy_external_output(98_500);
+        let res = builder.simulate();
+        assert!(res.error.is_none());
+        assert_eq!(res.change, None);
+        assert_eq!(res.fees, Some(bitcoin::Amount::from_sat(1_500)));
+        assert_eq!(res.warnings, vec![Warning::ChangeUnderDust(1_000)]);
     }
 
     #[test]
