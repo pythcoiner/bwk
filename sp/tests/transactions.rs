@@ -39,7 +39,7 @@ fn test_insufficient_funds() {
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to_sp(sp_address, 100_000);
 
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     assert!(coins.is_empty());
     assert!(builder.generate().is_err());
 }
@@ -206,7 +206,7 @@ fn test_sp_to_sp_self() {
 
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to_sp(account.sp_address(), 100_000);
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     assert!(!coins.is_empty());
     for c in coins {
         builder.add_input(c);
@@ -246,7 +246,7 @@ fn test_sp_to_sp_other() {
     let send_amount = 100_000u64;
     let mut builder = sender.tx_builder().feerate(1000);
     builder.send_to_sp(receiver.sp_address(), send_amount);
-    let coins = builder.select_coins(send_amount, 1000);
+    let coins = builder.select_coins(send_amount, 1000, None);
     assert!(!coins.is_empty());
     for c in coins {
         builder.add_input(c);
@@ -275,7 +275,7 @@ fn test_sp_to_taproot() {
     let tr_addr = env.taproot_addr(0);
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to(tr_addr, 100_000);
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     for c in coins {
         builder.add_input(c);
     }
@@ -294,7 +294,7 @@ fn test_sp_to_segwit() {
     let sw_addr = env.segwit_addr(0);
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to(sw_addr, 100_000);
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     for c in coins {
         builder.add_input(c);
     }
@@ -313,7 +313,7 @@ fn test_sp_to_mixed_sp_taproot() {
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to_sp(account.sp_address(), 50_000);
     builder.send_to(env.taproot_addr(0), 50_000);
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     for c in coins {
         builder.add_input(c);
     }
@@ -343,7 +343,7 @@ fn test_sp_to_mixed_sp_segwit() {
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to_sp(account.sp_address(), 50_000);
     builder.send_to(env.segwit_addr(0), 50_000);
-    let coins = builder.select_coins(100_000, 1000);
+    let coins = builder.select_coins(100_000, 1000, None);
     for c in coins {
         builder.add_input(c);
     }
@@ -533,7 +533,7 @@ fn test_sp_to_three_sp_outputs_self() {
     // 2 explicit outputs to receive address + auto change = 3 SP outputs
     builder.send_to_sp(account.sp_address(), 50_000);
     builder.send_to_sp(account.sp_address(), 60_000);
-    let coins = builder.select_coins(110_000, 1000);
+    let coins = builder.select_coins(110_000, 1000, None);
     assert!(!coins.is_empty());
     for c in coins {
         builder.add_input(c);
@@ -604,7 +604,7 @@ fn test_sp_to_sp_other_and_self() {
     let mut builder = sender.tx_builder().feerate(1000);
     builder.send_to_sp(receiver.sp_address(), 50_000);
     builder.send_to_sp(sender.sp_address(), 60_000);
-    let coins = builder.select_coins(110_000, 1000);
+    let coins = builder.select_coins(110_000, 1000, None);
     assert!(!coins.is_empty());
     for c in coins {
         builder.add_input(c);

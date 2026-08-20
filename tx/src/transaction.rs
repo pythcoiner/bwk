@@ -618,6 +618,7 @@ fn select_inputs(
     outputs_total: u64,
     maxed_output: Option<usize>,
     coin_selection: Option<(&dyn CoinSelector, &dyn CoinSource)>,
+    droppable_amount: Option<u64>,
 ) -> Result<Vec<Coin>, Error> {
     let (selector, source) = coin_selection.ok_or(Error::NoInputs)?;
     let selected = if maxed_output.is_some() {
@@ -630,7 +631,7 @@ fn select_inputs(
         let base_weight_vb = tx_estimated_weight(tx_template).to_vbytes_ceil();
         let base_fee = base_weight_vb * rate / 1000;
         let target = outputs_total + base_fee;
-        selector.select_coins(source.spendable_coins(), target, rate)
+        selector.select_coins(source.spendable_coins(), target, rate, droppable_amount)
     };
     if selected.is_empty() {
         return Err(Error::CoinSelection);
@@ -644,6 +645,7 @@ pub fn process_transaction(
     tx_template: TxTemplate,
     change_recipient: Option<&dyn RecipientProvider>,
     coin_selection: Option<(&dyn CoinSelector, &dyn CoinSource)>,
+    droppable_amount: Option<u64>,
 ) -> TransactionResult {
     let mut tx_template = tx_template;
     let mut result = TransactionResult::from_template(&tx_template);
@@ -676,7 +678,13 @@ pub fn process_transaction(
 
     // Coin selection: when no inputs were provided, trigger auto coin selection
     if tx_template.inputs.is_empty() {
-        match select_inputs(&tx_template, outputs_total, maxed_output, coin_selection) {
+        match select_inputs(
+            &tx_template,
+            outputs_total,
+            maxed_output,
+            coin_selection,
+            droppable_amount,
+        ) {
             Ok(selected) => {
                 tx_template.inputs = selected.clone();
                 result.tx_template.inputs = selected;
@@ -798,7 +806,12 @@ mod test {
             descriptor: Some(descriptor.clone()),
         };
 
-        let res = process_transaction(template.clone(), Some(&change_proto), None);
+        let res = process_transaction(
+            template.clone(),
+            Some(&change_proto),
+            None,
+            Some(DUST_AMOUNT),
+        );
 
         assert!(res.error.is_none());
         assert_eq!(res.change, Some(bitcoin::Amount::from_sat(44_788)));
@@ -876,7 +889,7 @@ mod test {
             fees: Fees::Sats(89_000),
         };
 
-        let res = process_transaction(template.clone(), None, None);
+        let res = process_transaction(template.clone(), None, None, Some(DUST_AMOUNT));
         assert!(res.error.is_none());
 
         // Should fail: actual fee (90k) > 10% of paid_outputs (1k) AND > max_amount (50k)

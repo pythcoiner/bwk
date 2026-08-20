@@ -1585,7 +1585,7 @@ fn test_spend_only_resume_at_same_tip() {
         let dest = env.taproot_addr(0);
         let mut builder = account.tx_builder().feerate(1000);
         builder.send_to(dest, 100_000);
-        for coin in builder.select_coins(100_000, 1000) {
+        for coin in builder.select_coins(100_000, 1000, None) {
             builder.add_input(coin);
         }
         let mut psbt = builder.generate().expect("build spend tx");
@@ -1673,7 +1673,7 @@ fn test_unconfirmed_spend_injection() {
     let dest = env.taproot_addr(0);
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to(dest.clone(), 100_000);
-    for coin in builder.select_coins(100_000, 1000) {
+    for coin in builder.select_coins(100_000, 1000, None) {
         builder.add_input(coin);
     }
     let tx = {
@@ -1836,7 +1836,7 @@ fn test_broadcast_requires_electrum_endpoint() {
     let dest = env.taproot_addr(0);
     let mut builder = account.tx_builder().feerate(1000);
     builder.send_to(dest, 100_000);
-    for coin in builder.select_coins(100_000, 1000) {
+    for coin in builder.select_coins(100_000, 1000, None) {
         builder.add_input(coin);
     }
     let tx = {
