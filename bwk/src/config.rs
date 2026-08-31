@@ -6,6 +6,34 @@ use bwk_sign::hot_signer::HotSigner;
 use miniscript::{bitcoin, Descriptor, DescriptorPublicKey};
 use serde::{Deserialize, Serialize};
 
+/// The directory `datadir` hangs its subdirectory off: the home directory on
+/// Linux, the platform's config location on macOS and Windows.
+///
+/// `None` when the variable it reads is unset or empty.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+fn base_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(|home| PathBuf::from(home).join("Library/Application Support"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA")
+            .filter(|appdata| !appdata.is_empty())
+            .map(PathBuf::from)
+    }
+}
+
 /// Filename used by [`bwk_persist::FileConfigStore`].
 ///
 /// Lives on `Config` for backwards-compat with existing on-disk layouts;
@@ -20,30 +48,27 @@ pub const HEADERS_FILENAME: &str = "headers.bin";
 /// Logical store name for the bwk per-address-tip subscription map.
 /// Re-export of the canonical constant in [`bwk_persist`].
 pub const STATUSES_STORE_KEY: &str = bwk_persist::STATUSES_STORE_KEY;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const BASE_DIR_VAR_MISSING: &str = "HOME is unset or empty";
+#[cfg(target_os = "windows")]
+const BASE_DIR_VAR_MISSING: &str = "APPDATA is unset or empty";
+
 /// Row keys under the `account` store for the [`Tip`] singleton fields.
 const TIP_RECEIVE_ROW: &str = "receive_index";
 const TIP_CHANGE_ROW: &str = "change_index";
 
 /// Returns the OS-specific data directory under `dir_name`.
 ///
-/// Convenience for callers running on a desktop OS; consumers on
-/// other platforms (mobile, embedded) typically compute their data
-/// path natively and pass it as `data_dir` to `Config::new`.
-#[cfg(not(any(target_os = "ios", target_os = "android")))]
+/// Supported targets are desktop Linux, macOS and Windows, and nothing else.
+/// A desktop session always sets the variable [`base_dir`] reads, so the
+/// `expect` cannot fire there; off those targets, or outside a user session,
+/// this is the wrong entry point. Every other consumer (mobile, embedded, a
+/// daemon) computes its data path natively and passes it as `data_dir` to
+/// [`Config::new`] instead of calling this.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub fn datadir(dir_name: &str) -> PathBuf {
-    #[cfg(target_os = "linux")]
-    let dir = {
-        let mut dir = dirs::home_dir().unwrap();
-        dir.push(dir_name);
-        dir
-    };
-
-    #[cfg(not(target_os = "linux"))]
-    let dir = {
-        let mut dir = dirs::config_dir().unwrap();
-        dir.push(dir_name);
-        dir
-    };
+    let mut dir = base_dir().expect(BASE_DIR_VAR_MISSING);
+    dir.push(dir_name);
 
     maybe_create_dir(&dir);
 
