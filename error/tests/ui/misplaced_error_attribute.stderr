@@ -1,0 +1,17 @@
+error: #[error] on an enum is not read, it belongs on each variant
+ --> tests/ui/misplaced_error_attribute.rs:4:1
+  |
+4 | #[error("on the enum itself")]
+  | ^
+
+error: #[error] on a field is not read, it belongs on the variant
+  --> tests/ui/misplaced_error_attribute.rs:13:14
+   |
+13 |     BadValue(#[error("on the field")] u32),
+   |              ^
+
+error: #[error] on a field is not read, it belongs on the struct
+  --> tests/ui/misplaced_error_attribute.rs:19:5
+   |
+19 |     #[error("on the field")]
+   |     ^

@@ -1,0 +1,5 @@
+error: #[from] needs a variant with exactly one field
+ --> tests/ui/from_on_multi_field_variant.rs:6:10
+  |
+6 |     Read(#[from] std::io::Error, String),
+  |          ^

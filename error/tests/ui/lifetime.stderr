@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support generics or lifetimes
+ --> tests/ui/lifetime.rs:4:14
+  |
+4 | enum Borrowed<'a> {
+  |              ^

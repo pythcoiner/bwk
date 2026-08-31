@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support #[from] or #[source] on a struct, use an enum
+ --> tests/ui/struct_from.rs:5:19
+  |
+5 | struct StructFrom(#[from] std::io::Error);
+  |                   ^

@@ -1,0 +1,5 @@
+error: unterminated format placeholder, a `{` has no matching `}`
+ --> tests/ui/unterminated_placeholder.rs:5:13
+  |
+5 |     #[error("bad {0")]
+  |             ^^^^^^^^

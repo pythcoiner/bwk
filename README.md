@@ -52,6 +52,7 @@ Blindbit).
 | bwk-descriptor | Descriptor construction, SpkDerivator                 |
 | bwk-keys       | Key derivation (OXpriv, OXpub)                        |
 | bwk-p2p        | Bitcoin P2P client                                    |
+| bwk-error      | In-house error derive, reached as `thiserror`         |
 | bwk-backoff    | Exponential backoff                                   |
 | bwk-utils      | Test helpers                                          |
 +----------------+-------------------------------------------------------+
@@ -66,6 +67,7 @@ See crate READMEs:
 [bwk-descriptor](descriptor/README.md),
 [bwk-keys](keys/README.md),
 [bwk-p2p](p2p/README.md),
+[bwk-error](error/README.md),
 [bwk-backoff](backoff/README.md),
 [bwk-utils](utils/README.md)
 

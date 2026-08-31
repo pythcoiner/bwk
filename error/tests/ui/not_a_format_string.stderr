@@ -1,0 +1,17 @@
+error: expected a format string
+ --> tests/ui/not_a_format_string.rs:5:13
+  |
+5 |     #[error(oops)]
+  |             ^^^^
+
+error: expected a format string
+  --> tests/ui/not_a_format_string.rs:11:5
+   |
+11 |     #[error(concat!("a", "b"))]
+   |     ^
+
+error: expected a format string
+  --> tests/ui/not_a_format_string.rs:17:5
+   |
+17 |     #[error(42)]
+   |     ^

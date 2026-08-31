@@ -1,0 +1,5 @@
+error: only one #[from] or #[source] field per variant
+  --> tests/ui/two_sources.rs:10:9
+   |
+10 |         #[source]
+   |         ^

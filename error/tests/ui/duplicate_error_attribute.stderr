@@ -1,0 +1,5 @@
+error: duplicate #[error] attribute
+ --> tests/ui/duplicate_error_attribute.rs:6:5
+  |
+6 |     #[error("second")]
+  |     ^
