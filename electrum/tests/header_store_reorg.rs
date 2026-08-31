@@ -37,7 +37,7 @@ fn header_store_follows_tip_and_resolves_reorg() {
 
     let store =
         HeaderStore::start(url, port, Network::Regtest, Some(path), Some(base_height)).unwrap();
-    let rx = store.register();
+    let rx = store.register_chain_tick();
 
     // Wait for the worker to backfill up to the current tip.
     assert!(

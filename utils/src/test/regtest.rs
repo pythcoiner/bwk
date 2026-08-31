@@ -16,8 +16,13 @@ use electrsd::{
         bitcoincore_rpc::{jsonrpc::serde_json::Value, RpcApi},
         BitcoinD, P2P,
     },
+    electrum_client::ElectrumApi,
     ElectrsD,
 };
+
+/// How long `bootstrap_electrs` waits for electrs to index the pre-mined
+/// blocks before handing the pair back.
+const SYNC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Spin up an electrs process against `bitcoind` on a freshly assigned port.
 fn spawn_electrs(bitcoind: &BitcoinD) -> (String, u16, ElectrsD) {
@@ -41,6 +46,12 @@ fn spawn_electrs(bitcoind: &BitcoinD) -> (String, u16, ElectrsD) {
 /// Spin up bitcoind + electrs and pre-mine 101 blocks so coins to fresh
 /// addresses can be confirmed immediately.
 pub fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
+    bootstrap_electrs_with_args(&[])
+}
+
+/// [`bootstrap_electrs`] with extra `bitcoind` command line arguments, for a
+/// test that needs the node configured differently (`-txindex` and such).
+pub fn bootstrap_electrs_with_args(bitcoind_args: &[&str]) -> (String, u16, ElectrsD, BitcoinD) {
     let mut cwd: PathBuf = env::current_dir().expect("current_dir");
     cwd.push("tests");
 
@@ -50,6 +61,7 @@ pub fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
 
     let mut conf = electrsd::bitcoind::Conf::default();
     conf.p2p = P2P::Yes;
+    conf.args.extend_from_slice(bitcoind_args);
     let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
 
     let (url, port, electrsd) = spawn_electrs(&bitcoind);
@@ -60,7 +72,22 @@ pub fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
         .call::<Value>("generatetoaddress", &[101.into(), node_address])
         .unwrap();
 
+    wait_electrs_synced(&bitcoind, &electrsd);
+
     (url, port, electrsd, bitcoind)
+}
+
+/// Wait until electrs has indexed up to bitcoind's tip, so a test does not
+/// start querying it while it is still ingesting the pre-mined blocks.
+fn wait_electrs_synced(bitcoind: &BitcoinD, electrsd: &ElectrsD) {
+    let target = get_block_height(bitcoind);
+    let synced = wait_until(SYNC_TIMEOUT, || {
+        electrsd
+            .client
+            .block_headers_subscribe()
+            .is_ok_and(|header| header.height as u32 >= target)
+    });
+    assert!(synced, "electrs did not reach height {target}");
 }
 
 /// Kill `electrsd` and spin up a fresh electrs process against the same

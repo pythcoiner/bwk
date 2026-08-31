@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     env,
-    path::PathBuf,
     str::FromStr,
     thread,
     time::{Duration, Instant},
@@ -11,39 +10,13 @@ use bwk_electrum::{
     electrum::{request::Request, response::*},
     raw_client::Client,
 };
+use bwk_utils::test::regtest::bootstrap_electrs;
 use electrsd::{
-    bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD, P2P},
+    bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD},
     ElectrsD,
 };
 use miniscript::bitcoin::{hex::FromHex, OutPoint, Script};
 use serde_json::Value;
-
-fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
-
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let mut electrsd_conf = electrsd::Conf::default();
-    // The pinned electrsd takes the child's stdout unconditionally, so it
-    // panics unless the logs are buffered.
-    electrsd_conf.buffered_logs = true;
-    // electrsd_conf.view_stderr = true;
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
-}
 
 fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
     let (url, port, electrs, bitcoind) = bootstrap_electrs();
