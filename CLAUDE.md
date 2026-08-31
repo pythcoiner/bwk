@@ -110,6 +110,17 @@ Both Account types use `mpsc::channel<Notification>` for async events
 (connection status, new coins, scan progress). Call `account.receiver()` to
 take the receiver.
 
+## Features
+
+`bwk` gates optional behaviour behind cargo features, all off by default:
+- `logger`: installs `env_logger` as the global logger. Off by default so a
+  consumer with its own logger does not pull env_logger and its
+  timestamp/colour stack.
+- `sp`: silent-payments notification variants, used by `bwk-sp`.
+- `hwi`: hardware wallet signers.
+- `sqlite`: the SQLite persistence backend.
+- `test`: see below.
+
 ## Testing
 
 Integration tests require the `test` feature flag which enables:

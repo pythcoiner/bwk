@@ -6,6 +6,7 @@ pub mod header_store;
 pub mod header_validator;
 pub mod history;
 pub mod label_store;
+#[cfg(feature = "logger")]
 pub mod log;
 pub mod profile;
 pub mod sync;
