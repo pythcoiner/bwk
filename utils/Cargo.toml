@@ -21,8 +21,9 @@ log.workspace = true
 ureq = { workspace = true, optional = true }
 corepc-node = { workspace = true, optional = true }
 temp-dir = { workspace = true, optional = true }
+electrsd = { workspace = true, optional = true }
 
 [features]
 default = []
-test = ["dep:corepc-node", "dep:temp-dir", "dep:env_logger", "bitcoin/rand-std"]
+test = ["dep:corepc-node", "dep:temp-dir", "dep:env_logger", "dep:electrsd", "bitcoin/rand-std"]
 ureq = ["dep:ureq"]

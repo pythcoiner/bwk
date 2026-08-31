@@ -1,5 +1,8 @@
-//! Shared regtest harness helpers for the `HeaderStore` integration tests.
-#![allow(dead_code)]
+//! Regtest harness: a bitcoind + electrs pair and the block helpers that
+//! drive them.
+//!
+//! The node binaries are looked up under `tests/bin` of the crate running the
+//! test, so each consumer ships its own pair.
 
 use std::{
     env,
@@ -35,9 +38,8 @@ fn spawn_electrs(bitcoind: &BitcoinD) -> (String, u16, ElectrsD) {
     (url.into(), port, electrsd)
 }
 
-/// Mirror of `bwk::account::tests::bootstrap_electrs` (private to the
-/// crate). Spins up bitcoind + electrs and pre-mines 101 blocks so coins
-/// to fresh addresses can be confirmed immediately.
+/// Spin up bitcoind + electrs and pre-mine 101 blocks so coins to fresh
+/// addresses can be confirmed immediately.
 pub fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
     let mut cwd: PathBuf = env::current_dir().expect("current_dir");
     cwd.push("tests");
@@ -88,6 +90,13 @@ pub fn get_block_hash_str(bitcoind: &BitcoinD, height: u32) -> String {
         .unwrap()
 }
 
+pub fn invalidate_block(bitcoind: &BitcoinD, hash: String) {
+    bitcoind
+        .client
+        .call::<Value>("invalidateblock", &[hash.into()])
+        .unwrap();
+}
+
 /// Poll `cond` for up to `timeout`. Returns true if it ever held.
 pub fn wait_until<F: FnMut() -> bool>(timeout: Duration, mut cond: F) -> bool {
     let start = Instant::now();
@@ -98,4 +107,10 @@ pub fn wait_until<F: FnMut() -> bool>(timeout: Duration, mut cond: F) -> bool {
         sleep(Duration::from_millis(100));
     }
     cond()
+}
+
+/// Logger for the regtest tests. Unlike [`super::setup_logger`] it keeps the
+/// `RUST_LOG` default, so bitcoind and electrs do not flood the output.
+pub fn init_logger() {
+    let _ = env_logger::builder().is_test(true).try_init();
 }

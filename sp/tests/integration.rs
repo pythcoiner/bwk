@@ -25,7 +25,7 @@ use common::{
 };
 
 use bwk::{
-    label_store::{LabelKey, LabelStore},
+    bwk_electrum::label_store::{LabelKey, LabelStore},
     persist::{
         JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
         TXS_STORE_KEY,
@@ -917,7 +917,7 @@ fn test_mempool_tx_not_counted_in_balance() {
 /// Run with: `cargo test --test integration -- --ignored`
 #[test]
 fn test_notification_order_full_sequence() {
-    use bwk::{Notification, SpNotification};
+    use bwk::bwk_electrum::notification::{Notification, SpNotification};
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
     use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};

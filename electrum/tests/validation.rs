@@ -30,7 +30,10 @@ fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
     conf.args.push("-txindex");
     let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
 
-    let electrsd_conf = electrsd::Conf::default();
+    let mut electrsd_conf = electrsd::Conf::default();
+    // The pinned electrsd takes the child's stdout unconditionally, so it
+    // panics unless the logs are buffered.
+    electrsd_conf.buffered_logs = true;
     let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
     let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
     let port = port.parse::<u16>().unwrap();

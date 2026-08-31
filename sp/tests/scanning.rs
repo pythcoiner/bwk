@@ -21,12 +21,15 @@ use common::{
 };
 
 use bwk::{
-    label_store::LabelStore,
+    bwk_electrum::{
+        label_store::LabelStore,
+        notification::{Notification, SpNotification},
+    },
     persist::{
         JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
     },
 };
-use bwk_sp::{account::config::Config, Notification, SpNotification};
+use bwk_sp::account::config::Config;
 
 fn backend_height(blindbit_url: &str) -> u32 {
     let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
@@ -1633,7 +1636,7 @@ fn test_spend_only_resume_at_same_tip() {
 /// later scan confirms it without turning the self-spend change into an incoming.
 #[test]
 fn test_unconfirmed_spend_injection() {
-    use bwk::coin_store::PaymentType;
+    use bwk::bwk_electrum::coin_store::PaymentType;
     use common::{wait_for_oneshot_done, TestEnv};
 
     let mut env = TestEnv::new();
