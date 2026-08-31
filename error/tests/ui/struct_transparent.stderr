@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support #[error(transparent)] on a struct, use an enum
+ --> tests/ui/struct_transparent.rs:5:8
+  |
+5 | struct StructTransparent(std::io::Error);
+  |        ^^^^^^^^^^^^^^^^^

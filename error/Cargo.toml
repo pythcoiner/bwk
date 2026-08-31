@@ -1,0 +1,22 @@
+[package]
+name = "bwk-error"
+version = "0.0.1"
+description = "Derive for error types, covering the subset of thiserror bwk uses"
+documentation = "https://docs.rs/bwk-error"
+readme.workspace = true
+license-file.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+trybuild.workspace = true

@@ -1,0 +1,5 @@
+error: expected a format string
+ --> tests/ui/error_fmt_form.rs:5:5
+  |
+5 |     #[error(fmt = render_bad_value)]
+  |     ^

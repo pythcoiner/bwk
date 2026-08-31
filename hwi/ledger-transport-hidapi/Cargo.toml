@@ -17,4 +17,4 @@ hidapi = { version = "2.4.1", features = ["linux-static-hidraw"], default-featur
 ledger-apdu = "0.10"
 libc = "0.2"
 log = "0.4"
-thiserror = "1.0"
+thiserror.workspace = true

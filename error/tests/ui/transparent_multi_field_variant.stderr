@@ -1,0 +1,5 @@
+error: transparent needs exactly one field
+ --> tests/ui/transparent_multi_field_variant.rs:6:5
+  |
+6 |     Read(std::io::Error, String),
+  |     ^^^^

@@ -6,6 +6,7 @@ members = [
     "sp",
     "electrum",
     "backoff",
+    "error",
     "keys", "utils", "sign", "descriptor", "tx",
     "persist",
     "p2p",
@@ -42,15 +43,18 @@ miniscript = { version = "12.2.0", features = ["base64"] }
 native-tls = "0.2"
 openssl = "0.10.66"
 plotters = "0.3.7"
+proc-macro2 = "1.0"
+quote = "1.0"
 rand = "0.9.1"
 serde = { version = "1.0.218", features = ["derive"] }
 serde_json = "1.0.128"
+syn = { version = "2.0", default-features = false, features = ["derive", "full", "parsing", "printing", "proc-macro"] }
 env_logger = "0.11.6"
 temp-dir = "0.1.16"
-thiserror = "2.0.0"
 getrandom = "0.2"
 corepc-node = { version = "0.10", features = ["download", "29_0"] }
 dns-lookup = "2.0"
+trybuild = "1.0"
 
 # spdk dependencies
 secp256k1_spscan-sys = { path = "secp256k1_spscan-sys" }
@@ -73,3 +77,10 @@ bwk-persist = { path = "persist" }
 bwk-utils = { path = "utils" }
 bwk-p2p = { path = "p2p" }
 bwk = { path = "bwk" }
+# bwk-error is the in-house derive. Aliasing the package as `thiserror` is deliberate,
+# not an oversight: error definitions across the tree keep reading `thiserror::Error`,
+# so the switch is a one-line manifest change instead of a rename touching every error
+# enum, which keeps the diff and the review surface small. Upstream thiserror is not a
+# direct dependency of this workspace, so its extras (`#[backtrace]`, generics,
+# lifetimes, ...) are unavailable. See error/README.md.
+thiserror = { package = "bwk-error", path = "error" }
