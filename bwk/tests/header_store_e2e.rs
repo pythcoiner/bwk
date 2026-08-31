@@ -134,8 +134,8 @@ fn init_logger() {
 
 /// End-to-end test for two Accounts sharing a single `HeaderStore`.
 ///
-/// Exercises the full chain: Status push → History → pending-claims
-/// resolution via CTA → `GetTxMerkle` → `Inclusion::Verified`. The
+/// Exercises the full chain: Status push -> History -> pending-claims
+/// resolution via CTA -> `GetTxMerkle` -> `Inclusion::Verified`. The
 /// HeaderStore is pre-synced before the Accounts are constructed so
 /// that the first notif observed by the listener is the post-funding
 /// chain advance.
@@ -282,7 +282,7 @@ fn multi_account_shared_header_store() {
     );
 }
 
-/// End-to-end test for `Verified` → (reorg) → `Verified` at a new height.
+/// End-to-end test for `Verified` -> (reorg) -> `Verified` at a new height.
 ///
 /// The tx is re-mined onto the new chain and the scripthash subscription
 /// plus history path brings it back to `Verified`. A transient

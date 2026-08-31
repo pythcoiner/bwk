@@ -57,10 +57,10 @@ tests locally. Commit messages must be single-line and follow existing style
 ```
 
 See crate READMEs for usage examples:
-- [bwk/README.md](bwk/README.md) — Account, stores, address generation
-- [sign/README.md](sign/README.md) — SigningManager, Signer trait
-- [descriptor/README.md](descriptor/README.md) — SpkDerivator, descriptor helpers
-- [electrum/README.md](electrum/README.md) — Electrum client modes
+- [bwk/README.md](bwk/README.md): Account, stores, address generation
+- [sign/README.md](sign/README.md): SigningManager, Signer trait
+- [descriptor/README.md](descriptor/README.md): SpkDerivator, descriptor helpers
+- [electrum/README.md](electrum/README.md): Electrum client modes
 
 ## Architecture
 
@@ -90,7 +90,7 @@ TxBuilder
 ├── RecipientProvider trait - outputs (Recipient, SpRecipient, change providers)
 ├── CoinSource trait - input selection
 ├── coin_selection module - weighted random selection algorithm
-└── TxTemplate → Psbt via generate()
+└── TxTemplate -> Psbt via generate()
 ```
 
 Key traits:

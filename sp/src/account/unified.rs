@@ -2,9 +2,9 @@
 //! BIP32 sub-accounts.
 //!
 //! The SP [`Account`](crate::Account) embeds zero or more
-//! [`bwk::Account`] sub-accounts (segwit, taproot, …). These helpers fold all
-//! of them into one structure keyed by outpoint so callers — including FFI
-//! bindings — do not have to stitch them together themselves.
+//! [`bwk::Account`] sub-accounts (segwit, taproot, ...). These helpers fold all
+//! of them into one structure keyed by outpoint so callers (including FFI
+//! bindings) do not have to stitch them together themselves.
 
 use bitcoin::{Amount, OutPoint};
 

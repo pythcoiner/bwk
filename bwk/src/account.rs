@@ -273,7 +273,7 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     tx_listener: Option<JoinHandle<()>>,
     config: Config,
     /// Persistence sink for `config`. [`NoopConfigStore`] by default.
-    /// Consumers wire whatever shape suits them — a
+    /// Consumers wire whatever shape suits them, a
     /// [`bwk_persist::FileConfigStore`] for file-backed persistence, a
     /// [`bwk_persist::CallbackConfigStore`] to bridge save/load through
     /// host-supplied closures, or any other [`ConfigStore`] impl.
@@ -607,7 +607,7 @@ impl<P: StorageProfile> Account<P> {
             signing_manager.new_bip32_signer_from_mnemonic(config.network(), mnemo);
             signing_manager.register_bip32_descriptor(config.descriptor.clone());
         }
-        let _ = account_store; // owned by CoinStore→AddressStore; not stored on Account
+        let _ = account_store; // owned by CoinStore->AddressStore; not stored on Account
         let offline = Arc::new(AtomicBool::new(config.offline()));
         let mut account = Account {
             coin_store,

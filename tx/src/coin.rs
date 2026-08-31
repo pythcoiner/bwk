@@ -69,7 +69,7 @@ pub enum CoinSpendInfo {
         coin_path: (KeyChain, u32),
         descriptor: Descriptor<DescriptorPublicKey>,
         /// Ephemeral secret key for SP partial secret computation.
-        /// Never persisted — only populated at tx-building time.
+        /// Never persisted, only populated at tx-building time.
         #[serde(skip)]
         secret_key: Option<bitcoin::secp256k1::SecretKey>,
     },

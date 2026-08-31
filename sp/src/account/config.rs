@@ -55,8 +55,8 @@ pub struct Config {
     pub persist: bool,
     /// Which on-disk backend to use when `persist` is true.
     ///
-    /// `Json` (default) — byte-for-byte compatible with the pre-backend
-    /// layout. `Sqlite` — single `account.sqlite` file per account;
+    /// `Json` (default): byte-for-byte compatible with the pre-backend
+    /// layout. `Sqlite`: single `account.sqlite` file per account;
     /// signer material (mnemonic / scan_sk / spend_key) is stripped from
     /// everything written to disk and must be re-supplied on the next run.
     #[serde(skip)]

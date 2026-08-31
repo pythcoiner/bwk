@@ -428,7 +428,7 @@ fn batch_derive_sp_scripts(
         return;
     }
 
-    // Single call with all addresses — BIP352 k-counter increments per scan-key group
+    // Single call with all addresses: BIP352 k-counter increments per scan-key group
     let pubkey_map =
         crate::core::sending::generate_recipient_pubkeys(sp_addresses.clone(), partial_secret)
             .expect("failed to generate SP recipient pubkeys");

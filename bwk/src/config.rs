@@ -193,7 +193,7 @@ impl Config {
     /// Select the on-disk persistence backend (JSON default, or SQLite).
     ///
     /// Under [`PersistenceKind::Sqlite`], signer material (mnemonic / any
-    /// private key) is never written to disk — not to `config.json`, not to
+    /// private key) is never written to disk: not to `config.json`, not to
     /// the SQLite file, not to `.signers`. See [`bwk_persist`] for the
     /// full rule. Callers must re-supply the seed on the next run.
     pub fn with_persist_kind(mut self, kind: PersistenceKind) -> Self {

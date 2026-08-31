@@ -2,7 +2,7 @@
 //!
 //! The schema is deliberately simple: **one table per logical store**,
 //! each table with a `("key" TEXT PRIMARY KEY, value BLOB NOT NULL)` shape.
-//! The DB is a pure KV store — see the crate-level docs for the "no
+//! The DB is a pure KV store. See the crate-level docs for the "no
 //! relational structure, no schema migrations" principle.
 //!
 //! A dedicated `account` table holds the account-scoped singleton
@@ -15,9 +15,9 @@
 //!
 //! At open time we create the `account` table if needed, then read the
 //! `version` row:
-//! - missing → fresh DB; stamp [`DB_VERSION`] and continue.
-//! - recorded ≤ [`DB_VERSION`] → OK, continue.
-//! - recorded > [`DB_VERSION`] → return
+//! - missing -> fresh DB; stamp [`DB_VERSION`] and continue.
+//! - recorded at or below [`DB_VERSION`] -> OK, continue.
+//! - recorded > [`DB_VERSION`] -> return
 //!   [`PersistError::DbVersionTooNew`] and **do not touch any other
 //!   row**; the file was written by a newer binary.
 //!
@@ -70,7 +70,7 @@ pub struct SqliteBackend {
     _lock: DirLock,
     conn: Mutex<Connection>,
     /// `true` once the `account.version` row has been observed to equal
-    /// [`DB_VERSION`] — either it was already stamped by a previous
+    /// [`DB_VERSION`]: either it was already stamped by a previous
     /// session or we've stamped it as part of this session's first
     /// write. While `false`, every mutating op folds a stamp put
     /// into its transaction. Read-only ops never flip this.
@@ -97,7 +97,7 @@ impl SqliteBackend {
     ///
     /// Ensures the `account` table exists and runs the DB version
     /// guard: refuses files whose stamped version is greater than
-    /// [`DB_VERSION`]. Fresh files are NOT stamped at open time — the
+    /// [`DB_VERSION`]. Fresh files are NOT stamped at open time. The
     /// `account.version` row is written lazily by the first mutating
     /// op (see [`Self::stamp_version_if_needed`]). This keeps an
     /// open-but-never-written DB usable by older binaries.
@@ -159,7 +159,7 @@ fn create_store_table_maybe(conn: &Connection, store: &str) -> Result<(), Persis
 /// `account.version` row exists, `None` for a fresh DB. Refuses to
 /// proceed if the recorded version is greater than [`DB_VERSION`].
 ///
-/// Never mutates the DB — stamping is deferred to the first actual
+/// Never mutates the DB. Stamping is deferred to the first actual
 /// write; see [`SqliteBackend::stamp_version_if_needed`].
 fn check_version(conn: &Connection) -> Result<Option<u32>, PersistError> {
     let found: Option<Vec<u8>> = conn
@@ -293,7 +293,7 @@ impl PersistenceBackend for SqliteBackend {
                 }
                 // Deletes before inserts: a key in both lists ends up with
                 // the inserted value. Refuse to touch the version row
-                // either way — it's backend-owned.
+                // either way: it's backend-owned.
                 let delete_sql = format!("DELETE FROM \"{store}\" WHERE \"key\" = ?1");
                 for key in removed {
                     if store == ACCOUNT_STORE_KEY && key == VERSION_ROW_KEY {

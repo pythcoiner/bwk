@@ -1,7 +1,7 @@
 //! Storage profile for `bwk_sp::Account`.
 //!
 //! Names the two SP-specific stores (coins / SP txs). Labels are
-//! stored through [`bwk::LabelStore`] directly — silent-payment label
+//! stored through [`bwk::LabelStore`] directly: silent-payment label
 //! keys are a strict subset of bwk's `LabelKey` (no `Address` variant
 //! is ever produced by SP code paths), so a separate type would just
 //! duplicate the encode/decode plumbing.

@@ -1,6 +1,6 @@
 # bwk-utils
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Shared utilities and test helpers.
 

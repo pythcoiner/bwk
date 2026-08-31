@@ -237,10 +237,10 @@ impl Client {
     }
 
     /// Broadcast a transaction to the connected peer using the standard
-    /// `inv` → `getdata` → `tx` relay protocol.
+    /// `inv` -> `getdata` -> `tx` relay protocol.
     ///
     /// Returns `Ok(())` once the peer has requested and received the full
-    /// transaction. This is the strongest confirmation available over P2P —
+    /// transaction. This is the strongest confirmation available over P2P:
     /// Bitcoin Core will not serve a transaction back to the peer that sent
     /// it, so mempool acceptance cannot be verified from the same connection.
     pub fn broadcast_tx(&mut self, tx: Transaction) -> Result<(), Error> {

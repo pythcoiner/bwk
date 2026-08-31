@@ -45,7 +45,7 @@ pub(crate) struct DirLock {
 
 impl DirLock {
     /// Acquire an exclusive advisory lock on `{dir}/.lock`, creating
-    /// the sentinel file if it doesn't exist. Non-blocking — returns
+    /// the sentinel file if it doesn't exist. Non-blocking: returns
     /// [`PersistError::AlreadyOpen`] if another holder has it.
     pub(crate) fn acquire(dir: &Path) -> Result<Self, PersistError> {
         Self::acquire_path(dir.join(LOCK_FILENAME))

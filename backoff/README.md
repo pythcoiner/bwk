@@ -1,6 +1,6 @@
 # bwk-backoff
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Exponential backoff utility for polling loops.
 

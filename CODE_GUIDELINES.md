@@ -7,7 +7,7 @@ Update docs (CLAUDE.md, README, doc comments) when making changes.
 ## Bitcoin Specifics
 
 Never invent Bitcoin protocol details. When uncertain about derivation paths,
-script formats, BIP specifications, or cryptographic operations — ask or
+script formats, BIP specifications, or cryptographic operations, ask or
 read the relevant BIP. Getting Bitcoin wrong breaks real money.
 
 ## Markdown
@@ -28,7 +28,7 @@ Don't state the obvious. No "returns the name" on `fn name() -> &str`.
 ## Helpers
 
 Extract helpers for repeated logic. Avoid duplicating code across tests or
-modules — shared helpers make maintenance easier and reduce rewrite effort.
+modules. Shared helpers make maintenance easier and reduce rewrite effort.
 
 ## Store Implementation Pattern
 
@@ -98,11 +98,11 @@ self.store.lock().expect("poisoned")
 ## Tests
 
 Use `unwrap()` in tests, not `expect("...")`. Tests already show the
-failing line on panic — the extra message is noise.
+failing line on panic. The extra message is noise.
 
 ## Section Separators
 
-Forbidden — no `//====`, `//----`, or any decorative banner lines.
+Forbidden: no `//====`, `//----`, or any decorative banner lines.
 Use a simple `// Section name` comment if grouping is needed.
 
 ## Test Feature

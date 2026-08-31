@@ -4,13 +4,13 @@
 //! orchestrator can persist a mutated config without knowing where it
 //! lives. Three impls ship here:
 //!
-//! - [`NoopConfigStore`] — `save` is a no-op, `load` returns `None`.
+//! - [`NoopConfigStore`]: `save` is a no-op, `load` returns `None`.
 //!   The default; suitable when the consumer holds the config
 //!   externally (e.g. an FFI host).
-//! - [`FileConfigStore`] — JSON file at a fixed [`PathBuf`]. The
+//! - [`FileConfigStore`]: JSON file at a fixed [`PathBuf`]. The
 //!   replacement for the old `Config::to_file` / `Config::from_file`
 //!   inherent methods.
-//! - [`CallbackConfigStore`] — bridges save/load to caller-supplied
+//! - [`CallbackConfigStore`]: bridges save/load to caller-supplied
 //!   closures, for hosts that hold config through their own KV layer
 //!   (e.g. platform preferences in an FFI consumer).
 

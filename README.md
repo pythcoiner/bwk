@@ -1,9 +1,9 @@
 # Bitcoin Wallet Kit
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Modular Rust workspace for building Bitcoin wallets. Provides account management,
-UTXO tracking, transaction building, and signing — with backends for both
+UTXO tracking, transaction building, and signing, with backends for both
 standard descriptor wallets (via Electrum) and Silent Payments (BIP352 via
 Blindbit).
 

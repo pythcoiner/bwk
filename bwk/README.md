@@ -1,6 +1,6 @@
 # bwk
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Descriptor-based Bitcoin wallet account using Electrum for chain data.
 
