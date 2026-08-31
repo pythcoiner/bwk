@@ -592,6 +592,7 @@ struct ScanContext<'a, P: SpStorageProfile> {
     block_data_observer: Option<BlockDataObserver>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn scan_blocks<P: SpStorageProfile>(
     agent: Arc<ureq::Agent>,
     blindbit_url: &str,
@@ -636,7 +637,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     // `start > end` is allowed: it means the receive pass is already at the tip
     // and only the trailing spend sweep needs to run. `process_scan` decides
     // per phase and errors if neither phase has work.
-    log::info!("start: {} end: {}", start, end);
+    log::info!("start: {start} end: {end}");
     let start_time = Instant::now();
     let backend = BackendContext {
         agent,

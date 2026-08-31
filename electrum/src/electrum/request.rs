@@ -26,15 +26,6 @@ impl Request {
         }
     }
 
-    fn new_with_id(id: usize, method: Method, params: Params) -> Self {
-        Request {
-            jsonrpc: "2.0".into(),
-            id,
-            method,
-            params,
-        }
-    }
-
     pub fn id(mut self, id: usize) -> Self {
         self.id = id;
         self

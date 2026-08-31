@@ -42,8 +42,7 @@ pub struct Context(c_int);
 // A type as aligned as C's max_align_t (16 on every arch rustc supports), used to
 // size the over-allocation that lets context_destroy recover the block length.
 #[repr(align(16))]
-#[derive(Copy, Clone)]
-struct AlignedType([u8; 16]);
+struct AlignedType;
 
 const ALIGN_TO: usize = core::mem::align_of::<AlignedType>();
 
@@ -137,7 +136,7 @@ unsafe extern "C" fn secp256k1_default_illegal_callback_fn(
 ) {
     let slice = core::slice::from_raw_parts(message as *const u8, strlen(message));
     let msg = core::str::from_utf8_unchecked(slice);
-    panic!("[libsecp256k1] illegal argument. {}", msg);
+    panic!("[libsecp256k1] illegal argument. {msg}");
 }
 
 #[no_mangle]
@@ -147,7 +146,7 @@ unsafe extern "C" fn secp256k1_default_error_callback_fn(
 ) {
     let slice = core::slice::from_raw_parts(message as *const u8, strlen(message));
     let msg = core::str::from_utf8_unchecked(slice);
-    panic!("[libsecp256k1] internal consistency check failed {}", msg);
+    panic!("[libsecp256k1] internal consistency check failed {msg}");
 }
 
 // --- Safe Rust API ---

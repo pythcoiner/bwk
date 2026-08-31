@@ -126,13 +126,11 @@ mod tests {
         // Allow some tolerance for thread scheduling
         assert!(
             first_arrival.as_millis() < 150,
-            "First result arrived at {:?}, expected < 150ms (streaming)",
-            first_arrival
+            "First result arrived at {first_arrival:?}, expected < 150ms (streaming)"
         );
         assert!(
             last_arrival.as_millis() >= 150,
-            "Last result arrived at {:?}, expected >= 150ms",
-            last_arrival
+            "Last result arrived at {last_arrival:?}, expected >= 150ms"
         );
     }
 

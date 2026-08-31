@@ -622,6 +622,29 @@ impl Receiver {
     }
 }
 
+/// Calculate the shared secret of a transaction.
+///
+/// # Arguments
+///
+/// * `tweak_data` - The tweak data from the block index.
+/// * `b_scan` - The scan private key used by the wallet.
+///
+/// # Returns
+///
+/// This function returns the shared secret of this transaction. This shared secret can be used to scan the transaction of outputs that are for the current user. See [`Receiver::scan_transaction`].
+pub fn calculate_ecdh_shared_secret(tweak_data: &PublicKey, b_scan: &SecretKey) -> PublicKey {
+    let mut ss_bytes = [0u8; 65];
+    ss_bytes[0] = 0x04;
+
+    // Constant-time ECDH multiply (mainline secp256k1). The output point is
+    // byte-identical to the fork's vartime multiply; only timing differs. The
+    // hot candidate-spk scan path uses secp256k1_spscan-sys (own vartime kernel); this
+    // recovery path runs only on a filter match, so const time is fine here.
+    ss_bytes[1..].copy_from_slice(&shared_secret_point(tweak_data, b_scan));
+
+    PublicKey::from_slice(&ss_bytes).expect("guaranteed to be a point on the curve")
+}
+
 #[cfg(test)]
 mod tests {
     use super::Label;
@@ -715,27 +738,4 @@ mod tests {
         let s: String = "deadbeef".to_owned();
         Label::try_from(s).unwrap_err();
     }
-}
-
-/// Calculate the shared secret of a transaction.
-///
-/// # Arguments
-///
-/// * `tweak_data` - The tweak data from the block index.
-/// * `b_scan` - The scan private key used by the wallet.
-///
-/// # Returns
-///
-/// This function returns the shared secret of this transaction. This shared secret can be used to scan the transaction of outputs that are for the current user. See [`Receiver::scan_transaction`].
-pub fn calculate_ecdh_shared_secret(tweak_data: &PublicKey, b_scan: &SecretKey) -> PublicKey {
-    let mut ss_bytes = [0u8; 65];
-    ss_bytes[0] = 0x04;
-
-    // Constant-time ECDH multiply (mainline secp256k1). The output point is
-    // byte-identical to the fork's vartime multiply; only timing differs. The
-    // hot candidate-spk scan path uses secp256k1_spscan-sys (own vartime kernel); this
-    // recovery path runs only on a filter match, so const time is fine here.
-    ss_bytes[1..].copy_from_slice(&shared_secret_point(tweak_data, b_scan));
-
-    PublicKey::from_slice(&ss_bytes).expect("guaranteed to be a point on the curve")
 }

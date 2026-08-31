@@ -11,3 +11,6 @@ links = "secp256k1_spscan"
 
 [build-dependencies]
 cc = "1.0.28"
+
+[lints.clippy]
+needless_range_loop = "allow"

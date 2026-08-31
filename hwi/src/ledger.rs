@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
 use bitcoin::{
-    bip32::{DerivationPath, Fingerprint, Xpub},
+    bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
     psbt::Psbt,
 };
 use ledger_bitcoin_client::psbt::PartialSignature;
@@ -22,13 +22,13 @@ use ledger_bitcoin_client::{
     WalletPolicy, WalletPubKey,
 };
 
-use crate::{
-    parse_version, utils, AddressScript, DeviceKind, Error as HWIError, CHANGE_INDEX, HWI,
-    RECV_INDEX,
-};
+use crate::{parse_version, utils, AddressScript, DeviceKind, Error as HWIError, HWI};
 
 pub use hidapi::{DeviceInfo, HidApi};
 pub use ledger_bitcoin_client::client::Transport;
+
+const RECV_INDEX: ChildNumber = ChildNumber::Normal { index: 0 };
+const CHANGE_INDEX: ChildNumber = ChildNumber::Normal { index: 1 };
 
 #[derive(Default)]
 struct CommandOptions {

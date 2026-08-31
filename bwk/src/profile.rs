@@ -72,22 +72,18 @@ impl<B: PersistenceBackend + Clone + 'static> StorageProfile for RamProfile<B> {
     type SignerStore = RamStore<B, bip32::Fingerprint, JsonSigner>;
 }
 
-// ----- statuses encode/decode helpers used by the StatusesStore slot -----
-// Wired up by `open_ram_stores` in a follow-up commit.
-
-#[allow(dead_code)]
 pub(crate) fn encode_status_key(k: &ScriptBuf) -> String {
     serde_json::to_string(k).expect("ScriptBuf serialises as JSON")
 }
-#[allow(dead_code)]
+
 pub(crate) fn decode_status_key(s: &str) -> Result<ScriptBuf, PersistError> {
     serde_json::from_str(s).map_err(|e| PersistError::Serde(format!("bad ScriptBuf pk: {e}")))
 }
-#[allow(dead_code)]
+
 pub(crate) fn encode_status_value(v: &(Option<String>, u32, u32)) -> Result<Vec<u8>, PersistError> {
     serde_json::to_vec(v).map_err(|e| PersistError::Serde(format!("encode status: {e}")))
 }
-#[allow(dead_code)]
+
 pub(crate) fn decode_status_value(
     bytes: &[u8],
 ) -> Result<(Option<String>, u32, u32), PersistError> {
@@ -184,6 +180,11 @@ pub struct Stores<P: StorageProfile> {
     pub account: P::AccountStore,
     pub signers: P::SignerStore,
 }
+
+/// Reopens the statuses store from the backend, the fallback an account takes
+/// when a panicked listener could not hand its own store back.
+pub type ReopenStatuses<P> =
+    Arc<dyn Fn() -> Result<<P as StorageProfile>::StatusesStore, PersistError> + Send + Sync>;
 
 /// Profiles that know how to open their store bundle from a pair of
 /// runtime-dispatched [`PersistenceBackend`]s. Required by

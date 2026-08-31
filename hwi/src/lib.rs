@@ -1,6 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::io_other_error)]
-
 pub mod bip389;
 #[cfg(feature = "bitbox")]
 pub mod bitbox;
@@ -17,16 +14,11 @@ pub mod specter;
 pub mod utils;
 
 use bitcoin::{
-    bip32::{ChildNumber, DerivationPath, Fingerprint, Xpub},
+    bip32::{DerivationPath, Fingerprint, Xpub},
     psbt::Psbt,
 };
 
 use std::{cmp::Ordering, fmt::Debug, str::FromStr};
-
-#[allow(dead_code)]
-const RECV_INDEX: ChildNumber = ChildNumber::Normal { index: 0 };
-#[allow(dead_code)]
-const CHANGE_INDEX: ChildNumber = ChildNumber::Normal { index: 1 };
 
 #[derive(Debug, Clone)]
 pub enum Error {
