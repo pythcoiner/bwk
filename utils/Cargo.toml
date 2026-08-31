@@ -16,7 +16,7 @@ doctest = false
 miniscript.workspace = true
 bitcoin.workspace = true
 rand.workspace = true
-env_logger.workspace = true
+env_logger = { workspace = true, optional = true }
 log.workspace = true
 ureq = { workspace = true, optional = true }
 corepc-node = { workspace = true, optional = true }
@@ -25,5 +25,11 @@ electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffe
 
 [features]
 default = []
-test = ["dep:corepc-node", "dep:electrsd", "dep:temp-dir", "bitcoin/rand-std"]
+test = [
+    "dep:corepc-node",
+    "dep:electrsd",
+    "dep:env_logger",
+    "dep:temp-dir",
+    "bitcoin/rand-std",
+]
 ureq = ["dep:ureq"]

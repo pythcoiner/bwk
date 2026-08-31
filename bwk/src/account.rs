@@ -3633,13 +3633,17 @@ mod tests {
 mod integration_tests {
 
     use rand::random_range;
-    use std::{collections::BTreeMap, sync::mpsc, thread::sleep, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        sync::{mpsc, Once},
+        thread::sleep,
+        time::Duration,
+    };
 
     use super::{Notification, TxListenerNotif};
     use crate::{
         coin_store::Payment,
         config::{maybe_create_dir, Config},
-        log::INIT,
         Account,
     };
     use bip39::Mnemonic;
@@ -3757,6 +3761,8 @@ mod integration_tests {
             println!("{msg}");
         }
     }
+
+    static INIT: Once = Once::new();
 
     #[allow(unused)]
     pub fn setup_logger() {

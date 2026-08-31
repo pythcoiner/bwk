@@ -98,3 +98,11 @@ index N, if N >= generated_tip, the tip advances and new addresses get watched.
 Uses `ChangeTipUpdater` to increment change_generated_tip on each
 `create_script()` call. The index is stored in a `Cell` so `psbt_output_info()`
 can return correct BIP32 derivation path.
+
+## Features
+
+All off by default. `logger` installs `env_logger` as the global logger; leave
+it off if the consumer installs its own. `sp` adds the silent-payments
+notification variants `bwk-sp` needs, `hwi` adds hardware wallet signers,
+`sqlite` selects the SQLite persistence backend, and `test` exposes the
+test-only constructors the integration tests reach for.

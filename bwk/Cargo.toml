@@ -28,12 +28,13 @@ miniscript.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 log.workspace = true
-env_logger.workspace = true
+env_logger = { workspace = true, optional = true }
 dirs.workspace = true
 bip39 = { workspace = true, features = ["serde", "rand"] }
 thiserror.workspace = true
 
 [dev-dependencies]
+env_logger = { workspace = true }
 home.workspace = true
 bwk-persist = { workspace = true, features = ["test"] }
 electrsd = { git = "https://github.com/pythcoiner/electrsd.git", branch = "buffered_logs"}
@@ -48,4 +49,7 @@ default = []
 sp = []
 hwi = ["bwk-sign/hwi"]
 sqlite = ["bwk-persist/sqlite"]
-test = ["bwk-utils/test", "bwk-sign/test", "bwk-tx/test", "bwk-persist/test"]
+test = ["bwk-utils/test", "bwk-sign/test", "bwk-tx/test", "bwk-persist/test", "logger"]
+# Installs env_logger through `log::Logger`. Off by default: a consumer with its
+# own logger would otherwise pull env_logger and its timestamp/colour stack.
+logger = ["dep:env_logger"]
