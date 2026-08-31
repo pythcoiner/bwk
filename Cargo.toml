@@ -32,11 +32,9 @@ url = "=2.5.2"
 bip39 = "2.2.0"
 bitcoin = { version = "0.32", features = ["serde"] }
 bitcoin_slices = "0.8.0"
-dirs = "6.0.0"
 hex = "0.4"
 hex-conservative = "0.2.1"
 hex_lit = "0.1.1"
-home = "=0.5.9"
 libc = "0.2.170"
 log = "0.4.20"
 miniscript = { version = "12.2.0", features = ["base64"] }
