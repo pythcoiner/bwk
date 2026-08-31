@@ -11,7 +11,7 @@ use crate::{PersistError, PersistenceBackend};
 /// `removed` sets; flush emits them as a single
 /// [`PersistenceBackend::flush_batch`] call.
 ///
-/// Generic over any `B: PersistenceBackend` — concrete (`SqliteBackend`,
+/// Generic over any `B: PersistenceBackend`: concrete (`SqliteBackend`,
 /// `JsonBackend`, `NoopBackend`) for monomorphised static dispatch, or
 /// `Arc<dyn PersistenceBackend>` for runtime dispatch via the blanket
 /// impl.
@@ -21,7 +21,7 @@ pub struct RamStore<B: PersistenceBackend, K: Ord, V> {
     removed: HashSet<K>,
     backend: B,
     store_key: &'static str,
-    // Encoding hooks — fn pointers, zero-monomorphisation cost. Only
+    // Encoding hooks: fn pointers, zero-monomorphisation cost. Only
     // the write-path encoders are retained; decoders are used once at
     // `open()` time.
     encode_k: fn(&K) -> String,
@@ -113,7 +113,7 @@ impl<B: PersistenceBackend, K: Ord + Clone + Hash + Eq, V: Clone> RamStore<B, K,
     // right there. Domain-store wrappers that embed a `RamStore` use
     // these inherent methods to avoid cloning on every read and to
     // keep their own external `Option<&V>` / `Option<&mut V>` API
-    // shape. No trait needed — these are specific to the RAM strategy.
+    // shape. No trait needed: these are specific to the RAM strategy.
     // ------------------------------------------------------------------
 
     /// Borrow an entry's value by key. `None` if absent. Infallible.
@@ -315,7 +315,7 @@ mod tests {
         // The key was never persisted, so we don't need to track its
         // removal: it's as if it was never there.
         //
-        // (Current impl inserts into `removed` — that's a minor waste
+        // (Current impl inserts into `removed`. That's a minor waste
         // but correct, since the flush will try to delete a key that
         // was never put. We simply check that the `removed` set
         // doesn't reference something `dirty` shouldn't either.)
@@ -460,7 +460,7 @@ mod tests {
     fn remove_then_insert_persists_inserted_value() {
         let (mut s, d) = ram_store_on_json();
         // Pre-flush so "a" is genuinely on disk before the
-        // remove→insert dance.
+        // remove->insert dance.
         s.insert("a".into(), 1).unwrap();
         s.flush().unwrap();
         drop(s);
@@ -589,7 +589,7 @@ mod tests {
             () => {
                 assert!(
                     s.dirty.intersection(&s.removed).next().is_none(),
-                    "dirty ∩ removed must be empty; got dirty={:?} removed={:?}",
+                    "dirty and removed must not overlap; got dirty={:?} removed={:?}",
                     s.dirty,
                     s.removed
                 );

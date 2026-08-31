@@ -141,7 +141,7 @@ fn validate_psbt_reports_spent_input() {
     let mining_addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &mining_addr);
 
-    // Send to a known address — creates UTXO X owned by pay_addr.
+    // Send to a known address: creates UTXO X owned by pay_addr.
     let pay_addr = rpc_address(rpc);
     let funding_txid_hex: String = rpc
         .call(

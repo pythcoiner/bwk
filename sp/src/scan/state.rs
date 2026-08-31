@@ -407,7 +407,7 @@ mod tests {
     fn test_scan_state_load_from_backend_fresh_dir_returns_default() {
         use std::env;
 
-        // Fresh directory — no persisted state yet. JsonBackend::open
+        // Fresh directory: no persisted state yet. JsonBackend::open
         // stamps DB_VERSION; load_from_backend returns a state at birthday 0.
         let temp_dir = env::temp_dir().join("bwk-sp-scan-state-fresh-test");
         let _ = fs::remove_dir_all(&temp_dir);

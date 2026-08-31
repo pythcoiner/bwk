@@ -1,4 +1,4 @@
-//! Backend layer — byte-level KV persistence.
+//! Backend layer: byte-level KV persistence.
 //!
 //! A [`PersistenceBackend`] is the narrow interface that every concrete
 //! on-disk (or no-op) store implements. Its rows are opaque bytes; the
@@ -6,11 +6,11 @@
 //! top and handles encoding.
 //!
 //! Concrete backends ship in their own submodule:
-//! - [`NoopBackend`] — discards all writes, reads as absent.
-//! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`NoopBackend`]: discards all writes, reads as absent.
+//! - [`JsonBackend`]: one JSON file per store inside a directory.
 //! - [`HeaderBackend`]: one binary fixed-record file for validated
 //!   headers.
-//! - [`SqliteBackend`] — a single SQLite file per account (requires the
+//! - [`SqliteBackend`]: a single SQLite file per account (requires the
 //!   `sqlite` Cargo feature).
 
 use std::sync::Arc;
@@ -43,7 +43,7 @@ pub use sqlite::SqliteBackend;
 /// [`delete_row`](Self::delete_row), [`get_row`](Self::get_row), and
 /// [`get_rows`](Self::get_rows). For batched writes (typical for stores
 /// flushing a set of dirty / removed entries in one shot), use
-/// [`flush_batch`](Self::flush_batch) — its default impl loops the row
+/// [`flush_batch`](Self::flush_batch). Its default impl loops the row
 /// primitives, but backends override it when they can do better (e.g.
 /// [`JsonBackend`] rewrites the per-store file in one I/O; the SQLite
 /// impl folds every row into a single transaction).
@@ -107,7 +107,7 @@ pub trait PersistenceBackend: Send + Sync + std::fmt::Debug {
 
 // Blanket impl so any smart pointer to a backend (notably
 // `Arc<dyn PersistenceBackend>` and `Arc<ConcreteBackend>`) satisfies
-// the bound — callers hold `Arc<B>` when several stores share one
+// the bound: callers hold `Arc<B>` when several stores share one
 // backend instance and never reach for `dyn` unless they opt in.
 impl<T: PersistenceBackend + ?Sized> PersistenceBackend for Arc<T> {
     fn validate_store_name(&self, store: &str) -> Result<(), PersistError> {

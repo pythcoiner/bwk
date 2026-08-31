@@ -705,7 +705,7 @@ pub fn swap_to_sp(
     Some(tx)
 }
 
-// TestEnv — integration test harness
+// TestEnv: integration test harness
 
 use bwk_sign::HotSigner;
 use bwk_tx::{Coin, CoinSpendInfo, CoinStatus, KeyChain};

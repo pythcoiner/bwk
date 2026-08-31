@@ -406,7 +406,7 @@ pub struct Account<
     pub(crate) config: Config,
     pub(crate) scan_runtime: ScanRuntimeConfig,
     /// Persistence sink for `config`. [`NoopConfigStore`] by default.
-    /// Consumers wire whatever shape suits them — a
+    /// Consumers wire whatever shape suits them, a
     /// [`bwk::persist::FileConfigStore`] for file-backed persistence, a
     /// [`bwk::persist::CallbackConfigStore`] to bridge save/load through
     /// host-supplied closures, or any other [`ConfigStore`] impl.
@@ -416,7 +416,7 @@ pub struct Account<
     pub(crate) scanner_handle: Option<JoinHandle<()>>,
     pub(crate) broadcast_handle: Option<JoinHandle<()>>,
     pub(crate) scanner_stop: Arc<AtomicBool>,
-    // Sub-accounts use the default bwk RAM profile — independent of sp's P.
+    // Sub-accounts use the default bwk RAM profile, independent of sp's P.
     sub_accounts: Vec<bwk::Account>,
     /// Shared HeaderStore handle every BIP32 sub-account's chain-tip-advance
     /// pass reads from.
@@ -672,7 +672,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     }
 
     // (see the free `create_backend` helper below for the backend
-    // constructor — it's pure w.r.t. `P`.)
+    // constructor: it's pure w.r.t. `P`.)
 
     /// Create or load stores based on config.persist + persist_kind.
     ///
@@ -738,7 +738,7 @@ impl Account<crate::profile::SpRamProfile<crate::profile::DefaultBackend>> {
     }
 }
 
-// Generic accessors and operations — available for any `P: SpStorageProfile`.
+// Generic accessors and operations, available for any `P: SpStorageProfile`.
 #[cfg(feature = "mnemonic")]
 impl<P: crate::profile::SpStorageProfile> Account<P> {
     /// Returns the account name.
@@ -1251,7 +1251,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
             .sp_provider(sp_provider)
     }
 
-    /// Sign all inputs in a PSBT — both SP and BIP32 (segwit/taproot).
+    /// Sign all inputs in a PSBT, both SP and BIP32 (segwit/taproot).
     ///
     /// 1. Signs SP inputs using `b_spend + tweak` (no taproot tweak).
     /// 2. Signs BIP32 inputs via sub-account SigningManagers.
@@ -1416,7 +1416,7 @@ impl<P: crate::profile::SpStorageProfile> Account<P> {
                 .map_err(AccountError::Tweak)?;
 
             let keypair = Keypair::from_secret_key(&secp, &sk);
-            // SP outputs use dangerous_assume_tweaked() — no taproot tweak on the
+            // SP outputs use dangerous_assume_tweaked(): no taproot tweak on the
             // output key, so sign with the untweaked keypair directly.
             let sig = secp.sign_schnorr_with_aux_rand(&msg, &keypair, &aux_rand);
 
@@ -1545,7 +1545,7 @@ pub enum AddressSource {
 #[cfg(feature = "mnemonic")]
 /// One address the wallet owns, aggregated across sub-accounts
 /// (BIP32) and the SP wallet. `account_name` identifies the
-/// originating keychain — see [`bwk::Account::name`] /
+/// originating keychain, see [`bwk::Account::name`] /
 /// [`crate::Account::name`]. `source` carries the per-spk provenance
 /// (see [`AddressSource`]).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1586,7 +1586,7 @@ pub fn backend_info(blindbit_url: String) -> Result<(InfoResponse, String), Acco
         return Ok((info, blindbit_url));
     }
 
-    // No scheme — try http:// then https://.
+    // No scheme: try http:// then https://.
     let http_url = format!("http://{blindbit_url}");
     if let Ok(info) = try_url(&http_url) {
         return Ok((info, http_url));
@@ -2023,9 +2023,7 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------
-    // owned_addresses — aggregate view across BIP32 subs + SP
-    // -----------------------------------------------------------------
+    // owned_addresses: aggregate view across BIP32 subs + SP
 
     fn build_offline_segwit_sub(name: &str) -> bwk::Account {
         use bip39::Mnemonic;
@@ -2154,9 +2152,7 @@ mod tests {
         assert_eq!(entry.address, expected);
     }
 
-    // -----------------------------------------------------------------
-    // lookup_owned_address — sanity-check API for export / send paths
-    // -----------------------------------------------------------------
+    // lookup_owned_address: sanity-check API for export / send paths
 
     #[test]
     fn lookup_returns_none_for_unknown_address() {

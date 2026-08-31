@@ -1,6 +1,6 @@
 # bwk-electrum
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Electrum protocol client with TCP/SSL support.
 
@@ -90,17 +90,17 @@ Consumer
 ## Request/Response Types
 
 **Requests:**
-- `CoinRequest::Subscribe(Vec<ScriptBuf>)` — Subscribe to script status changes
-- `CoinRequest::History(Vec<ScriptBuf>)` — Get transaction history for scripts
-- `CoinRequest::Txs(Vec<Txid>)` — Fetch raw transactions
-- `CoinRequest::Stop` — Stop the listener thread
+- `CoinRequest::Subscribe(Vec<ScriptBuf>)`: Subscribe to script status changes
+- `CoinRequest::History(Vec<ScriptBuf>)`: Get transaction history for scripts
+- `CoinRequest::Txs(Vec<Txid>)`: Fetch raw transactions
+- `CoinRequest::Stop`: Stop the listener thread
 
 **Responses:**
-- `CoinResponse::Status(BTreeMap<ScriptBuf, Option<String>>)` — Script statuses
-- `CoinResponse::History(BTreeMap<ScriptBuf, Vec<(Txid, Option<u64>)>>)` — Tx history
-- `CoinResponse::Txs(Vec<Transaction>)` — Raw transactions
-- `CoinResponse::Stopped` — Listener stopped
-- `CoinResponse::Error(String)` — Error message
+- `CoinResponse::Status(BTreeMap<ScriptBuf, Option<String>>)`: Script statuses
+- `CoinResponse::History(BTreeMap<ScriptBuf, Vec<(Txid, Option<u64>)>>)`: Tx history
+- `CoinResponse::Txs(Vec<Transaction>)`: Raw transactions
+- `CoinResponse::Stopped`: Listener stopped
+- `CoinResponse::Error(String)`: Error message
 
 ## Local Development
 

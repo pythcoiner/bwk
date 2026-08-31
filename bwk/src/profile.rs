@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn tip_persist_on_disk_file_is_valid_json() {
         // The account-store file must be parseable as JSON and carry
-        // the tip rows as JSON numbers — the whole point of JsonBackend
+        // the tip rows as JSON numbers: the whole point of JsonBackend
         // is human-readable on-disk files.
         let dir = temp_dir::TempDir::new().expect("tempdir");
         let typed_backend = JsonBackend::open(dir.path().to_path_buf()).expect("open JsonBackend");

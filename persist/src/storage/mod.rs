@@ -1,4 +1,4 @@
-//! Storage layer — typed `(Key, Value)` stores layered over a
+//! Storage layer: typed `(Key, Value)` stores layered over a
 //! [`PersistenceBackend`](crate::PersistenceBackend).
 //!
 //! The [`Store`] trait is the shared surface every caching / write-back /
@@ -18,7 +18,7 @@ pub use ram::RamStore;
 /// provided here is a RAM-cached + write-back impl parameterised on a
 /// [`PersistenceBackend`](crate::PersistenceBackend). Future impls
 /// could back a network service, a DB query-per-op strategy, or an LRU
-/// layer — they'd satisfy the same trait without callers changing.
+/// layer. They'd satisfy the same trait without callers changing.
 ///
 /// Every method returns `Result` so strategies whose reads can fail
 /// (DB, online) are expressible without a later surface change;
@@ -77,7 +77,7 @@ pub trait Store {
 
     /// Mutate the value at `k` in place. For a RAM impl this is a
     /// mutable borrow plus dirty mark. For a write-through DB impl
-    /// it's effectively get → apply `f` → put. Returns `true` if the
+    /// it's effectively get -> apply `f` -> put. Returns `true` if the
     /// key existed (`f` ran), `false` if absent.
     fn modify<F: FnOnce(&mut Self::Value)>(
         &mut self,

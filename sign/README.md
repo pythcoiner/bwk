@@ -1,6 +1,6 @@
 # bwk-sign
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 PSBT signing infrastructure with support for hot signers and hardware wallets.
 
@@ -59,10 +59,10 @@ SigningManager
 ## Signer Trait
 
 All signers implement `Signer` trait with async notification pattern:
-- `init()` — Register notification channel, emit `SignerNotif::Info`
-- `get_xpub()` — Request xpub at derivation path, emit `SignerNotif::Xpub`
-- `sign_with_descriptor()` — Sign PSBT, emit `SignerNotif::Signed`
-- `register_descriptor()` / `is_descriptor_registered()` — For hardware wallets
+- `init()`: Register notification channel, emit `SignerNotif::Info`
+- `get_xpub()`: Request xpub at derivation path, emit `SignerNotif::Xpub`
+- `sign_with_descriptor()`: Sign PSBT, emit `SignerNotif::Signed`
+- `register_descriptor()` / `is_descriptor_registered()`: For hardware wallets
 
 ## send! Macro
 

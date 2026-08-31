@@ -1604,7 +1604,7 @@ mod tests {
             notif_sender,
             0, // recv_tip
             0, // change_tip
-            5, // look_ahead — populates spk indices 0..=5
+            5, // look_ahead: populates spk indices 0..=5
             tx_store,
             label_store,
             dummy_config,

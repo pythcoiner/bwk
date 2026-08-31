@@ -1,10 +1,10 @@
 # bwk-keys
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Key derivation utilities and origin-aware key types.
 
-Provides `OXpriv` and `OXpub` — extended keys bundled with their origin
+Provides `OXpriv` and `OXpub`, extended keys bundled with their origin
 (fingerprint + derivation path). Also includes `KeyDerivator` for deriving
 keys from mnemonics.
 
@@ -30,6 +30,6 @@ println!("{}", xpub);  // [73c5da0a/84'/0'/0']xpub6...
 
 ## Types
 
-- `OXpriv` — Extended private key with origin (fingerprint, derivation path)
-- `OXpub` — Extended public key with origin
-- `KeyDerivator` — Derives keys from BIP39 mnemonic
+- `OXpriv`: Extended private key with origin (fingerprint, derivation path)
+- `OXpub`: Extended public key with origin
+- `KeyDerivator`: Derives keys from BIP39 mnemonic

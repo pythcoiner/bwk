@@ -1,6 +1,6 @@
 # bwk-p2p
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Bitcoin P2P network client and DNS seed resolution.
 
@@ -25,7 +25,7 @@ let client = Client::new("127.0.0.1:8333", Network::Bitcoin)?;
 
 ## Components
 
-- `Client` — P2P connection with version handshake
-- `fetch_peers()` — DNS seed resolution for peer discovery
-- `DNS_SEED_SERVERS` — Known DNS seeds per network
-- `network_to_magic()` — Network magic bytes
+- `Client`: P2P connection with version handshake
+- `fetch_peers()`: DNS seed resolution for peer discovery
+- `DNS_SEED_SERVERS`: Known DNS seeds per network
+- `network_to_magic()`: Network magic bytes

@@ -1,6 +1,6 @@
 # bwk-tx
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Transaction building, coin selection, and PSBT generation.
 
@@ -36,10 +36,10 @@ let psbt = result.psbt;
 
 ## Key Traits
 
-- `RecipientProvider` — Creates outputs (address + amount + PSBT metadata)
-- `CoinSource` — Provides spendable coins for selection
-- `ChangeTip` — Manages change address index progression
-- `CoinCandidate` — Coin with value and satisfaction weight for selection
+- `RecipientProvider`: Creates outputs (address + amount + PSBT metadata)
+- `CoinSource`: Provides spendable coins for selection
+- `ChangeTip`: Manages change address index progression
+- `CoinCandidate`: Coin with value and satisfaction weight for selection
 
 ## Coin Selection
 
@@ -50,7 +50,7 @@ Weighted random selection algorithm that:
 
 ## Types
 
-- `TxBuilder` — Main builder with fluent API
-- `TxTemplate` — Inputs, outputs, and fee specification
-- `Coin` — UTXO with script, value, and derivation info
-- `Fees` — Fee specification (sat/vB, msat/vB, or absolute)
+- `TxBuilder`: Main builder with fluent API
+- `TxTemplate`: Inputs, outputs, and fee specification
+- `Coin`: UTXO with script, value, and derivation info
+- `Fees`: Fee specification (sat/vB, msat/vB, or absolute)

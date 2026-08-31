@@ -346,7 +346,7 @@ impl<P: SpStorageProfile> SpCoinStore<P> {
     /// (each per-output tweak is unique), so most entries are
     /// `Used` with a single funding txid. A `Reused` entry
     /// indicates external (non-SP-flow) activity that landed at
-    /// the same spk — typically address poisoning, or a payer
+    /// the same spk, typically address poisoning, or a payer
     /// copying the on-chain address from an earlier tx and sending
     /// a regular Bitcoin payment to it. The wallet surfaces the
     /// signal; consumer policy decides how to react.
@@ -912,7 +912,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // addresses_with_status — per-spk status + funding/spending view
+    // addresses_with_status: per-spk status + funding/spending view
     // ---------------------------------------------------------------
 
     /// Build an `OwnedOutput` pointing at a specific script_pubkey,
@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn addresses_with_status_reuse_marks_reused() {
-        // Two coins landing at the SAME spk — anomalous in normal
+        // Two coins landing at the SAME spk, anomalous in normal
         // SP flow (would need address poisoning or a non-SP payment
         // copying the on-chain address from history).
         let mut store = SpCoinStore::new();

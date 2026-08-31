@@ -3,7 +3,7 @@
 //! Covers 16 spending scenarios:
 //! - SP-only inputs (to SP, taproot, segwit, and mixed outputs)
 //! - Mixed SP + BIP32 inputs (to standard outputs)
-//! - Mixed SP + BIP32 inputs (to SP outputs — regression for partial secret)
+//! - Mixed SP + BIP32 inputs (to SP outputs, regression for partial secret)
 
 mod common;
 
@@ -194,7 +194,7 @@ fn test_drain() {
     assert_eq!(psbt.unsigned_tx.input.len(), 2);
 }
 
-/// SP → SP (self): send to own address, verify change.
+/// SP -> SP (self): send to own address, verify change.
 #[test]
 fn test_sp_to_sp_self() {
     let mut env = TestEnv::new();
@@ -229,7 +229,7 @@ fn test_sp_to_sp_self() {
     );
 }
 
-/// SP → SP (other wallet): verify recipient detects the output.
+/// SP -> SP (other wallet): verify recipient detects the output.
 #[test]
 fn test_sp_to_sp_other() {
     let mut env = TestEnv::new();
@@ -265,7 +265,7 @@ fn test_sp_to_sp_other() {
     assert!(receiver.balance() >= send_amount);
 }
 
-/// SP → taproot address.
+/// SP -> taproot address.
 #[test]
 fn test_sp_to_taproot() {
     let mut env = TestEnv::new();
@@ -284,7 +284,7 @@ fn test_sp_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP → segwit (P2WPKH) address.
+/// SP -> segwit (P2WPKH) address.
 #[test]
 fn test_sp_to_segwit() {
     let mut env = TestEnv::new();
@@ -303,7 +303,7 @@ fn test_sp_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP → SP + taproot (mixed outputs).
+/// SP -> SP + taproot (mixed outputs).
 #[test]
 fn test_sp_to_mixed_sp_taproot() {
     let mut env = TestEnv::new();
@@ -333,7 +333,7 @@ fn test_sp_to_mixed_sp_taproot() {
     );
 }
 
-/// SP → SP + segwit (mixed outputs).
+/// SP -> SP + segwit (mixed outputs).
 #[test]
 fn test_sp_to_mixed_sp_segwit() {
     let mut env = TestEnv::new();
@@ -363,7 +363,7 @@ fn test_sp_to_mixed_sp_segwit() {
     );
 }
 
-/// 2 SP → SP + taproot (multiple SP inputs, mixed outputs).
+/// 2 SP -> SP + taproot (multiple SP inputs, mixed outputs).
 #[test]
 fn test_multi_sp_to_mixed_sp_taproot() {
     let mut env = TestEnv::new();
@@ -394,7 +394,7 @@ fn test_multi_sp_to_mixed_sp_taproot() {
     );
 }
 
-/// 2 SP → taproot (drain to standard output).
+/// 2 SP -> taproot (drain to standard output).
 #[test]
 fn test_multi_sp_to_taproot() {
     let mut env = TestEnv::new();
@@ -412,7 +412,7 @@ fn test_multi_sp_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + taproot → taproot (drain, no SP change).
+/// SP + taproot -> taproot (drain, no SP change).
 #[test]
 fn test_mixed_sp_taproot_to_taproot() {
     let mut env = TestEnv::new();
@@ -430,7 +430,7 @@ fn test_mixed_sp_taproot_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + taproot → segwit (drain, no SP change).
+/// SP + taproot -> segwit (drain, no SP change).
 #[test]
 fn test_mixed_sp_taproot_to_segwit() {
     let mut env = TestEnv::new();
@@ -448,7 +448,7 @@ fn test_mixed_sp_taproot_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + segwit → taproot (drain, no SP change).
+/// SP + segwit -> taproot (drain, no SP change).
 #[test]
 fn test_mixed_sp_segwit_to_taproot() {
     let mut env = TestEnv::new();
@@ -466,7 +466,7 @@ fn test_mixed_sp_segwit_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + segwit → segwit (drain, no SP change).
+/// SP + segwit -> segwit (drain, no SP change).
 #[test]
 fn test_mixed_sp_segwit_to_segwit() {
     let mut env = TestEnv::new();
@@ -484,7 +484,7 @@ fn test_mixed_sp_segwit_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// 3 SP inputs → SP + taproot (drain multiple SP coins).
+/// 3 SP inputs -> SP + taproot (drain multiple SP coins).
 #[test]
 fn test_multi_sp_inputs_to_sp_and_taproot() {
     let mut env = TestEnv::new();
@@ -522,7 +522,7 @@ fn test_multi_sp_inputs_to_sp_and_taproot() {
     );
 }
 
-/// SP → 3 SP outputs to self (2 receive + 1 change, same scan key, k=0..2).
+/// SP -> 3 SP outputs to self (2 receive + 1 change, same scan key, k=0..2).
 #[test]
 fn test_sp_to_three_sp_outputs_self() {
     let mut env = TestEnv::new();
@@ -558,7 +558,7 @@ fn test_sp_to_three_sp_outputs_self() {
     );
 }
 
-/// 2 SP inputs → 3 SP outputs to self (multiple inputs, multiple outputs).
+/// 2 SP inputs -> 3 SP outputs to self (multiple inputs, multiple outputs).
 #[test]
 fn test_multi_sp_inputs_to_three_sp_outputs() {
     let mut env = TestEnv::new();
@@ -592,7 +592,7 @@ fn test_multi_sp_inputs_to_three_sp_outputs() {
     );
 }
 
-/// SP → SP other + SP self + SP change (3 outputs, 2 scan-key groups).
+/// SP -> SP other + SP self + SP change (3 outputs, 2 scan-key groups).
 #[test]
 fn test_sp_to_sp_other_and_self() {
     let mut env = TestEnv::new();
@@ -643,7 +643,7 @@ fn test_sp_to_sp_other_and_self() {
     assert!(receiver.balance() >= 50_000);
 }
 
-/// SP + taproot → SP address (drain, triggers partial secret with mixed inputs).
+/// SP + taproot -> SP address (drain, triggers partial secret with mixed inputs).
 ///
 /// Regression test: before the fix, `compute_partial_secret()` failed with
 /// `CoinNotFound` because it tried to look up BIP32 coins in the SP coin store.
@@ -675,7 +675,7 @@ fn test_mixed_sp_taproot_to_sp() {
     );
 }
 
-/// SP + segwit → SP address (drain, triggers partial secret with mixed inputs).
+/// SP + segwit -> SP address (drain, triggers partial secret with mixed inputs).
 ///
 /// Regression test: same as above but with segwit BIP32 coins.
 #[test]
