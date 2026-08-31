@@ -155,7 +155,7 @@ pub fn spent_filter(
     if let Some(observer) = observer {
         observer(block_height);
     }
-    let url = join(url, &format!("filter/spent/{}", block_height));
+    let url = join(url, &format!("filter/spent/{block_height}"));
     let resp: FilterResponse = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into())
 }
@@ -165,13 +165,13 @@ pub fn spent_index(
     url: &str,
     block_height: Height,
 ) -> Result<SpentIndexData, Error> {
-    let url = join(url, &format!("spent-index/{}", block_height));
+    let url = join(url, &format!("spent-index/{block_height}"));
     let resp: SpentIndexResponse = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into())
 }
 
 pub fn utxos(agent: &ureq::Agent, url: &str, block_height: Height) -> Result<Vec<UtxoData>, Error> {
-    let url = join(url, &format!("utxos/{}", block_height));
+    let url = join(url, &format!("utxos/{block_height}"));
     let resp: Vec<UtxoResponse> = get_parsed(agent, url.as_str(), &[])?;
     Ok(resp.into_iter().map(Into::into).collect())
 }
@@ -182,7 +182,7 @@ pub(crate) fn tweaks(
     block_height: Height,
     dust_limit: Option<Amount>,
 ) -> Result<Vec<[u8; 33]>, Error> {
-    let url = join(url, &format!("tweaks/{}", block_height));
+    let url = join(url, &format!("tweaks/{block_height}"));
     let params = dust_limit
         .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
         .unwrap_or_default();
@@ -195,7 +195,7 @@ pub(crate) fn tweak_index(
     block_height: Height,
     dust_limit: Option<Amount>,
 ) -> Result<Vec<[u8; 33]>, Error> {
-    let url = join(url, &format!("tweak-index/{}", block_height));
+    let url = join(url, &format!("tweak-index/{block_height}"));
     let params = dust_limit
         .map(|dl| vec![("dustLimit", dl.to_sat().to_string())])
         .unwrap_or_default();
@@ -207,7 +207,7 @@ pub(crate) fn filter_new_utxos(
     url: &str,
     block_height: Height,
 ) -> Result<FilterResponse, Error> {
-    let url = join(url, &format!("filter/new-utxos/{}", block_height));
+    let url = join(url, &format!("filter/new-utxos/{block_height}"));
     get_parsed(agent, url.as_str(), &[])
 }
 

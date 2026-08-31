@@ -1,6 +1,10 @@
 //! Source: adapted from SPDK's vendored `silentpayments` vector-test helpers,
 //! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
 
+// Vendored: mirrors the upstream vector-test helpers verbatim, so it carries
+// items this repo never reads.
+#![allow(dead_code)]
+
 use std::{fs::File, io::Read, str::FromStr};
 
 use bitcoin_hashes::Hash;

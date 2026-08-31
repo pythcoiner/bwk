@@ -5,7 +5,6 @@ use crate::{
 use bwk_backoff::Backoff;
 use std::{
     collections::{BTreeSet, VecDeque},
-    fmt::Debug,
     sync::mpsc,
     time::{Duration, Instant},
 };

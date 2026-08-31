@@ -577,7 +577,7 @@ where
     /// low-difficulty chain from the anchor upward. Sparse-start operation
     /// assumes an honest server for the anchor's chain context; only a
     /// genesis-anchored chain is fully self-validating.
-    #[cfg(any(test, feature = "test"))]
+    #[cfg(test)]
     pub(crate) fn append_anchor(
         &self,
         token: u64,
@@ -925,11 +925,8 @@ where
     let lo = h.saturating_sub(max as u32);
     let mut out = Vec::new();
     let mut k = h - 1;
-    loop {
-        match get(k).and_then(|raw| deserialize::<Header>(&raw).ok()) {
-            Some(hdr) => out.push(hdr),
-            None => break,
-        }
+    while let Some(hdr) = get(k).and_then(|raw| deserialize::<Header>(&raw).ok()) {
+        out.push(hdr);
         if k == lo {
             break;
         }
@@ -1405,6 +1402,7 @@ fn fetch_and_verify_genesis(
 /// Genesis pin + retarget-boundary-snapped backfill up to `server_tip.0 - 1`.
 ///
 /// Returns `false` on unrecoverable error (worker should exit).
+#[allow(clippy::too_many_arguments)]
 fn initial_sync(
     store: &Arc<HeaderStore>,
     network: Network,
@@ -1559,6 +1557,7 @@ fn apply_one(
 /// Returns `None` if a fetch failed, or if the walk exhausted the stored
 /// range without a match; the latter case wipes and re-syncs the store from
 /// scratch instead of leaving it dormant.
+#[allow(clippy::too_many_arguments)]
 fn find_fork_point(
     store: &Arc<HeaderStore>,
     token: u64,

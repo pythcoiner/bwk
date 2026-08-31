@@ -23,10 +23,6 @@ repository = "https://github.com/pythcoiner/bwk"
 keywords = ["bitcoin"]
 readme = "README.md"
 
-[workspace.lints.clippy]
-uninlined_format_args = "allow"
-io_other_error = "allow"
-
 [workspace.dependencies]
 crossbeam = "0.8"
 bwk-hwi = { path = "hwi", default-features = false }

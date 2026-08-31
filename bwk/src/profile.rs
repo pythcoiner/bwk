@@ -185,6 +185,11 @@ pub struct Stores<P: StorageProfile> {
     pub signers: P::SignerStore,
 }
 
+/// Reopens the statuses store from the backend, the fallback an account takes
+/// when a panicked listener could not hand its own store back.
+pub type ReopenStatuses<P> =
+    Arc<dyn Fn() -> Result<<P as StorageProfile>::StatusesStore, PersistError> + Send + Sync>;
+
 /// Profiles that know how to open their store bundle from a pair of
 /// runtime-dispatched [`PersistenceBackend`]s. Required by
 /// `Account::new` so the constructor can be generic over `P`.

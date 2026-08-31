@@ -1373,11 +1373,7 @@ impl Update {
     pub fn from_diff(spk: ScriptBuf, diff: HistoryDiff) -> Self {
         Update {
             spk,
-            txs: diff
-                .added
-                .into_iter()
-                .map(|(txid, _)| (txid, None))
-                .collect(),
+            txs: diff.added.into_keys().map(|txid| (txid, None)).collect(),
         }
     }
 

@@ -35,13 +35,6 @@ fn backend_height(blindbit_url: &str) -> u32 {
         .to_consensus_u32()
 }
 
-fn backend_with_cutthrough(blindbit_url: &str) -> bool {
-    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
-    bwk_sp::blindbit::info(&agent, blindbit_url)
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false)
-}
-
 //
 // These tests require the `blindbitd` crate which provides:
 // - BlindbitD server (Silent Payment indexer)

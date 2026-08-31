@@ -1,6 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
-#![allow(clippy::io_other_error)]
-
 pub mod bip389;
 #[cfg(feature = "bitbox")]
 pub mod bitbox;

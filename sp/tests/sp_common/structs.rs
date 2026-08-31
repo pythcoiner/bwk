@@ -1,6 +1,9 @@
 //! Source: adapted from SPDK's vendored `silentpayments` vector-test helpers,
 //! originally imported from cygnet3/rust-silentpayments. See `sp/NOTICE`.
 
+// Vendored: mirrors the upstream vector-test helpers verbatim, so it carries
+// items this repo never reads.
+#![allow(dead_code)]
 #![allow(non_snake_case)]
 use bwk_sp::core::utils::common::SilentPaymentAddress;
 use serde::Deserialize;

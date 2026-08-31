@@ -155,7 +155,6 @@ fn test_config_persistence_roundtrip() {
 fn test_real_backend_connection() {
     // 1. Create BlindbitD (local backend server)
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -190,7 +189,6 @@ fn test_real_backend_connection() {
 fn test_real_backend_scan() {
     // 1. Create BlindbitD (local backend server)
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -452,7 +450,6 @@ fn test_reorg_handling() {
 fn test_full_receive_flow() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -571,7 +568,6 @@ fn test_scan_handles_network_error() {
 fn test_scan_state_consistent_after_crash() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -694,7 +690,6 @@ fn test_concurrent_funding_during_scan() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
     let url = bbd.url();
-    let backend = url.clone();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1234,7 +1229,6 @@ fn test_notification_multiple_outputs_same_block() {
 fn test_birthday_height_skips_old_blocks() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -1310,7 +1304,6 @@ fn test_birthday_height_misses_earlier_outputs() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -2034,7 +2027,6 @@ fn test_concurrent_scan_and_read() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -2175,7 +2167,6 @@ fn test_scanner_with_concurrent_api_calls() {
 
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();
@@ -2351,7 +2342,6 @@ fn test_persists_immediately_on_new_output() {
 fn test_no_persist_on_empty_scan() {
     // 1. Create BlindbitD
     let mut bbd = BlindbitD::new().unwrap();
-    let backend = bbd.url();
 
     // 2. Get bitcoind client
     let mut bitcoind_node = bbd.bitcoin().unwrap();

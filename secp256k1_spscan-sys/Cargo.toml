@@ -11,3 +11,10 @@ links = "secp256k1_spscan"
 
 [build-dependencies]
 cc = "1.0.28"
+
+# Vendored FFI shim, linted as third-party code.
+[lints.rust]
+dead_code = "allow"
+
+[lints.clippy]
+needless_range_loop = "allow"

@@ -32,7 +32,9 @@ use crate::{
     header_store::{HeaderStore, InvalidCause},
     history::{AccountHistory, TxContribution},
     label_store::{LabelKey, LabelStore},
-    profile::{self, DefaultBackend, OpenFromBackend, RamProfile, StorageProfile, Stores},
+    profile::{
+        self, DefaultBackend, OpenFromBackend, RamProfile, ReopenStatuses, StorageProfile, Stores,
+    },
     tx_store::{Inclusion, TxEntry, TxStore},
 };
 
@@ -299,7 +301,7 @@ pub struct Account<P: StorageProfile = RamProfile<DefaultBackend>> {
     /// listener cannot hand its store back. Cloned into the listener thread,
     /// which resolves the store itself. `None` for stores-only (test)
     /// construction with no backend.
-    reopen_statuses: Option<Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync>>,
+    reopen_statuses: Option<ReopenStatuses<P>>,
 }
 
 impl<P: StorageProfile> std::fmt::Debug for Account<P> {
@@ -492,7 +494,7 @@ impl<P: OpenFromBackend> Account<P> {
                 backend.clone()
             };
         let reopen_backend = backend.clone();
-        let reopen_statuses: Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync> =
+        let reopen_statuses: ReopenStatuses<P> =
             Arc::new(move || P::open_statuses(reopen_backend.clone()));
         let stores = P::open(backend, secrets_backend)?;
         Ok(Self::from_stores(
@@ -566,9 +568,7 @@ impl<P: StorageProfile> Account<P> {
         sender: mpsc::Sender<Notification>,
         config_store: Arc<dyn ConfigStore<Config>>,
         stores: Stores<P>,
-        reopen_statuses: Option<
-            Arc<dyn Fn() -> Result<P::StatusesStore, PersistError> + Send + Sync>,
-        >,
+        reopen_statuses: Option<ReopenStatuses<P>>,
     ) -> Self {
         let tx_store = TxStore::from_store(stores.tx);
         let label_store = Arc::new(Mutex::new(LabelStore::from_store(stores.label)));
@@ -1778,6 +1778,7 @@ fn handle_txs_response_msg<P: StorageProfile>(
 
 /// Verify a `TxMerkle` response and promote the entry to `Verified`, or mark it
 /// terminally `VerifyFailed` on a hard proof mismatch.
+#[allow(clippy::too_many_arguments)]
 fn handle_tx_merkle<P: StorageProfile>(
     coin_store: &Mutex<CoinStore<P>>,
     header_store: &HeaderStore<P::HeaderStore>,
@@ -2599,13 +2600,14 @@ mod tests {
         let (req_tx, req_rx) = mpsc::channel();
         let (notif_tx, _notif_rx) = mpsc::channel();
 
-        handle_history_response_msg(
+        assert!(handle_history_response_msg(
             BTreeMap::from([(spk, vec![(txid, Some(h as u64))])]),
             &coin_store,
             &header_store,
             &req_tx,
             &notif_tx,
-        );
+        )
+        .is_continue());
         assert!(matches!(
             req_rx.try_recv(),
             Ok(CoinRequest::Txs(txids)) if txids == vec![txid]
@@ -3636,7 +3638,6 @@ mod integration_tests {
     use crate::{
         coin_store::Payment,
         config::{maybe_create_dir, Config},
-        header_store::HeaderStore,
         log::INIT,
         Account,
     };
