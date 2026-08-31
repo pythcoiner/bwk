@@ -32,9 +32,11 @@ cargo fmt -- --check
 
 MSRV: 1.88
 
-**Before committing:** Ensure CI will pass by running clippy, fmt check, and
-tests locally. Commit messages must be single-line and follow existing style
-(e.g., `crate: short description`).
+**Before committing:** run `scripts/ci-checks.sh`. It is the single definition
+of green for this repo (fmt check, clippy, tests, release build, in that
+order), and every CI job runs a section of it; pass a section name to run just
+one, e.g. `scripts/ci-checks.sh clippy`. Commit messages must be single-line
+and follow existing style (e.g., `crate: short description`).
 
 ## Workspace Crates
 
