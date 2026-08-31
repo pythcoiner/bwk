@@ -77,4 +77,4 @@ scripts/ci-checks.sh tests
 scripts/ci-checks.sh clippy
 ```
 
-MSRV: 1.78
+MSRV: 1.88
