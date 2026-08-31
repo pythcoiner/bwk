@@ -119,7 +119,7 @@ fn test_account_block_height_growth() {
     let account = test_account(&blindbit_url);
 
     // 5. Verify initial height
-    let height1 = backend_height(&blindbit_url);
+    let height1 = account.block_height().unwrap();
     assert!(height1 >= 50, "Expected height >= 50, got {height1}");
 
     // 6. Generate 50 more blocks
@@ -127,7 +127,7 @@ fn test_account_block_height_growth() {
     wait_for_sync_and_index(&blindbit_url, 100);
 
     // 7. Verify height increased
-    let height2 = backend_height(&blindbit_url);
+    let height2 = account.block_height().unwrap();
     assert!(height2 >= 100, "Expected height >= 100, got {height2}");
     assert!(height2 > height1, "Height should have grown");
 }
