@@ -2,7 +2,7 @@
 name = "secp256k1_spscan-sys"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["pythcoiner"]
 license-file = "../LICENSE"
 description = "Byte-FFI for the secp256k1 SP-scan fork."

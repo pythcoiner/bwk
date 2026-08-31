@@ -30,7 +30,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt -- --check
 ```
 
-MSRV: 1.78
+MSRV: 1.88
 
 **Before committing:** Ensure CI will pass by running clippy, fmt check, and
 tests locally. Commit messages must be single-line and follow existing style
