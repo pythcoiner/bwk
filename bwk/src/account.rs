@@ -1600,7 +1600,10 @@ fn handle_address_tip<P: StorageProfile>(
 ) -> ControlFlow<()> {
     let AddressTip { recv, change } = tip;
     let mut sub = vec![];
-    let r_spk = derivator.receive_at(recv).script_pubkey();
+    // `recv` is the tip the loop below stops before, so the highest index it
+    // ever inserts is `recv - 1`. Testing `recv` itself never matches and the
+    // rescan runs on every tip.
+    let r_spk = derivator.receive_at(recv.saturating_sub(1)).script_pubkey();
     if !statuses.contains_key(&r_spk).unwrap_or(false) {
         // FIXME: here we can be smart and not start at 0 but at `actual_tip`
         for i in 0..recv {
@@ -1614,7 +1617,9 @@ fn handle_address_tip<P: StorageProfile>(
             }
         }
     }
-    let c_spk = derivator.change_at(change).script_pubkey();
+    let c_spk = derivator
+        .change_at(change.saturating_sub(1))
+        .script_pubkey();
     if !statuses.contains_key(&c_spk).unwrap_or(false) {
         // FIXME: here we can be smart and not start at 0 but at `actual_tip`
         for i in 0..change {
