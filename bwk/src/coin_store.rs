@@ -1609,6 +1609,42 @@ mod tests {
         (cs, derivator)
     }
 
+    /// A server can hand back a tx whose input names a vout the funding tx
+    /// does not have. The prevout is recorded as unowned with no value.
+    #[test]
+    fn an_input_naming_a_missing_vout_is_skipped() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(1);
+        let funding = funding_tx(spk.clone(), 0.5);
+        let funding_txid = funding.compute_txid();
+        let vouts = funding.output.len() as u32;
+
+        let spend = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::Blocks(bitcoin::absolute::Height::ZERO),
+            input: vec![bitcoin::TxIn {
+                previous_output: OutPoint::new(funding_txid, vouts),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0xFFFFFFFF),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![],
+        };
+        let spend_txid = spend.compute_txid();
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(funding));
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(spend));
+
+        cs.generate();
+
+        let entry = cs.tx_store.get(&spend_txid).expect("the spend is stored");
+        assert_eq!(entry.inputs.len(), 1);
+        let input = entry.inputs.get(&0).expect("the input is populated");
+        assert!(!input.owned, "an unresolvable prevout cannot be owned");
+        assert_eq!(input.value, None);
+    }
+
     #[test]
     fn funding_txids_empty_for_unused_address() {
         let (mut cs, deriv) = build_coin_store();
