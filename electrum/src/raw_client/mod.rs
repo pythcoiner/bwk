@@ -1,7 +1,13 @@
 pub(crate) mod ssl_client;
 pub(crate) mod tcp_client;
 
-use std::{collections::HashMap, fmt::Display, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    io::{ErrorKind, Read},
+    net, thread,
+    time::Duration,
+};
 
 use crate::electrum::{
     self,
@@ -13,6 +19,90 @@ use self::{ssl_client::SslClient, tcp_client::TcpClient};
 
 // Using a 1 byte seek buffer
 pub const PEEK_BUFFER_SIZE: usize = 10;
+const TCP_READ_BUFFER_SIZE: usize = 8192;
+const TLS_READ_BUFFER_SIZE: usize = 1024;
+
+pub trait ElectrumRead: Read {
+    const BUFFER_SIZE: usize;
+
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), Error>;
+}
+
+impl ElectrumRead for net::TcpStream {
+    const BUFFER_SIZE: usize = TCP_READ_BUFFER_SIZE;
+
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), Error> {
+        net::TcpStream::set_nonblocking(self, nonblocking).map_err(|_| match nonblocking {
+            true => Error::SetNonBlocking,
+            false => Error::SetBlocking,
+        })
+    }
+}
+
+impl ElectrumRead for native_tls::TlsStream<net::TcpStream> {
+    const BUFFER_SIZE: usize = TLS_READ_BUFFER_SIZE;
+
+    fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), Error> {
+        self.get_mut()
+            .set_nonblocking(nonblocking)
+            .map_err(|_| match nonblocking {
+                true => Error::SetNonBlocking,
+                false => Error::SetBlocking,
+            })
+    }
+}
+
+fn take_line(buf: &mut Vec<u8>) -> Option<String> {
+    let pos = buf.iter().position(|b| *b == b'\n')?;
+    let rest = buf.split_off(pos + 1);
+    let line = std::mem::replace(buf, rest);
+    Some(String::from_utf8_lossy(&line).into_owned())
+}
+
+pub fn try_read_line<R: ElectrumRead>(
+    stream: &mut R,
+    buf: &mut Vec<u8>,
+) -> Result<Option<String>, Error> {
+    if let Some(line) = take_line(buf) {
+        return Ok(Some(line));
+    }
+    stream.set_nonblocking(true)?;
+    let mut tmp = vec![0u8; R::BUFFER_SIZE];
+    let result = loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break Err(Error::Disconnected),
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(line) = take_line(buf) {
+                    break Ok(Some(line));
+                }
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break Ok(None),
+            Err(e) => break Err(Error::TcpStream(e)),
+        }
+    };
+    stream.set_nonblocking(false)?;
+    result
+}
+
+pub fn read_line<R: ElectrumRead>(stream: &mut R, buf: &mut Vec<u8>) -> Result<String, Error> {
+    stream.set_nonblocking(false)?;
+    let mut tmp = vec![0u8; R::BUFFER_SIZE];
+    loop {
+        if let Some(line) = take_line(buf) {
+            return Ok(line);
+        }
+        match stream.read(&mut tmp) {
+            Ok(0) if !buf.is_empty() => {
+                let line = std::mem::take(buf);
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+            Ok(0) => return Err(Error::Disconnected),
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(e) => return Err(Error::TcpStream(e)),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum Error {
@@ -25,6 +115,7 @@ pub enum Error {
     Mutex,
     AlreadyConnected,
     NotConnected,
+    Disconnected,
     NotConfigured,
     ShutDown,
     SetNonBlocking,
@@ -284,5 +375,88 @@ impl Client {
             Client::Tcp(c) => c.close(),
             Client::Ssl(c) => c.close(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+    };
+
+    /// Accept one connection, write `greeting`, then close. Returns the port
+    /// and a channel that yields the accepted stream so the test controls when
+    /// the peer goes away.
+    fn closing_server(greeting: &'static str) -> (u16, mpsc::Receiver<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            if !greeting.is_empty() {
+                stream.write_all(greeting.as_bytes()).expect("write");
+                stream.flush().expect("flush");
+            }
+            let _ = tx.send(stream);
+        });
+        (port, rx)
+    }
+
+    fn connected(port: u16) -> Client {
+        let mut client = Client::new().tcp("127.0.0.1", port);
+        client.try_connect(None).expect("connect");
+        client
+    }
+
+    /// A peer that closed must not read as "no data yet": the listener loop
+    /// treats `Ok(None)` as an idle tick and would spin on a dead socket.
+    #[test]
+    fn a_closed_peer_is_reported_rather_than_read_as_no_data() {
+        let (port, accepted) = closing_server("");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        let mut last = Ok(None);
+        for _ in 0..100 {
+            last = client.try_recv_str();
+            if last.is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(last, Err(Error::Disconnected)),
+            "expected Disconnected, got {last:?}"
+        );
+    }
+
+    /// The blocking read must report the close too, instead of handing back an
+    /// empty line for every subsequent call.
+    #[test]
+    fn a_blocking_read_on_a_closed_peer_reports_the_close() {
+        let (port, accepted) = closing_server("");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        let read = client.recv_str();
+        assert!(
+            matches!(read, Err(Error::Disconnected)),
+            "expected Disconnected, got {read:?}"
+        );
+    }
+
+    /// Whatever the peer sent before closing is still handed back, and only
+    /// the read after it reports the close.
+    #[test]
+    fn a_partial_line_is_flushed_before_the_close_is_reported() {
+        let (port, accepted) = closing_server("no trailing newline");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        assert_eq!(client.recv_str().expect("tail"), "no trailing newline");
+        assert!(matches!(client.recv_str(), Err(Error::Disconnected)));
     }
 }

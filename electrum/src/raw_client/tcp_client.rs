@@ -1,6 +1,6 @@
-use super::Error;
+use super::{read_line, try_read_line, Error};
 use std::{
-    io::{ErrorKind, Read, Write},
+    io::Write,
     net::{self, ToSocketAddrs},
     sync::{Arc, Mutex},
     time::Duration,
@@ -149,70 +149,12 @@ impl TcpClient {
         Ok(())
     }
 
-    /// Split off the first line (including the trailing `\n`) from the residual
-    /// buffer if it holds a complete one, leaving the remainder in `buf`.
-    fn take_line(buf: &mut Vec<u8>) -> Option<String> {
-        let pos = buf.iter().position(|b| *b == b'\n')?;
-        let rest = buf.split_off(pos + 1);
-        let line = std::mem::replace(buf, rest);
-        Some(String::from_utf8_lossy(&line).into_owned())
-    }
-
-    /// Non-blocking read of one newline-terminated line. Returns `Ok(None)` when
-    /// no full line is available yet.
     pub fn try_read(state: &mut TcpState) -> Result<Option<String>, Error> {
-        if let Some(line) = Self::take_line(&mut state.buf) {
-            return Ok(Some(line));
-        }
-        state
-            .stream
-            .set_nonblocking(true)
-            .map_err(|_| Error::SetNonBlocking)?;
-        // Unbounded line length: electrs is trusted, no max or timeout.
-        let mut tmp = [0u8; 8192];
-        let result = loop {
-            match state.stream.read(&mut tmp) {
-                // connection closed
-                Ok(0) => break Ok(None),
-                Ok(n) => {
-                    state.buf.extend_from_slice(&tmp[..n]);
-                    if let Some(line) = Self::take_line(&mut state.buf) {
-                        break Ok(Some(line));
-                    }
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break Ok(None),
-                Err(e) => break Err(Error::TcpStream(e)),
-            }
-        };
-        state
-            .stream
-            .set_nonblocking(false)
-            .map_err(|_| Error::SetBlocking)?;
-        result
+        try_read_line(&mut state.stream, &mut state.buf)
     }
 
-    /// Blocking read of one newline-terminated line.
     pub fn read(state: &mut TcpState) -> Result<String, Error> {
-        state
-            .stream
-            .set_nonblocking(false)
-            .map_err(|_| Error::SetBlocking)?;
-        // Unbounded line length: electrs is trusted, no max or timeout.
-        let mut tmp = [0u8; 8192];
-        loop {
-            if let Some(line) = Self::take_line(&mut state.buf) {
-                return Ok(line);
-            }
-            match state.stream.read(&mut tmp) {
-                // connection closed: flush whatever remains as the final line
-                Ok(0) => {
-                    let line = std::mem::take(&mut state.buf);
-                    return Ok(String::from_utf8_lossy(&line).into_owned());
-                }
-                Ok(n) => state.buf.extend_from_slice(&tmp[..n]),
-                Err(e) => return Err(Error::TcpStream(e)),
-            }
-        }
+        read_line(&mut state.stream, &mut state.buf)
     }
 
     pub fn close(&mut self) -> Result<(), Error> {
