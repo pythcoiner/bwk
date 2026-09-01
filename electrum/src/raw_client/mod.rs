@@ -25,6 +25,10 @@ pub enum Error {
     Mutex,
     AlreadyConnected,
     NotConnected,
+    /// The peer closed the connection. Distinct from `NotConnected`, which is
+    /// a client that was never connected, and from a read that has no data
+    /// yet.
+    Disconnected,
     NotConfigured,
     ShutDown,
     SetNonBlocking,
@@ -284,5 +288,88 @@ impl Client {
             Client::Tcp(c) => c.close(),
             Client::Ssl(c) => c.close(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::Write,
+        net::{TcpListener, TcpStream},
+        sync::mpsc,
+    };
+
+    /// Accept one connection, write `greeting`, then close. Returns the port
+    /// and a channel that yields the accepted stream so the test controls when
+    /// the peer goes away.
+    fn closing_server(greeting: &'static str) -> (u16, mpsc::Receiver<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            if !greeting.is_empty() {
+                stream.write_all(greeting.as_bytes()).expect("write");
+                stream.flush().expect("flush");
+            }
+            let _ = tx.send(stream);
+        });
+        (port, rx)
+    }
+
+    fn connected(port: u16) -> Client {
+        let mut client = Client::new().tcp("127.0.0.1", port);
+        client.try_connect(None).expect("connect");
+        client
+    }
+
+    /// A peer that closed must not read as "no data yet": the listener loop
+    /// treats `Ok(None)` as an idle tick and would spin on a dead socket.
+    #[test]
+    fn a_closed_peer_is_reported_rather_than_read_as_no_data() {
+        let (port, accepted) = closing_server("");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        let mut last = Ok(None);
+        for _ in 0..100 {
+            last = client.try_recv_str();
+            if last.is_err() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(last, Err(Error::Disconnected)),
+            "expected Disconnected, got {last:?}"
+        );
+    }
+
+    /// The blocking read must report the close too, instead of handing back an
+    /// empty line for every subsequent call.
+    #[test]
+    fn a_blocking_read_on_a_closed_peer_reports_the_close() {
+        let (port, accepted) = closing_server("");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        let read = client.recv_str();
+        assert!(
+            matches!(read, Err(Error::Disconnected)),
+            "expected Disconnected, got {read:?}"
+        );
+    }
+
+    /// Whatever the peer sent before closing is still handed back, and only
+    /// the read after it reports the close.
+    #[test]
+    fn a_partial_line_is_flushed_before_the_close_is_reported() {
+        let (port, accepted) = closing_server("no trailing newline");
+        let mut client = connected(port);
+        drop(accepted.recv().expect("accepted"));
+
+        assert_eq!(client.recv_str().expect("tail"), "no trailing newline");
+        assert!(matches!(client.recv_str(), Err(Error::Disconnected)));
     }
 }

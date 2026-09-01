@@ -200,8 +200,9 @@ impl SslClient {
         let mut tmp = [0u8; 1024];
         let result = loop {
             match state.tls.read(&mut tmp) {
-                // connection closed
-                Ok(0) => break Ok(None),
+                // The peer closed: no further data will arrive, so say so rather
+                // than report the same "nothing yet" a WouldBlock does.
+                Ok(0) => break Err(Error::Disconnected),
                 Ok(n) => {
                     state.buf.extend_from_slice(&tmp[..n]);
                     if let Some(line) = Self::take_line(&mut state.buf) {
@@ -233,11 +234,13 @@ impl SslClient {
                 return Ok(line);
             }
             match state.tls.read(&mut tmp) {
-                // connection closed: flush whatever remains as the final line
-                Ok(0) => {
+                // The peer closed: hand back whatever is buffered as the final
+                // line, then report the close instead of looping on empties.
+                Ok(0) if !state.buf.is_empty() => {
                     let line = std::mem::take(&mut state.buf);
                     return Ok(String::from_utf8_lossy(&line).into_owned());
                 }
+                Ok(0) => return Err(Error::Disconnected),
                 Ok(n) => state.buf.extend_from_slice(&tmp[..n]),
                 Err(e) => return Err(Error::TcpStream(e)),
             }
