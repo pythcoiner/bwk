@@ -426,6 +426,7 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::mnemonic_probe;
     use std::path::Path;
 
     fn test_config() -> Config {
@@ -568,6 +569,32 @@ mod tests {
             .descriptors
             .iter()
             .all(|sub| sub.mnemonic.as_deref() == Some(external_mnemonic)));
+    }
+
+    #[test]
+    fn unknown_word_error_hides_mnemonic_words() {
+        let mut config = test_config();
+
+        let err = config
+            .add_taproot_sub_account_from_mnemonic(mnemonic_probe::UNKNOWN_MNEMONIC)
+            .unwrap_err();
+
+        mnemonic_probe::assert_no_word_leak(&err, mnemonic_probe::UNKNOWN_MNEMONIC);
+        assert_eq!(err.to_string(), "signer error: Fail to create derivator");
+        assert_eq!(format!("{err:?}"), "Signer(Derivator)");
+    }
+
+    #[test]
+    fn checksum_error_hides_mnemonic_words() {
+        let mut config = test_config();
+
+        let err = config
+            .add_taproot_sub_account_from_mnemonic(mnemonic_probe::BAD_CHECKSUM_MNEMONIC)
+            .unwrap_err();
+
+        mnemonic_probe::assert_no_word_leak(&err, mnemonic_probe::BAD_CHECKSUM_MNEMONIC);
+        assert_eq!(err.to_string(), "signer error: Fail to create derivator");
+        assert_eq!(format!("{err:?}"), "Signer(Derivator)");
     }
 
     #[test]

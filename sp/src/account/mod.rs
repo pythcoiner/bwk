@@ -1632,6 +1632,27 @@ pub fn sp_coin_entry_to_coin(outpoint: OutPoint, entry: &SpCoinEntry) -> bwk_tx:
 
 // Tests
 
+#[cfg(test)]
+pub(crate) mod mnemonic_probe {
+    use std::fmt::{Debug, Display};
+
+    /// Not bip39 words, so they can only reach a message by leaking from the input.
+    pub const UNKNOWN_MNEMONIC: &str = "zzalpha zzbravo zzcharlie zzdelta zzecho zzfoxtrot zzgolf zzhotel zzindia zzjuliett zzkilo zzlima";
+
+    /// A valid bip39 vector with its last word swapped: english words, wrong checksum.
+    pub const BAD_CHECKSUM_MNEMONIC: &str =
+        "legal winner thank year wave sausage worth useful legal winner thank zoo";
+
+    /// A downstream consumer writes these renders to a persistent log.
+    pub fn assert_no_word_leak<E: Display + Debug>(err: &E, mnemonic: &str) {
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            for word in mnemonic.split_whitespace() {
+                assert!(!rendered.contains(word), "leaked `{word}` in `{rendered}`");
+            }
+        }
+    }
+}
+
 #[cfg(all(test, feature = "mnemonic"))]
 mod tests {
     use super::*;
@@ -1897,6 +1918,49 @@ mod tests {
             PathBuf::from("/tmp/bwk-sp-test-from-mnemonic"),
         );
         assert!(matches!(result, Err(AccountError::InvalidMnemonic(_))));
+    }
+
+    #[test]
+    fn unknown_word_error_hides_mnemonic_words() {
+        let result = Account::from_mnemonic(
+            "test-account".to_string(),
+            Network::Signet,
+            mnemonic_probe::UNKNOWN_MNEMONIC,
+            "https://blindbit.example.com".to_string(),
+            PathBuf::from("/tmp/bwk-sp-test-unknown-word"),
+        );
+
+        // `Account` is not `Debug`, so `unwrap_err` is not available here.
+        let Err(err) = result else {
+            panic!("expected an error");
+        };
+        mnemonic_probe::assert_no_word_leak(&err, mnemonic_probe::UNKNOWN_MNEMONIC);
+        assert_eq!(
+            err.to_string(),
+            "invalid mnemonic: mnemonic contains an unknown word (word 0)"
+        );
+        assert_eq!(format!("{err:?}"), "InvalidMnemonic(UnknownWord(0))");
+    }
+
+    #[test]
+    fn checksum_error_hides_mnemonic_words() {
+        let result = Account::from_mnemonic(
+            "test-account".to_string(),
+            Network::Signet,
+            mnemonic_probe::BAD_CHECKSUM_MNEMONIC,
+            "https://blindbit.example.com".to_string(),
+            PathBuf::from("/tmp/bwk-sp-test-bad-checksum"),
+        );
+
+        let Err(err) = result else {
+            panic!("expected an error");
+        };
+        mnemonic_probe::assert_no_word_leak(&err, mnemonic_probe::BAD_CHECKSUM_MNEMONIC);
+        assert_eq!(
+            err.to_string(),
+            "invalid mnemonic: the mnemonic has an invalid checksum"
+        );
+        assert_eq!(format!("{err:?}"), "InvalidMnemonic(InvalidChecksum)");
     }
 
     #[test]

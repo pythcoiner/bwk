@@ -898,6 +898,47 @@ mod tests {
         assert_eq!(signer.network, network);
     }
 
+    /// Not bip39 words, so they can only reach a message by leaking from the input.
+    const UNKNOWN_MNEMONIC: &str = "zzalpha zzbravo zzcharlie zzdelta zzecho zzfoxtrot zzgolf zzhotel zzindia zzjuliett zzkilo zzlima";
+
+    /// A valid bip39 vector with its last word swapped: english words, wrong checksum.
+    const BAD_CHECKSUM_MNEMONIC: &str =
+        "legal winner thank year wave sausage worth useful legal winner thank zoo";
+
+    /// A downstream consumer writes these renders to a persistent log.
+    fn assert_no_word_leak(err: &Error, mnemonic: &str) {
+        for rendered in [err.to_string(), format!("{err:?}")] {
+            for word in mnemonic.split_whitespace() {
+                assert!(!rendered.contains(word), "leaked `{word}` in `{rendered}`");
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_word_error_hides_mnemonic_words() {
+        for err in [
+            HotSigner::new_from_mnemonics(Network::Signet, UNKNOWN_MNEMONIC).unwrap_err(),
+            HotSigner::new_taproot_from_mnemonics(Network::Signet, UNKNOWN_MNEMONIC).unwrap_err(),
+        ] {
+            assert_no_word_leak(&err, UNKNOWN_MNEMONIC);
+            assert_eq!(err.to_string(), "Fail to create derivator");
+            assert_eq!(format!("{err:?}"), "Derivator");
+        }
+    }
+
+    #[test]
+    fn checksum_error_hides_mnemonic_words() {
+        for err in [
+            HotSigner::new_from_mnemonics(Network::Signet, BAD_CHECKSUM_MNEMONIC).unwrap_err(),
+            HotSigner::new_taproot_from_mnemonics(Network::Signet, BAD_CHECKSUM_MNEMONIC)
+                .unwrap_err(),
+        ] {
+            assert_no_word_leak(&err, BAD_CHECKSUM_MNEMONIC);
+            assert_eq!(err.to_string(), "Fail to create derivator");
+            assert_eq!(format!("{err:?}"), "Derivator");
+        }
+    }
+
     #[test]
     fn test_sign_transaction() {
         setup_logger();
