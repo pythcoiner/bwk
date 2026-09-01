@@ -316,7 +316,7 @@ pub fn test_mnemonic_2() -> &'static str {
 /// - network: Signet
 /// - mnemonic: standard test mnemonic
 /// - blindbit_url: placeholder URL
-/// - persist: false (to avoid file I/O in tests)
+/// - persistence: none (to avoid file I/O in tests)
 pub fn test_config(temp_dir: &std::path::Path) -> Config {
     Config::new(
         "test-account".to_string(),
@@ -325,7 +325,7 @@ pub fn test_config(temp_dir: &std::path::Path) -> Config {
         "https://blindbit.test.example.com".to_string(),
         temp_dir.to_path_buf(),
     )
-    .enable_persist(false)
+    .with_persistence(None)
 }
 
 /// Creates a test Account with BlindbitD backend (no persistence).
@@ -337,7 +337,7 @@ pub fn test_account(url: &str) -> bwk_sp::account::Account {
         url.to_string(),
         std::path::PathBuf::from("/unused"),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     bwk_sp::account::Account::new(config).expect("create test account")
 }
 
@@ -359,7 +359,7 @@ pub fn test_account_with_mnemonic(
         url.to_string(),
         std::path::PathBuf::from("/unused"),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     bwk_sp::account::Account::new(config).expect("create test account")
 }
 
@@ -382,7 +382,7 @@ pub fn test_account_persistent_named(
         url.to_string(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(true);
+    .with_persistence(Some(bwk::persist::PersistenceKind::Json));
     let account = bwk_sp::account::Account::new(config.clone()).expect("create test account");
     (account, config, dir)
 }
@@ -1083,7 +1083,7 @@ mod tests {
 
         assert_eq!(config.account_name, "test-account");
         assert_eq!(config.network, bitcoin::Network::Signet);
-        assert!(!config.persist);
+        assert!(config.persistence.is_none());
         assert!(config.mnemonic.is_some());
     }
 

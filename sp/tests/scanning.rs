@@ -1037,7 +1037,7 @@ fn test_background_scanner_detects_new_blocks() {
         blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
 
@@ -1286,7 +1286,7 @@ fn test_full_wallet_flow() {
         blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
     account

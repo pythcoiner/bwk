@@ -129,7 +129,7 @@ fn test_config_persistence_roundtrip() {
         "https://blindbit.example.com".to_string(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(true);
+    .with_persistence(Some(bwk::persist::PersistenceKind::Json));
 
     let store: FileConfigStore<Config> =
         FileConfigStore::new(config.account_dir().join(CONFIG_FILENAME));
@@ -524,7 +524,7 @@ fn test_scan_handles_network_error() {
         "http://invalid.local:12345".to_string(), // Invalid URL - will fail
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     // Account creation may fail or scan may fail - verify error handling is graceful
     match bwk_sp::account::Account::new(config) {
@@ -1247,7 +1247,7 @@ fn test_birthday_height_skips_old_blocks() {
         bbd.url(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     config.set_birthday_height(Some(50));
 
     // Verify config has birthday_height set
@@ -1346,7 +1346,7 @@ fn test_birthday_height_misses_earlier_outputs() {
         bbd.url(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     let temp_account = Account::new(config).expect("create temp account");
     let sp_address = temp_account.sp_address();
     drop(temp_account);
@@ -1394,7 +1394,7 @@ fn test_birthday_height_misses_earlier_outputs() {
         bbd.url(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     config.set_birthday_height(Some(birthday_height));
 
     let mut account = Account::new(config).expect("create account");
@@ -1585,7 +1585,7 @@ fn test_dust_limit_filters_small_outputs() {
         backend.clone(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     config.set_dust_limit(Some(1000));
     let mut account = bwk_sp::account::Account::new(config).expect("create account");
 
@@ -1839,7 +1839,7 @@ fn test_sp_address_deterministic() {
         backend.clone(),
         dir1.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let account1 = bwk_sp::account::Account::new(config1).unwrap();
     let addr1 = account1.sp_address().to_string();
@@ -1852,7 +1852,7 @@ fn test_sp_address_deterministic() {
         backend,
         dir2.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let account2 = bwk_sp::account::Account::new(config2).unwrap();
     let addr2 = account2.sp_address().to_string();
@@ -1885,7 +1885,7 @@ fn test_sp_address_different_per_mnemonic() {
         backend.clone(),
         dir1.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let account1 = bwk_sp::account::Account::new(config1).unwrap();
     let addr1 = account1.sp_address().to_string();
@@ -1901,7 +1901,7 @@ fn test_sp_address_different_per_mnemonic() {
         backend,
         dir2.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let account2 = bwk_sp::account::Account::new(config2).unwrap();
     let addr2 = account2.sp_address().to_string();
