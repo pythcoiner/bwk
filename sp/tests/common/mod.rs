@@ -5,11 +5,6 @@
 //! - Temporary directory helpers for persistence tests
 //! - Blindbitd helpers for integration tests (Phase 10.4)
 
-// Included by every bwk-sp test binary, each of which uses a different subset
-// of these helpers, so anything unused by the binary being compiled is dead
-// from its point of view.
-#![allow(dead_code)]
-
 use std::{
     process::Command,
     sync::{
@@ -39,6 +34,7 @@ use bwk_sp::{
 /// the job fails in minutes with the stuck frame in the log instead of stalling
 /// for hours. Drop the returned guard (returning from the test does) to disarm.
 #[must_use]
+#[allow(dead_code)]
 pub fn abort_after(label: &'static str, timeout: Duration) -> WatchdogGuard {
     let armed = Arc::new(AtomicBool::new(true));
     let watch = armed.clone();
@@ -77,6 +73,7 @@ impl Drop for WatchdogGuard {
 
 /// Dump every thread's backtrace by attaching gdb to our own pid. Best-effort:
 /// prints a note and continues if gdb is unavailable or cannot attach.
+#[allow(dead_code)]
 fn dump_threads() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -112,12 +109,8 @@ fn dump_threads() {
 /// Errors that can occur in MockBackend operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MockBackendError {
-    /// Simulated network failure
     #[error("simulated network failure after {0} calls")]
     SimulatedFailure(u32),
-    /// Block not found (reserved for future use)
-    #[error("block not found at height {0}")]
-    BlockNotFound(u32),
 }
 
 // MockBlock
@@ -127,8 +120,6 @@ pub enum MockBackendError {
 pub struct MockBlock {
     /// Block height
     pub height: u32,
-    /// Block hash as bytes (reserved for future use in reorg tests)
-    pub hash: [u8; 32],
     /// Outputs found in this block (outpoint -> owned output)
     pub outputs: Vec<(OutPoint, OwnedOutput)>,
     /// Inputs spent in this block (outpoints that were consumed)
@@ -138,11 +129,8 @@ pub struct MockBlock {
 impl MockBlock {
     /// Create a new mock block with no transactions.
     pub fn new(height: u32) -> Self {
-        let mut hash = [0u8; 32];
-        hash[0..4].copy_from_slice(&height.to_le_bytes());
         Self {
             height,
-            hash,
             outputs: Vec::new(),
             spent_inputs: Vec::new(),
         }
@@ -209,21 +197,6 @@ impl MockBackend {
     /// Configure the backend to fail after N calls.
     pub fn fail_after(mut self, n: u32) -> Self {
         self.fail_after = Some(n);
-        self
-    }
-
-    /// Set the tip height (reserved for future use).
-    pub fn set_tip_height(mut self, height: u32) -> Self {
-        self.tip_height = height;
-        self
-    }
-
-    /// Add a block to the backend (reserved for future use).
-    pub fn add_block(mut self, block: MockBlock) -> Self {
-        if block.height > self.tip_height {
-            self.tip_height = block.height;
-        }
-        self.blocks.push(block);
         self
     }
 
@@ -305,6 +278,7 @@ pub fn test_mnemonic() -> &'static str {
 
 /// Returns a second test mnemonic (different from test_mnemonic).
 /// WARNING: Never use this mnemonic for real funds!
+#[allow(dead_code)]
 pub fn test_mnemonic_2() -> &'static str {
     "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
 }
@@ -329,6 +303,7 @@ pub fn test_config(temp_dir: &std::path::Path) -> Config {
 }
 
 /// Creates a test Account with BlindbitD backend (no persistence).
+#[allow(dead_code)]
 pub fn test_account(url: &str) -> bwk_sp::account::Account {
     let config = Config::new(
         "test".to_string(),
@@ -342,11 +317,13 @@ pub fn test_account(url: &str) -> bwk_sp::account::Account {
 }
 
 /// Creates a test Account with custom name (no persistence).
+#[allow(dead_code)]
 pub fn test_account_named(name: &str, url: &str) -> bwk_sp::account::Account {
     test_account_with_mnemonic(name, test_mnemonic(), url)
 }
 
 /// Creates a test Account with custom name and mnemonic (no persistence).
+#[allow(dead_code)]
 pub fn test_account_with_mnemonic(
     name: &str,
     mnemonic: &str,
@@ -365,11 +342,13 @@ pub fn test_account_with_mnemonic(
 
 /// Creates a test Account with persistence enabled.
 /// Returns (Account, Config, TempDir) - keep TempDir alive for persistence to work.
+#[allow(dead_code)]
 pub fn test_account_persistent(url: &str) -> (bwk_sp::account::Account, Config, TempDir) {
     test_account_persistent_named("test", url)
 }
 
 /// Creates a test Account with persistence enabled and custom name.
+#[allow(dead_code)]
 pub fn test_account_persistent_named(
     name: &str,
     url: &str,
@@ -453,8 +432,10 @@ pub use bwk_utils::test::TempDir;
 // Blindbitd Helpers (Phase 10.4)
 
 /// Dust threshold for Silent Payment outputs.
+#[allow(dead_code)]
 pub const DUST: u64 = 330;
 
+#[allow(dead_code)]
 pub trait SyncTarget {
     fn url(&self) -> String;
     fn dump_logs(&mut self) {}
@@ -490,6 +471,7 @@ impl SyncTarget for &mut BlindbitD {
 /// Polls the backend every 500ms until `block_height()` returns at least `height`.
 /// 60 s flaked under CI load when the runner was indexing many regtest blocks
 /// in parallel; 120 s with finer polling is more robust.
+#[allow(dead_code)]
 pub fn wait_until_sync_at_height(mut target: impl SyncTarget, height: u32) {
     let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     let blindbit_url = target.url();
@@ -524,6 +506,7 @@ pub fn wait_until_sync_at_height(mut target: impl SyncTarget, height: u32) {
 ///
 /// Waits until sync reaches `height`, then sleeps an additional 2 seconds
 /// to allow BlindbitD time to index the new blocks.
+#[allow(dead_code)]
 pub fn wait_for_sync_and_index(target: impl SyncTarget, height: u32) {
     wait_until_sync_at_height(target, height);
     // Give blindbitd extra time to index new blocks
@@ -531,6 +514,7 @@ pub fn wait_for_sync_and_index(target: impl SyncTarget, height: u32) {
 }
 
 /// Block until a background one-shot scan finishes (or `timeout` elapses).
+#[allow(dead_code)]
 pub fn wait_for_oneshot_done(account: &bwk_sp::account::Account, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while account.is_scanning() {
@@ -627,6 +611,7 @@ pub fn generate_recipient_pubkey(
 /// # Returns
 ///
 /// A signed transaction, or None if the input value is insufficient.
+#[allow(dead_code)]
 pub fn swap_to_sp(
     sk: bitcoin::secp256k1::SecretKey,
     outpoint: OutPoint,
@@ -696,19 +681,22 @@ pub fn swap_to_sp(
 
 // TestEnv: integration test harness
 
-use bwk::bwk_electrum::config::ScannerConfig;
+use bwk::bwk_electrum::{config::ScannerConfig, scanner::ElectrumScanner};
 use bwk_coin::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
 use bwk_sign::HotSigner;
 
 /// Mnemonic for BIP32 coins (different from SP mnemonics).
+#[allow(dead_code)]
 pub fn bip32_mnemonic() -> &'static str {
     "legal winner thank year wave sausage worth useful legal winner thank yellow"
 }
 
 /// Satisfaction weight for a taproot key-spend input (same as SP coins).
+#[allow(dead_code)]
 const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
 
 /// Integration test environment wrapping BlindbitD + bitcoind.
+#[allow(dead_code)]
 pub struct TestEnv {
     bbd: BlindbitD,
     pub bitcoind: corepc_node::Node,
@@ -719,6 +707,7 @@ pub struct TestEnv {
     _electrs: Option<Box<dyn std::any::Any>>,
 }
 
+#[allow(dead_code)]
 impl TestEnv {
     /// Create BlindbitD, take bitcoind, mine 101 blocks, wait for sync.
     pub fn new() -> Self {
@@ -847,7 +836,7 @@ impl TestEnv {
             HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();
         let descriptor = signer.descriptors().into_iter().next().unwrap();
-        let mut scanner = ScannerConfig::new(
+        let mut config = ScannerConfig::new(
             descriptor,
             std::path::PathBuf::new(),
             String::new(),
@@ -855,12 +844,11 @@ impl TestEnv {
             bitcoin::Network::Regtest,
             None,
         );
-        scanner.stay_offline = true;
-        let sub = bwk::Account::new(bwk::Config {
-            scanner,
-            mnemonic: Some(bip32_mnemonic().to_string()),
-        });
-        account.add_sub_account(sub);
+        config.set_stay_offline(true);
+        let sub = ElectrumScanner::try_new(config).unwrap();
+        account
+            .add_sub_account(sub, Some(bip32_mnemonic().to_string()))
+            .expect("add_sub_account");
     }
 
     /// Add a segwit (P2WPKH) sub-account to an SP account so it can sign
@@ -870,7 +858,7 @@ impl TestEnv {
             HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();
         let descriptor = signer.descriptors().into_iter().next().unwrap();
-        let mut scanner = ScannerConfig::new(
+        let mut config = ScannerConfig::new(
             descriptor,
             std::path::PathBuf::new(),
             String::new(),
@@ -878,12 +866,11 @@ impl TestEnv {
             bitcoin::Network::Regtest,
             None,
         );
-        scanner.stay_offline = true;
-        let sub = bwk::Account::new(bwk::Config {
-            scanner,
-            mnemonic: Some(bip32_mnemonic().to_string()),
-        });
-        account.add_sub_account(sub);
+        config.set_stay_offline(true);
+        let sub = ElectrumScanner::try_new(config).unwrap();
+        account
+            .add_sub_account(sub, Some(bip32_mnemonic().to_string()))
+            .expect("add_sub_account");
     }
 
     /// Create a funded taproot coin via bitcoind.
