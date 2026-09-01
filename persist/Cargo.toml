@@ -21,6 +21,6 @@ rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 temp-dir.workspace = true
 
 [features]
-default = ["sqlite"]
+default = []
 sqlite = ["dep:rusqlite"]
 test = []
