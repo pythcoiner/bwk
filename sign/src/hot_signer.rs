@@ -831,7 +831,7 @@ fn sign_sp_input(
 /// Converts a tuple containing an account type and an index into a derivation path.
 ///
 /// # Arguments
-/// * `path` - A tuple where the first element is an [`AddrAccount`] representing the account type,
+/// * `path` - A tuple where the first element is a `bool` telling change from receive,
 ///   and the second element is a `u32` representing the index.
 ///
 /// # Returns
@@ -848,7 +848,7 @@ pub fn deriv_path(path: &(bool /* is_change */, u32)) -> Result<DerivationPath, 
 /// * `path` - A reference to a [`DerivationPath`] that contains the account type and index.
 ///
 /// # Returns
-/// A result containing a tuple of the account type as [`AddrAccount`] and the index as `u32`.
+/// A result containing a tuple of the change flag as `bool` and the index as `u32`.
 /// Returns an error if the derivation path does not have the expected length.
 pub fn account_path(path: &DerivationPath) -> Result<(bool /* is_change */, u32), Error> {
     let mut path = path.to_u32_vec();
