@@ -26,22 +26,22 @@ pub enum ScriptType {
 }
 
 impl ScriptType {
-    pub fn to_descriptor<'a, X>(
+    pub fn to_descriptor<X>(
         self,
         network: bitcoin::Network,
         xpub: X,
     ) -> Result<Descriptor<DescriptorPublicKey>, Error>
     where
-        X: 'a + Fn(DerivationPath) -> OXpub,
+        X: Fn(DerivationPath) -> OXpub,
     {
         match self {
             ScriptType::Segwit(acc) => {
                 let deriv = wpkh_path(network, acc)?;
-                Ok(tr(xpub(deriv)))
+                Ok(wpkh(xpub(deriv)))
             }
             ScriptType::Taproot(acc) => {
                 let deriv = tr_path(network, acc)?;
-                Ok(wpkh(xpub(deriv)))
+                Ok(tr(xpub(deriv)))
             }
             ScriptType::Descriptor(descriptor) => Ok(*descriptor),
         }
@@ -116,5 +116,89 @@ impl DescriptorDerivator for Descriptor<DescriptorPublicKey> {
         network: bitcoin::Network,
     ) -> Result<SpkDerivator, crate::derivator::Error> {
         SpkDerivator::new(self.clone(), network)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miniscript::bitcoin::bip32::{Fingerprint, Xpub};
+
+    const XPUB: &str = "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8";
+
+    fn oxpub_at(path: DerivationPath) -> OXpub {
+        OXpub {
+            origin: (Fingerprint::from([0u8; 4]), path),
+            xkey: Xpub::from_str(XPUB).unwrap(),
+        }
+    }
+
+    fn descriptor_for(script: ScriptType) -> String {
+        script
+            .to_descriptor(bitcoin::Network::Bitcoin, oxpub_at)
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn each_script_type_builds_the_descriptor_it_names() {
+        let account = ChildNumber::from_hardened_idx(0).unwrap();
+
+        assert_eq!(
+            descriptor_for(ScriptType::Segwit(account)),
+            format!("wpkh([00000000/84'/0'/0']{XPUB}/<0;1>/*)#taah38uk")
+        );
+        assert_eq!(
+            descriptor_for(ScriptType::Taproot(account)),
+            format!("tr([00000000/86'/0'/0']{XPUB}/<0;1>/*)#vess5qrq")
+        );
+
+        // A shape neither other arm can build, so a rebuilt descriptor would
+        // not match what went in.
+        let given = format!("pkh([00000000/44'/0'/0']{XPUB}/<0;1>/*)");
+        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&given).unwrap();
+        assert_eq!(
+            descriptor_for(ScriptType::Descriptor(Box::new(descriptor.clone()))),
+            descriptor.to_string()
+        );
+    }
+
+    #[test]
+    fn every_network_but_mainnet_derives_under_coin_type_one() {
+        let account = ChildNumber::from_hardened_idx(0).unwrap();
+        for network in [
+            bitcoin::Network::Testnet,
+            bitcoin::Network::Signet,
+            bitcoin::Network::Regtest,
+        ] {
+            assert_eq!(
+                wpkh_path(network, account).unwrap().to_string(),
+                "84'/1'/0'"
+            );
+            assert_eq!(tr_path(network, account).unwrap().to_string(), "86'/1'/0'");
+        }
+    }
+
+    #[test]
+    fn an_unhardened_account_is_refused() {
+        let account = ChildNumber::from_normal_idx(0).unwrap();
+        let network = bitcoin::Network::Bitcoin;
+
+        assert!(matches!(
+            wpkh_path(network, account),
+            Err(Error::UnhardenedAccount)
+        ));
+        assert!(matches!(
+            tr_path(network, account),
+            Err(Error::UnhardenedAccount)
+        ));
+        assert!(matches!(
+            ScriptType::Segwit(account).to_descriptor(network, oxpub_at),
+            Err(Error::UnhardenedAccount)
+        ));
+        assert!(matches!(
+            ScriptType::Taproot(account).to_descriptor(network, oxpub_at),
+            Err(Error::UnhardenedAccount)
+        ));
     }
 }
