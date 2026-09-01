@@ -235,15 +235,27 @@ where
     /// - `network`: The network for which the hot signer is created.
     /// - `mnemonic`: The mnemonic used to create the hot signer.
     pub fn new_bip32_signer_from_mnemonic(&mut self, network: bitcoin::Network, mnemonic: String) {
-        let mut signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
+        let signer = HotSigner::new_from_mnemonics(network, &mnemonic).unwrap();
+        self.add_bip32_signer(signer);
+    }
+
+    /// Take over an already-built hot signer, keyed by its fingerprint. One
+    /// registered under the same fingerprint is replaced, along with the
+    /// descriptors registered on it.
+    pub fn add_bip32_signer(&mut self, mut signer: HotSigner) {
         signer.init(self.sender.clone());
         let fg = signer.fingerprint();
         if let Some(json) = signer.to_json() {
             if let Err(e) = self.store.insert(fg, json) {
-                log::error!("SigningManager::new_bip32_signer insert: {e}");
+                log::error!("SigningManager::add_bip32_signer insert: {e}");
             }
         }
         self.bip32_signers.insert(fg, signer);
+    }
+
+    /// Whether a hot signer with this fingerprint is already registered.
+    pub fn has_bip32_signer(&self, fingerprint: &bip32::Fingerprint) -> bool {
+        self.bip32_signers.contains_key(fingerprint)
     }
 
     pub fn register_bip32_descriptor(&mut self, descriptor: Descriptor<DescriptorPublicKey>) {
