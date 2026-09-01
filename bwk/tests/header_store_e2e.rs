@@ -99,14 +99,14 @@ fn fresh_config(dir: &TempDir, name: &str, url: &str, port: u16, look_ahead: u32
     config
 }
 
-/// Wait until every entry in `account.tx_history()` reports an `inclusion`
+/// Wait until every entry in `account.scanner().tx_history()` reports an `inclusion`
 /// for which `pred` returns true (and there is at least one entry).
 fn wait_for_inclusion<F>(account: &Account, timeout: Duration, pred: F) -> bool
 where
     F: Fn(&Inclusion) -> bool,
 {
     wait_until(timeout, || {
-        let txs = account.tx_history();
+        let txs = account.scanner().tx_history();
         !txs.is_empty() && txs.iter().all(|e| pred(e.inclusion()))
     })
 }
@@ -155,8 +155,16 @@ fn multi_account_shared_header_store() {
     let rx_b = account_b.receiver().expect("receiver B");
     sleep(Duration::from_millis(500));
 
-    let addr_a = account_a.new_addr().address().assume_checked();
-    let addr_b = account_b.new_addr().address().assume_checked();
+    let addr_a = account_a
+        .scanner_mut()
+        .new_addr()
+        .address()
+        .assume_checked();
+    let addr_b = account_b
+        .scanner_mut()
+        .new_addr()
+        .address()
+        .assume_checked();
     sleep(Duration::from_millis(500));
 
     // Fund one UTXO at each address and bury it under a handful of
@@ -176,6 +184,7 @@ fn multi_account_shared_header_store() {
         )),
         "account A did not reach Inclusion::Verified; history={:?}",
         account_a
+            .scanner()
             .tx_history()
             .iter()
             .map(|e| e.inclusion().clone())
@@ -188,6 +197,7 @@ fn multi_account_shared_header_store() {
         )),
         "account B did not reach Inclusion::Verified; history={:?}",
         account_b
+            .scanner()
             .tx_history()
             .iter()
             .map(|e| e.inclusion().clone())
@@ -224,8 +234,8 @@ fn multi_account_shared_header_store() {
     );
 
     // Spendable coins are Confirmed (merkle-verified).
-    let state_a = account_a.spendable_coins();
-    let state_b = account_b.spendable_coins();
+    let state_a = account_a.scanner().spendable_coins();
+    let state_b = account_b.scanner().spendable_coins();
     assert_eq!(state_a.coins.len(), 1, "account A coin count");
     assert_eq!(state_b.coins.len(), 1, "account B coin count");
     let coin_a = state_a.coins.values().next().unwrap();
@@ -292,7 +302,7 @@ fn reorg_reconfirms_verified() {
     let _rx = account.receiver().expect("receiver");
     sleep(Duration::from_millis(500));
 
-    let addr = account.new_addr().address().assume_checked();
+    let addr = account.scanner_mut().new_addr().address().assume_checked();
     sleep(Duration::from_millis(500));
 
     // Fund and confirm.
@@ -312,7 +322,11 @@ fn reorg_reconfirms_verified() {
     );
 
     // Snapshot the funding height + the header hash at that height.
-    let entry = account.tx_history().pop().expect("at least one tx");
+    let entry = account
+        .scanner()
+        .tx_history()
+        .pop()
+        .expect("at least one tx");
     let funding_height = match entry.inclusion() {
         Inclusion::Verified { height, .. } => *height,
         other => panic!("expected Verified, got {other:?}"),
@@ -360,6 +374,7 @@ fn reorg_reconfirms_verified() {
         )),
         "tx never returned to Verified after reorg; history={:?}",
         account
+            .scanner()
             .tx_history()
             .iter()
             .map(|e| e.inclusion().clone())
@@ -368,6 +383,7 @@ fn reorg_reconfirms_verified() {
     assert!(
         wait_until(Duration::from_secs(30), || {
             account
+                .scanner()
                 .coins()
                 .values()
                 .all(|c| c.status() == CoinStatus::Confirmed)
@@ -405,14 +421,16 @@ fn restart_requeues_stranded_merkle_fetch() {
     let _rx = account.receiver().expect("receiver");
     sleep(Duration::from_millis(500));
 
-    let addr = account.new_addr().address().assume_checked();
+    let addr = account.scanner_mut().new_addr().address().assume_checked();
     sleep(Duration::from_millis(500));
 
     send_to_address(&bitcoind, &addr, Amount::from_btc(0.1).unwrap());
     generate(&bitcoind, 1);
     let (new_url, new_port, _new_electrsd) = restart_electrs(electrsd, &bitcoind);
 
-    account.set_electrum_config(Some(new_url), Some(new_port));
+    account
+        .scanner_mut()
+        .set_electrum(Some(new_url), Some(new_port));
     account.restart_electrum();
 
     // A few more confirmations so the verifier has a stable header to
@@ -426,6 +444,7 @@ fn restart_requeues_stranded_merkle_fetch() {
         )),
         "tx never reached Verified after electrs restart; history={:?}",
         account
+            .scanner()
             .tx_history()
             .iter()
             .map(|e| e.inclusion().clone())
@@ -478,7 +497,7 @@ fn sparse_anchor_above_retarget_boundary_syncs_and_verifies() {
     let _rx = account.receiver().expect("receiver");
     sleep(Duration::from_millis(500));
 
-    let addr = account.new_addr().address().assume_checked();
+    let addr = account.scanner_mut().new_addr().address().assume_checked();
     sleep(Duration::from_millis(500));
 
     // Fund and bury above the boundary; the merkle proof verifies against
@@ -493,6 +512,7 @@ fn sparse_anchor_above_retarget_boundary_syncs_and_verifies() {
         )),
         "tx never reached Verified on the sparse-anchored store; history={:?}",
         account
+            .scanner()
             .tx_history()
             .iter()
             .map(|e| e.inclusion().clone())
