@@ -24,6 +24,7 @@ default = ["mnemonic"]
 mnemonic = ["dep:bip39"]
 rand = ["bip39/rand"]
 hwi = ["bwk/hwi", "bwk-sign/hwi"]
+sqlite = ["bwk/sqlite"]
 # Per-phase scan timing hooks (bench instrumentation only).
 scan-profile = []
 # Builds the sp_sync_bench binary driving the real Account scan. Pulls in scan-profile

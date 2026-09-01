@@ -853,6 +853,24 @@ mod tests {
         );
     }
 
+    /// bwk-persist builds the sqlite backend only under its own feature, so
+    /// bwk-sp has to forward it or `PersistenceKind::Sqlite` is unreachable
+    /// from here whatever the caller asks for.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_backend_is_reachable_under_the_feature() {
+        let dir = std::env::temp_dir().join("bwk-sp-sqlite-feature");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let backend =
+            bwk::persist::build_backend(Some(bwk::persist::PersistenceKind::Sqlite), dir.clone());
+        assert!(backend.is_ok(), "{:?}", backend.err());
+
+        // The backend holds the account-dir lock until it drops.
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn test_config_error_display() {
         // Test Io error variant
