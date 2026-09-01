@@ -116,7 +116,7 @@ pub fn select<T: CoinCandidate>(
     feerate: u64,
     min_change: u64,
     max_change: u64,
-    dust: u64,
+    droppable_amount: Option<u64>,
 ) -> (Option<Selection>, Option<Selection>) {
     // NOTE: base tx + output fees must be included in target
     let selections = match all_coins_combinations(coins, feerate) {
@@ -125,11 +125,9 @@ pub fn select<T: CoinCandidate>(
     };
 
     // Try to get a selection where we can just drop a tiny change
-    let mut selection = if let Some((_, sel)) = selections.range(target..target + dust).next() {
-        Some(sel.clone())
-    } else {
-        None
-    };
+    let mut selection = droppable_amount
+        .and_then(|amount| selections.range(target..target + amount).next())
+        .map(|(_, sel)| sel.clone());
 
     let mut cj_selection = None;
     // FIXME: use args for max fee for CJ like
@@ -209,14 +207,19 @@ pub fn select<T: CoinCandidate>(
 /// Trait abstracting the coin selection strategy.
 /// Implement this to provide custom selection algorithms.
 pub trait CoinSelector {
-    fn select_coins(&self, candidates: Vec<Coin>, target: u64, feerate: u64) -> Vec<Coin>;
+    fn select_coins(
+        &self,
+        candidates: Vec<Coin>,
+        target: u64,
+        feerate: u64,
+        droppable_amount: Option<u64>,
+    ) -> Vec<Coin>;
 }
 
 /// Default coin selector wrapping the exhaustive algorithm.
 pub struct DefaultCoinSelector {
     pub min_change: u64,
     pub max_change: u64,
-    pub dust: u64,
 }
 
 impl Default for DefaultCoinSelector {
@@ -224,13 +227,18 @@ impl Default for DefaultCoinSelector {
         Self {
             min_change: 50_000,
             max_change: 5_000_000,
-            dust: 500,
         }
     }
 }
 
 impl CoinSelector for DefaultCoinSelector {
-    fn select_coins(&self, candidates: Vec<Coin>, target: u64, feerate: u64) -> Vec<Coin> {
+    fn select_coins(
+        &self,
+        candidates: Vec<Coin>,
+        target: u64,
+        feerate: u64,
+        droppable_amount: Option<u64>,
+    ) -> Vec<Coin> {
         if candidates.is_empty() {
             return vec![];
         }
@@ -240,7 +248,7 @@ impl CoinSelector for DefaultCoinSelector {
             feerate,
             self.min_change,
             self.max_change,
-            self.dust,
+            droppable_amount,
         );
         if let Some(sel) = selection {
             let mut coins: BTreeMap<_, _> =
@@ -252,5 +260,100 @@ impl CoinSelector for DefaultCoinSelector {
         } else {
             vec![]
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TAPROOT_KEYSPEND_SATISFACTION_WU;
+    use bitcoin::hashes::Hash;
+
+    struct TestCoin {
+        vout: u32,
+        value: u64,
+    }
+
+    impl CoinCandidate for TestCoin {
+        fn outpoint(&self) -> bitcoin::OutPoint {
+            bitcoin::OutPoint {
+                txid: bitcoin::Txid::all_zeros(),
+                vout: self.vout,
+            }
+        }
+        fn value_sat(&self) -> u64 {
+            self.value
+        }
+        fn satisfaction_weight(&self) -> u64 {
+            TAPROOT_KEYSPEND_SATISFACTION_WU
+        }
+    }
+
+    const FEERATE: u64 = 1_000;
+    const MIN_CHANGE: u64 = 50_000;
+    const MAX_CHANGE: u64 = 5_000_000;
+    const TARGET: u64 = 9_900;
+
+    fn input_fee() -> u64 {
+        let wu = PER_INPUT_FIXED_WU + TAPROOT_KEYSPEND_SATISFACTION_WU;
+        Weight::from_wu(wu).to_vbytes_ceil() * FEERATE / 1_000
+    }
+
+    fn candidates() -> Vec<TestCoin> {
+        vec![
+            TestCoin {
+                vout: 0,
+                value: 5_000 + input_fee(),
+            },
+            TestCoin {
+                vout: 1,
+                value: 5_000 + input_fee(),
+            },
+            TestCoin {
+                vout: 2,
+                value: 12_000 + input_fee(),
+            },
+        ]
+    }
+
+    fn selected_vouts(droppable_amount: Option<u64>) -> Vec<u32> {
+        let candidates = candidates();
+        let (selection, cj) = select(
+            candidates.iter().collect(),
+            TARGET,
+            FEERATE,
+            MIN_CHANGE,
+            MAX_CHANGE,
+            droppable_amount,
+        );
+        assert!(
+            cj.is_none(),
+            "target is below min_change, no coinjoin split"
+        );
+        let mut vouts: Vec<u32> = selection
+            .expect("a selection exists")
+            .outpoints
+            .iter()
+            .map(|o| o.vout)
+            .collect();
+        vouts.sort_unstable();
+        vouts
+    }
+
+    #[test]
+    fn select_without_droppable_amount_skips_the_no_change_band() {
+        assert_eq!(selected_vouts(Some(200)), vec![0, 1]);
+        assert_eq!(selected_vouts(None), vec![2]);
+    }
+
+    #[test]
+    fn select_droppable_amount_upper_bound_is_exclusive() {
+        assert_eq!(selected_vouts(Some(100)), vec![2]);
+        assert_eq!(selected_vouts(Some(101)), vec![0, 1]);
+    }
+
+    #[test]
+    fn select_takes_the_smallest_overshoot_within_the_band() {
+        assert_eq!(selected_vouts(Some(3_000)), vec![0, 1]);
     }
 }
