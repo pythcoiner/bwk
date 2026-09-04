@@ -1,19 +1,19 @@
 //! JSON file backend: one JSON file per store under a directory.
 //!
 //! On-disk layout for an account directory `{dir}`:
-//! - `{dir}/version` — plain-text decimal integer, the
+//! - `{dir}/version`: plain-text decimal integer, the
 //!   [`DB_VERSION`](crate::DB_VERSION) stamped when the wallet was
 //!   first initialised. Deliberately kept as its own file for dumb
 //!   parsing (no JSON framework needed to read it).
-//! - `{dir}/{store}.json` — for every logical store, a JSON object
-//!   mapping `key → value` where `value` is the caller's serialized
+//! - `{dir}/{store}.json`: for every logical store, a JSON object
+//!   mapping `key -> value` where `value` is the caller's serialized
 //!   entry embedded as nested JSON.
 //!
 //! `replace_all` / `put_row` / `delete_row` write atomically via
 //! tempfile + rename.
 //!
 //! The format is deliberately simple and human-readable. The DB is a
-//! pure KV store — see the crate-level docs.
+//! pure KV store. See the crate-level docs.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -37,7 +37,7 @@ pub struct JsonBackend {
     _lock: DirLock,
     dir: PathBuf,
     /// `true` once the `{dir}/version` file has been observed to equal
-    /// [`DB_VERSION`] — either it was already stamped by a previous
+    /// [`DB_VERSION`]: either it was already stamped by a previous
     /// session or we've stamped it as part of this session's first
     /// write. While `false`, every mutating op writes the version file
     /// before the data file. Read-only ops never flip this.
@@ -54,7 +54,7 @@ impl JsonBackend {
     ///
     /// Refuses to proceed if `{dir}/version` records a version greater
     /// than [`DB_VERSION`]. A fresh directory without a version file is
-    /// NOT stamped at open time — the file is written lazily by the
+    /// NOT stamped at open time. The file is written lazily by the
     /// first mutating op (see [`Self::stamp_version_if_needed`]). This
     /// keeps an open-but-never-written dir usable by older binaries.
     pub fn open(dir: PathBuf) -> Result<Self, PersistError> {
@@ -80,7 +80,7 @@ impl JsonBackend {
     /// Path to the file that holds `store`'s rows.
     ///
     /// Test-only: lets tests assert on-disk layout. Production code
-    /// must not depend on JSON's filesystem layout — go through the
+    /// must not depend on JSON's filesystem layout. Go through the
     /// [`PersistenceBackend`] trait.
     #[cfg(any(test, feature = "test"))]
     pub fn path_for(&self, store: &str) -> PathBuf {
@@ -166,7 +166,7 @@ impl JsonBackend {
 /// `{dir}/version` exists, `None` for a fresh directory. Refuses to
 /// proceed if the recorded version is greater than [`DB_VERSION`].
 ///
-/// Never creates the file — stamping is deferred to the first actual
+/// Never creates the file. Stamping is deferred to the first actual
 /// write; see [`JsonBackend::stamp_version_if_needed`].
 fn check_version(dir: &std::path::Path) -> Result<Option<u32>, PersistError> {
     let vp = dir.join(VERSION_FILENAME);
@@ -254,7 +254,7 @@ impl PersistenceBackend for JsonBackend {
                 .map_err(|e| PersistError::Serde(format!("decode row value: {e}")))?;
             rows.insert(key.clone(), value);
         }
-        // Stamp version BEFORE writing data — see put_row.
+        // Stamp version BEFORE writing data. See put_row.
         self.stamp_version_if_needed()?;
         self.write_store(store, &rows)
     }

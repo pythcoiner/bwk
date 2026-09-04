@@ -11,9 +11,10 @@ use crate::{
     },
 };
 
+use bwk_coin::{Coin, CoinSpendInfo};
 use bwk_tx::{
-    coin::CoinSpendInfo, transaction::Amount, Coin, Error as TxError, FinalizationContext,
-    PsbtOutputInfo, RecipientProvider, SpPartialSecretProvider,
+    transaction::Amount, Error as TxError, FinalizationContext, PsbtOutputInfo, RecipientProvider,
+    SpPartialSecretProvider,
 };
 
 const TR_OUTPUT_WEIGHT: u64 = 172;
@@ -428,7 +429,7 @@ fn batch_derive_sp_scripts(
         return;
     }
 
-    // Single call with all addresses — BIP352 k-counter increments per scan-key group
+    // Single call with all addresses: BIP352 k-counter increments per scan-key group
     let pubkey_map =
         crate::core::sending::generate_recipient_pubkeys(sp_addresses.clone(), partial_secret)
             .expect("failed to generate SP recipient pubkeys");
@@ -458,7 +459,7 @@ fn batch_derive_sp_scripts(
 /// BIP32 sub-accounts so it can derive secret keys for mixed-input transactions.
 pub struct SpSecretProvider<
     P: crate::profile::SpStorageProfile = crate::profile::SpRamProfile<
-        crate::profile::DefaultBackend,
+        bwk::bwk_electrum::profile::DefaultBackend,
     >,
 > {
     coin_store: Arc<Mutex<SpCoinStore<P>>>,
@@ -599,14 +600,7 @@ fn derive_bip32_key(
     let secp = crate::receiver::bitcoin::secp256k1::Secp256k1::new();
     let psbt_input = coin.to_psbt_input().ok()?;
 
-    // Collect xprivs from SP account and all sub-accounts
-    let mut xprivs = std::collections::BTreeMap::new();
-    if let Some((fg, xpriv)) = account.sp_master_xpriv() {
-        xprivs.insert(fg, xpriv);
-    }
-    for sub in account.sub_accounts() {
-        xprivs.extend(sub.master_xprivs());
-    }
+    let xprivs = account.master_xprivs();
 
     if !psbt_input.bip32_derivation.is_empty() {
         psbt_input.bip32_derivation.values().find_map(|(fg, path)| {

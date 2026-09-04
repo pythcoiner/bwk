@@ -1,0 +1,5 @@
+error: #[error(transparent)] cannot be combined with #[source] on the same variant
+ --> tests/ui/transparent_with_source.rs:6:8
+  |
+6 |     Io(#[source] std::io::Error),
+  |        ^

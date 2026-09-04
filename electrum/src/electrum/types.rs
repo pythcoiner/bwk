@@ -1,4 +1,8 @@
-// from https://github.com/romanz/electrs/blob/master/src/types.rs
+// from https://github.com/romanz/electrs/blob/bd6f93a1e3bf5eaaae4c3c7b92393560d2faa690/src/types.rs
+// Vendored, so it carries the upstream surface whether or not we call all of
+// it. The unused items keep their own `#[allow(dead_code)]` so anything added
+// here later is still linted.
+
 use miniscript::bitcoin::{
     blockdata::block::Header as BlockHeader,
     consensus::encode::{deserialize, Decodable, Encodable},
@@ -39,8 +43,10 @@ pub const HASH_PREFIX_LEN: usize = 8;
 const HEIGHT_SIZE: usize = 4;
 
 pub(crate) type HashPrefix = [u8; HASH_PREFIX_LEN];
+#[allow(dead_code)]
 pub(crate) type SerializedHashPrefixRow = [u8; HASH_PREFIX_ROW_SIZE];
 type Height = u32;
+#[allow(dead_code)]
 pub(crate) type SerBlock = Vec<u8>;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -51,6 +57,7 @@ pub(crate) struct HashPrefixRow {
 
 pub const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 
+#[allow(dead_code)]
 impl HashPrefixRow {
     pub(crate) fn to_db_row(&self) -> SerializedHashPrefixRow {
         let mut row = [0; HASH_PREFIX_ROW_SIZE];
@@ -83,6 +90,7 @@ impl ScriptHash {
         ScriptHash::hash(script.as_bytes())
     }
 
+    #[allow(dead_code)]
     fn prefix(&self) -> HashPrefix {
         let mut prefix = HashPrefix::default();
         prefix.copy_from_slice(&self.0[..HASH_PREFIX_LEN]);
@@ -90,8 +98,10 @@ impl ScriptHash {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) struct ScriptHashRow;
 
+#[allow(dead_code)]
 impl ScriptHashRow {
     pub(crate) fn scan_prefix(scripthash: ScriptHash) -> HashPrefix {
         scripthash.0[..HASH_PREFIX_LEN].try_into().unwrap()
@@ -114,6 +124,7 @@ hash_newtype! {
 
 // ***************************************************************************
 
+#[allow(dead_code)]
 fn spending_prefix(prev: OutPoint) -> HashPrefix {
     let txid_prefix = HashPrefix::try_from(&prev.txid[..HASH_PREFIX_LEN]).unwrap();
     let value = u64::from_be_bytes(txid_prefix);
@@ -121,8 +132,10 @@ fn spending_prefix(prev: OutPoint) -> HashPrefix {
     value.to_be_bytes()
 }
 
+#[allow(dead_code)]
 pub(crate) struct SpendingPrefixRow;
 
+#[allow(dead_code)]
 impl SpendingPrefixRow {
     pub(crate) fn scan_prefix(outpoint: OutPoint) -> HashPrefix {
         spending_prefix(outpoint)
@@ -138,14 +151,17 @@ impl SpendingPrefixRow {
 
 // ***************************************************************************
 
+#[allow(dead_code)]
 fn txid_prefix(txid: &Txid) -> HashPrefix {
     let mut prefix = [0u8; HASH_PREFIX_LEN];
     prefix.copy_from_slice(&txid[..HASH_PREFIX_LEN]);
     prefix
 }
 
+#[allow(dead_code)]
 pub(crate) struct TxidRow;
 
+#[allow(dead_code)]
 impl TxidRow {
     pub(crate) fn scan_prefix(txid: Txid) -> HashPrefix {
         txid_prefix(&txid)
@@ -161,6 +177,7 @@ impl TxidRow {
 
 // ***************************************************************************
 
+#[allow(dead_code)]
 pub(crate) type SerializedHeaderRow = [u8; BlockHeader::SIZE];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -170,6 +187,7 @@ pub(crate) struct HeaderRow {
 
 impl_consensus_encoding!(HeaderRow, header);
 
+#[allow(dead_code)]
 impl HeaderRow {
     pub(crate) fn new(header: BlockHeader) -> Self {
         Self { header }

@@ -8,13 +8,14 @@
 
 use std::{sync::mpsc, time::Duration};
 
-use bwk::header_store::HeaderStore;
-use electrsd::bitcoind::bitcoincore_rpc::{jsonrpc::serde_json::Value, RpcApi};
+use bwk_electrum::{
+    config::HEADERS_FILENAME, header_store::HeaderStore, raw_client::CertificateCheck,
+};
+use bwk_utils::test::regtest::{
+    bootstrap_electrs, generate, get_block_hash_str, get_block_height, invalidate_block, wait_until,
+};
 use miniscript::bitcoin::Network;
 use temp_dir::TempDir;
-
-mod common;
-use common::{bootstrap_electrs, generate, get_block_hash_str, get_block_height, wait_until};
 
 /// Drain pending CTAs, waiting at most `timeout` for the first one.
 fn drain(rx: &mpsc::Receiver<()>, timeout: Duration) -> usize {
@@ -34,11 +35,18 @@ fn header_store_follows_tip_and_resolves_reorg() {
     let base_height = get_block_height(&bitcoind);
 
     let tmp = TempDir::new().unwrap();
-    let path = tmp.path().join("headers.json");
+    let path = tmp.path().join(HEADERS_FILENAME);
 
-    let store =
-        HeaderStore::start(url, port, Network::Regtest, Some(path), Some(base_height)).unwrap();
-    let rx = store.register();
+    let store = HeaderStore::start(
+        url,
+        port,
+        Network::Regtest,
+        Some(path),
+        Some(base_height),
+        CertificateCheck::Validate,
+    )
+    .unwrap();
+    let rx = store.register_chain_tick();
 
     // Wait for the worker to backfill up to the current tip.
     assert!(
@@ -66,10 +74,7 @@ fn header_store_follows_tip_and_resolves_reorg() {
 
     // Invalidate the block at `target` and mine a longer fork.
     let hash_at_target = get_block_hash_str(&bitcoind, target);
-    bitcoind
-        .client
-        .call::<Value>("invalidateblock", &[hash_at_target.into()])
-        .unwrap();
+    invalidate_block(&bitcoind, hash_at_target);
     generate(&bitcoind, 7);
 
     let new_tip = get_block_height(&bitcoind);

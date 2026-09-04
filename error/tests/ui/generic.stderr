@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support generics or lifetimes
+ --> tests/ui/generic.rs:4:13
+  |
+4 | enum Generic<T: std::fmt::Debug> {
+  |             ^

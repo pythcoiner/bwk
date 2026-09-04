@@ -9,7 +9,10 @@ use std::{
 };
 
 use bitcoin::{bip32::ChildNumber, Network};
-use bwk::miniscript::{Descriptor, DescriptorPublicKey};
+use bwk::{
+    bwk_electrum::{config::Endpoint, raw_client::CertificateCheck},
+    miniscript::{Descriptor, DescriptorPublicKey},
+};
 use bwk_sign::{bwk_descriptor, HotSigner};
 use serde::{Deserialize, Serialize};
 
@@ -40,27 +43,22 @@ pub struct Config {
     // Backend
     /// Blindbit server URL for chain data
     pub blindbit_url: String,
-    /// Electrum server URL for broadcasting spends (blindbit is read-only).
-    #[serde(default)]
-    pub electrum_url: Option<String>,
-    /// Electrum server port for broadcasting spends.
-    #[serde(default)]
-    pub electrum_port: Option<u16>,
+    /// Electrum server used to broadcast spends (blindbit is read-only), and
+    /// the certificate policy to reach it under. Private so [`Endpoint`] stays
+    /// the only way to move it, see [`Endpoint::set`].
+    #[serde(flatten)]
+    endpoint: Endpoint,
 
     // Persistence
     /// Base directory for account data
     pub data_dir: PathBuf,
-    /// Whether to persist data to disk (not serialized)
-    #[serde(skip)]
-    pub persist: bool,
-    /// Which on-disk backend to use when `persist` is true.
+    /// Which backend keeps this account's data, `None` for in-memory only.
     ///
-    /// `Json` (default) — byte-for-byte compatible with the pre-backend
-    /// layout. `Sqlite` — single `account.sqlite` file per account;
-    /// signer material (mnemonic / scan_sk / spend_key) is stripped from
-    /// everything written to disk and must be re-supplied on the next run.
-    #[serde(skip)]
-    pub persist_kind: bwk::persist::PersistenceKind,
+    /// `Json`: byte-for-byte compatible with the pre-backend layout.
+    /// `Sqlite`: single `account.sqlite` file per account; signer material
+    /// (mnemonic / scan_sk / spend_key) is stripped from everything written
+    /// to disk and must be re-supplied on the next run.
+    pub persistence: Option<bwk::persist::PersistenceKind>,
 
     // Scanning
     /// Minimum output value in satoshis to consider (dust filter)
@@ -86,10 +84,11 @@ pub struct SubAccountConfig {
     /// mnemonics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mnemonic: Option<String>,
-    /// Electrum server URL (optional, offline if not set)
-    pub electrum_url: Option<String>,
-    /// Electrum server port
-    pub electrum_port: Option<u16>,
+    /// Electrum server this sub-account watches (offline while unset), and the
+    /// certificate policy to reach it under. Its own: a policy the SP account
+    /// picked for its server says nothing about this one.
+    #[serde(flatten)]
+    pub endpoint: Endpoint,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -119,11 +118,9 @@ impl Config {
             scan_sk: None,
             spend_key: None,
             blindbit_url,
-            electrum_url: None,
-            electrum_port: None,
+            endpoint: Endpoint::default(),
             data_dir,
-            persist: true,
-            persist_kind: bwk::persist::PersistenceKind::default(),
+            persistence: Some(bwk::persist::PersistenceKind::default()),
             dust_limit: None,
             birthday_height: None,
             descriptors: Vec::new(),
@@ -170,11 +167,9 @@ impl Config {
             scan_sk: Some(scan_sk),
             spend_key: Some(spend_key),
             blindbit_url,
-            electrum_url: None,
-            electrum_port: None,
+            endpoint: Endpoint::default(),
             data_dir,
-            persist: true,
-            persist_kind: bwk::persist::PersistenceKind::default(),
+            persistence: Some(bwk::persist::PersistenceKind::default()),
             dust_limit: None,
             birthday_height: None,
             descriptors: Vec::new(),
@@ -223,18 +218,26 @@ impl Config {
         self.blindbit_url = url;
     }
 
-    /// Returns the Electrum broadcast endpoint, if both url and port are set.
-    pub fn electrum_endpoint(&self) -> Option<(&str, u16)> {
-        match (&self.electrum_url, self.electrum_port) {
-            (Some(url), Some(port)) => Some((url.as_str(), port)),
-            _ => None,
-        }
+    /// The Electrum server this account broadcasts through, with the
+    /// certificate policy it connects under.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
     }
 
-    /// Set the Electrum server endpoint used to broadcast spends.
+    /// Set the Electrum server endpoint used to broadcast spends, see
+    /// [`Endpoint::set`] for what that does to the certificate policy.
     pub fn set_electrum_endpoint(&mut self, url: String, port: u16) {
-        self.electrum_url = Some(url);
-        self.electrum_port = Some(port);
+        self.endpoint.set(Some(url), Some(port));
+    }
+
+    /// Forget the Electrum endpoint, see [`Endpoint::clear`].
+    pub fn clear_electrum_endpoint(&mut self) {
+        self.endpoint.clear();
+    }
+
+    /// Connect under `check`, see [`Endpoint::set_certificate_check`].
+    pub fn set_certificate_check(&mut self, check: CertificateCheck) {
+        self.endpoint.set_certificate_check(check);
     }
 
     /// Set the dust limit in satoshis.
@@ -332,31 +335,28 @@ impl Config {
         self.descriptors.push(SubAccountConfig {
             descriptor,
             mnemonic,
-            electrum_url: None,
-            electrum_port: None,
+            endpoint: Endpoint::default(),
         });
     }
 
-    /// Enable or disable persistence (builder pattern).
-    pub fn enable_persist(mut self, persist: bool) -> Self {
-        self.persist = persist;
-        self
-    }
-
-    /// Select the on-disk backend (JSON default, or SQLite).
+    /// Select the backend that keeps this account's data, `None` for
+    /// in-memory only (builder pattern).
     ///
     /// Under [`bwk::persist::PersistenceKind::Sqlite`], signer material
     /// (mnemonic / scan_sk / spend_key) is stripped from everything
     /// written to disk and must be re-supplied on the next run.
-    pub fn with_persist_kind(mut self, kind: bwk::persist::PersistenceKind) -> Self {
-        self.persist_kind = kind;
+    pub fn with_persistence(mut self, persistence: Option<bwk::persist::PersistenceKind>) -> Self {
+        self.persistence = persistence;
         self
     }
 
     /// Whether this config is configured to keep signer material out of
     /// on-disk writes.
     pub fn excludes_signer_data(&self) -> bool {
-        matches!(self.persist_kind, bwk::persist::PersistenceKind::Sqlite)
+        matches!(
+            self.persistence,
+            Some(bwk::persist::PersistenceKind::Sqlite)
+        )
     } // Path helpers
 
     /// Returns the account-specific data directory.
@@ -450,7 +450,7 @@ mod tests {
         assert!(config.spend_key.is_none());
         assert_eq!(config.blindbit_url, "https://blindbit.example.com");
         assert_eq!(config.data_dir, PathBuf::from("/tmp/bwk-test"));
-        assert!(config.persist); // Default is true
+        assert!(config.persistence.is_some()); // Default is on
         assert!(config.dust_limit.is_none());
         assert!(config.birthday_height.is_none());
     }
@@ -461,7 +461,22 @@ mod tests {
 
         config.set_electrum_endpoint("electrum.pythcoiner.dev".to_string(), 50001);
 
-        assert_eq!(config.electrum_url.unwrap(), "electrum.pythcoiner.dev");
+        assert_eq!(config.endpoint().url(), Some("electrum.pythcoiner.dev"));
+    }
+
+    #[test]
+    fn clearing_the_endpoint_puts_the_certificate_choice_back() {
+        let mut config = test_config();
+        config.set_electrum_endpoint("self.signed.lan".to_string(), 50002);
+        config.set_certificate_check(CertificateCheck::DangerAcceptInvalid);
+
+        config.clear_electrum_endpoint();
+
+        assert!(config.endpoint().server().is_none());
+        assert_eq!(
+            config.endpoint().certificate_check(),
+            CertificateCheck::Validate
+        );
     }
 
     #[test]
@@ -478,8 +493,7 @@ mod tests {
             .to_string()
             .starts_with("wpkh("));
         assert!(config.descriptors[0].mnemonic.is_none());
-        assert!(config.descriptors[0].electrum_url.is_none());
-        assert!(config.descriptors[0].electrum_port.is_none());
+        assert!(config.descriptors[0].endpoint.server().is_none());
     }
 
     #[test]
@@ -496,8 +510,7 @@ mod tests {
             .to_string()
             .starts_with("tr("));
         assert!(config.descriptors[0].mnemonic.is_none());
-        assert!(config.descriptors[0].electrum_url.is_none());
-        assert!(config.descriptors[0].electrum_port.is_none());
+        assert!(config.descriptors[0].endpoint.server().is_none());
     }
 
     #[test]
@@ -614,7 +627,7 @@ mod tests {
         assert!(config.mnemonic.is_none());
         assert!(config.scan_sk.is_some());
         assert!(config.spend_key.is_some());
-        assert!(config.persist);
+        assert!(config.persistence.is_some());
     }
 
     #[test]
@@ -721,8 +734,7 @@ mod tests {
         assert_eq!(config.mnemonic, loaded.mnemonic);
         assert_eq!(config.blindbit_url, loaded.blindbit_url);
         assert_eq!(config.data_dir, loaded.data_dir);
-        // persist is skipped during serialization, so it won't roundtrip
-        assert!(!loaded.persist); // Default for bool is false
+        assert_eq!(config.persistence, loaded.persistence);
     }
 
     #[test]
@@ -740,12 +752,15 @@ mod tests {
     }
 
     #[test]
-    fn test_config_enable_persist_builder() {
-        let config = test_config().enable_persist(false);
-        assert!(!config.persist);
+    fn test_config_with_persistence_builder() {
+        let config = test_config().with_persistence(None);
+        assert!(config.persistence.is_none());
 
-        let config = config.enable_persist(true);
-        assert!(config.persist);
+        let config = config.with_persistence(Some(bwk::persist::PersistenceKind::Json));
+        assert_eq!(
+            config.persistence,
+            Some(bwk::persist::PersistenceKind::Json)
+        );
     }
 
     #[test]
@@ -782,6 +797,7 @@ mod tests {
         assert_eq!(config.network, loaded.network);
         assert_eq!(config.mnemonic, loaded.mnemonic);
         assert_eq!(config.blindbit_url, loaded.blindbit_url);
+        assert_eq!(config.persistence, loaded.persistence);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -815,7 +831,7 @@ mod tests {
         config
             .add_segwit_sub_account_from_mnemonic(&unique_mnemonic)
             .expect("external sub-account");
-        config.persist_kind = bwk::persist::PersistenceKind::Sqlite;
+        config.persistence = Some(bwk::persist::PersistenceKind::Sqlite);
 
         let view = config.for_persistence();
         assert!(view.mnemonic.is_none());
@@ -851,6 +867,24 @@ mod tests {
             serialized.contains(&unique_mnemonic),
             "mnemonic must appear under default JSON mode"
         );
+    }
+
+    /// bwk-persist builds the sqlite backend only under its own feature, so
+    /// bwk-sp has to forward it or `PersistenceKind::Sqlite` is unreachable
+    /// from here whatever the caller asks for.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_backend_is_reachable_under_the_feature() {
+        let dir = std::env::temp_dir().join("bwk-sp-sqlite-feature");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let backend =
+            bwk::persist::build_backend(Some(bwk::persist::PersistenceKind::Sqlite), dir.clone());
+        assert!(backend.is_ok(), "{:?}", backend.err());
+
+        // The backend holds the account-dir lock until it drops.
+        drop(backend);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

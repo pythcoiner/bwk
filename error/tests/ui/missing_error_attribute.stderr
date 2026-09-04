@@ -1,0 +1,5 @@
+error: missing #[error] attribute
+ --> tests/ui/missing_error_attribute.rs:5:5
+  |
+5 |     NoMessage,
+  |     ^^^^^^^^^

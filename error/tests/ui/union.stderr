@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support unions
+ --> tests/ui/union.rs:5:7
+  |
+5 | union Pair {
+  |       ^^^^

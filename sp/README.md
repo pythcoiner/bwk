@@ -1,6 +1,6 @@
 # bwk-sp
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Silent Payments (BIP352) account using Blindbit backend for chain data.
 
@@ -61,10 +61,10 @@ Notification ──► Account consumer
 
 ## Stores
 
-- `SpCoinStore` — Detected SP outputs with spend status
-- `SpTxStore` — Transaction history (direction and amount derived by the aggregator)
-- `bwk::LabelStore` — User labels for coins and transactions (shared with bwk)
-- `ScanState` — Scan progress and checkpoint management
+- `SpCoinStore`: Detected SP outputs with spend status
+- `SpTxStore`: Transaction history (direction and amount derived by the aggregator)
+- `bwk_electrum::label_store::LabelStore`: User labels for coins and transactions (shared with bwk)
+- `ScanState`: Scan progress and checkpoint management
 
 ## Packaging
 

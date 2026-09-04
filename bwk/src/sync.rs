@@ -150,14 +150,14 @@ mod tests {
         let mut est = SyncEstimator::new(0.1, 3);
         est.update(100, 1000);
         thread::sleep(Duration::from_millis(50));
-        // Same height — should not count as a sample.
+        // Same height: should not count as a sample.
         est.update(100, 1000);
         assert_eq!(est.samples, 0, "No sample when blocks_done == 0");
     }
 
     #[test]
     fn test_estimate_within_tolerance_after_warmup() {
-        // Steady cadence: 100 blocks per update, 50ms between updates → 0.5ms/block.
+        // Steady cadence: 100 blocks per update, 50ms between updates -> 0.5ms/block.
         let warmup = 5;
         let mut est = SyncEstimator::new(0.5, warmup);
         let mut height = 0u32;
@@ -175,7 +175,7 @@ mod tests {
         let upper = (expected as f64 * 1.2).ceil() as u64;
         assert!(
             actual >= lower && actual <= upper,
-            "estimate {actual}s outside ±20% of {expected}s ({lower}..={upper})",
+            "estimate {actual}s not within 20 percent of {expected}s ({lower}..={upper})",
         );
     }
 }

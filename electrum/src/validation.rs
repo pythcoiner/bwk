@@ -3,7 +3,7 @@
 //! Inspects the PSBT's outputs for already-used scripts and the inputs for
 //! outpoints that have already been spent, returning a structured report.
 //! Per-entry Electrum failures are recorded as warnings and do not abort the
-//! whole call — the [`Result`] is reserved for errors that prevent the check
+//! whole call. The [`Result`] is reserved for errors that prevent the check
 //! from running at all.
 
 use std::collections::HashMap;

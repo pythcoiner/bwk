@@ -2,7 +2,7 @@
 name = "secp256k1_spscan-sys"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["pythcoiner"]
 license-file = "../LICENSE"
 description = "Byte-FFI for the secp256k1 SP-scan fork."
@@ -11,3 +11,10 @@ links = "secp256k1_spscan"
 
 [build-dependencies]
 cc = "1.0.28"
+
+# Vendored FFI shim, linted as third-party code.
+[lints.rust]
+dead_code = "allow"
+
+[lints.clippy]
+needless_range_loop = "allow"

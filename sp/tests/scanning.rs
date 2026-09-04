@@ -21,25 +21,21 @@ use common::{
 };
 
 use bwk::{
-    label_store::LabelStore,
+    bwk_electrum::{
+        label_store::LabelStore,
+        notification::{Notification, SpNotification},
+    },
     persist::{
         JsonBackend, PersistenceBackend, ACCOUNT_STORE_KEY, COINS_STORE_KEY, LABELS_STORE_KEY,
     },
 };
-use bwk_sp::{account::config::Config, Notification, SpNotification};
+use bwk_sp::account::config::Config;
 
 fn backend_height(blindbit_url: &str) -> u32 {
     let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
     bwk_sp::blindbit::block_height(&agent, blindbit_url)
         .expect("backend height")
         .to_consensus_u32()
-}
-
-fn backend_with_cutthrough(blindbit_url: &str) -> bool {
-    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
-    bwk_sp::blindbit::info(&agent, blindbit_url)
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false)
 }
 
 //
@@ -119,7 +115,7 @@ fn test_account_block_height_growth() {
     let account = test_account(&blindbit_url);
 
     // 5. Verify initial height
-    let height1 = backend_height(&blindbit_url);
+    let height1 = account.block_height().unwrap();
     assert!(height1 >= 50, "Expected height >= 50, got {height1}");
 
     // 6. Generate 50 more blocks
@@ -127,7 +123,7 @@ fn test_account_block_height_growth() {
     wait_for_sync_and_index(&blindbit_url, 100);
 
     // 7. Verify height increased
-    let height2 = backend_height(&blindbit_url);
+    let height2 = account.block_height().unwrap();
     assert!(height2 >= 100, "Expected height >= 100, got {height2}");
     assert!(height2 > height1, "Height should have grown");
 }
@@ -1041,7 +1037,7 @@ fn test_background_scanner_detects_new_blocks() {
         blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
 
@@ -1290,7 +1286,7 @@ fn test_full_wallet_flow() {
         blindbit_url.clone(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(false);
+    .with_persistence(None);
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
     account
@@ -1640,7 +1636,7 @@ fn test_spend_only_resume_at_same_tip() {
 /// later scan confirms it without turning the self-spend change into an incoming.
 #[test]
 fn test_unconfirmed_spend_injection() {
-    use bwk::coin_store::PaymentType;
+    use bwk::bwk_electrum::coin_store::PaymentType;
     use common::{wait_for_oneshot_done, TestEnv};
 
     let mut env = TestEnv::new();

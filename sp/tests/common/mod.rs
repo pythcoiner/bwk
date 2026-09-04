@@ -34,6 +34,7 @@ use bwk_sp::{
 /// the job fails in minutes with the stuck frame in the log instead of stalling
 /// for hours. Drop the returned guard (returning from the test does) to disarm.
 #[must_use]
+#[allow(dead_code)]
 pub fn abort_after(label: &'static str, timeout: Duration) -> WatchdogGuard {
     let armed = Arc::new(AtomicBool::new(true));
     let watch = armed.clone();
@@ -72,6 +73,7 @@ impl Drop for WatchdogGuard {
 
 /// Dump every thread's backtrace by attaching gdb to our own pid. Best-effort:
 /// prints a note and continues if gdb is unavailable or cannot attach.
+#[allow(dead_code)]
 fn dump_threads() {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -107,13 +109,8 @@ fn dump_threads() {
 /// Errors that can occur in MockBackend operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MockBackendError {
-    /// Simulated network failure
     #[error("simulated network failure after {0} calls")]
     SimulatedFailure(u32),
-    /// Block not found (reserved for future use)
-    #[error("block not found at height {0}")]
-    #[allow(dead_code)]
-    BlockNotFound(u32),
 }
 
 // MockBlock
@@ -123,9 +120,6 @@ pub enum MockBackendError {
 pub struct MockBlock {
     /// Block height
     pub height: u32,
-    /// Block hash as bytes (reserved for future use in reorg tests)
-    #[allow(dead_code)]
-    pub hash: [u8; 32],
     /// Outputs found in this block (outpoint -> owned output)
     pub outputs: Vec<(OutPoint, OwnedOutput)>,
     /// Inputs spent in this block (outpoints that were consumed)
@@ -135,11 +129,8 @@ pub struct MockBlock {
 impl MockBlock {
     /// Create a new mock block with no transactions.
     pub fn new(height: u32) -> Self {
-        let mut hash = [0u8; 32];
-        hash[0..4].copy_from_slice(&height.to_le_bytes());
         Self {
             height,
-            hash,
             outputs: Vec::new(),
             spent_inputs: Vec::new(),
         }
@@ -206,23 +197,6 @@ impl MockBackend {
     /// Configure the backend to fail after N calls.
     pub fn fail_after(mut self, n: u32) -> Self {
         self.fail_after = Some(n);
-        self
-    }
-
-    /// Set the tip height (reserved for future use).
-    #[allow(dead_code)]
-    pub fn set_tip_height(mut self, height: u32) -> Self {
-        self.tip_height = height;
-        self
-    }
-
-    /// Add a block to the backend (reserved for future use).
-    #[allow(dead_code)]
-    pub fn add_block(mut self, block: MockBlock) -> Self {
-        if block.height > self.tip_height {
-            self.tip_height = block.height;
-        }
-        self.blocks.push(block);
         self
     }
 
@@ -316,7 +290,7 @@ pub fn test_mnemonic_2() -> &'static str {
 /// - network: Signet
 /// - mnemonic: standard test mnemonic
 /// - blindbit_url: placeholder URL
-/// - persist: false (to avoid file I/O in tests)
+/// - persistence: none (to avoid file I/O in tests)
 pub fn test_config(temp_dir: &std::path::Path) -> Config {
     Config::new(
         "test-account".to_string(),
@@ -325,7 +299,7 @@ pub fn test_config(temp_dir: &std::path::Path) -> Config {
         "https://blindbit.test.example.com".to_string(),
         temp_dir.to_path_buf(),
     )
-    .enable_persist(false)
+    .with_persistence(None)
 }
 
 /// Creates a test Account with BlindbitD backend (no persistence).
@@ -338,7 +312,7 @@ pub fn test_account(url: &str) -> bwk_sp::account::Account {
         url.to_string(),
         std::path::PathBuf::from("/unused"),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     bwk_sp::account::Account::new(config).expect("create test account")
 }
 
@@ -362,7 +336,7 @@ pub fn test_account_with_mnemonic(
         url.to_string(),
         std::path::PathBuf::from("/unused"),
     )
-    .enable_persist(false);
+    .with_persistence(None);
     bwk_sp::account::Account::new(config).expect("create test account")
 }
 
@@ -387,7 +361,7 @@ pub fn test_account_persistent_named(
         url.to_string(),
         dir.path().to_path_buf(),
     )
-    .enable_persist(true);
+    .with_persistence(Some(bwk::persist::PersistenceKind::Json));
     let account = bwk_sp::account::Account::new(config.clone()).expect("create test account");
     (account, config, dir)
 }
@@ -461,6 +435,7 @@ pub use bwk_utils::test::TempDir;
 #[allow(dead_code)]
 pub const DUST: u64 = 330;
 
+#[allow(dead_code)]
 pub trait SyncTarget {
     fn url(&self) -> String;
     fn dump_logs(&mut self) {}
@@ -556,7 +531,6 @@ pub fn wait_for_oneshot_done(account: &bwk_sp::account::Account, timeout: Durati
 /// # Panics
 ///
 /// Panics if the script is not a valid P2TR output (OP_1 <32-byte key>).
-#[allow(dead_code)]
 pub fn get_taproot_pubkey(txout: &TxOut) -> XOnlyPublicKey {
     let script_bytes = txout.script_pubkey.as_bytes();
     assert_eq!(script_bytes[0], 0x51); // OP_1
@@ -705,10 +679,11 @@ pub fn swap_to_sp(
     Some(tx)
 }
 
-// TestEnv — integration test harness
+// TestEnv: integration test harness
 
+use bwk::bwk_electrum::{config::ScannerConfig, scanner::ElectrumScanner};
+use bwk_coin::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
 use bwk_sign::HotSigner;
-use bwk_tx::{Coin, CoinSpendInfo, CoinStatus, KeyChain};
 
 /// Mnemonic for BIP32 coins (different from SP mnemonics).
 #[allow(dead_code)]
@@ -716,7 +691,28 @@ pub fn bip32_mnemonic() -> &'static str {
     "legal winner thank year wave sausage worth useful legal winner thank yellow"
 }
 
+/// Attach an offline sub-account watching `signer`'s only descriptor, signed
+/// by the BIP32 mnemonic every sub-account here shares.
+#[allow(dead_code)]
+fn add_offline_sub_account(account: &mut bwk_sp::account::Account, name: &str, signer: &HotSigner) {
+    let descriptor = signer.descriptors().into_iter().next().unwrap();
+    let mut config = ScannerConfig::new(
+        descriptor,
+        std::path::PathBuf::new(),
+        String::new(),
+        name.to_string(),
+        bitcoin::Network::Regtest,
+        None,
+    );
+    config.stay_offline = true;
+    let scanner = ElectrumScanner::try_new(config).unwrap();
+    account
+        .add_sub_account(scanner, Some(bip32_mnemonic().to_string()))
+        .expect("add_sub_account");
+}
+
 /// Satisfaction weight for a taproot key-spend input (same as SP coins).
+#[allow(dead_code)]
 const TR_KEYSPEND_SATISFACTION_WEIGHT: u64 = 66;
 
 /// Integration test environment wrapping BlindbitD + bitcoind.
@@ -855,54 +851,20 @@ impl TestEnv {
 
     /// Add a taproot sub-account to an SP account so it can sign BIP32
     /// taproot inputs via `sign_and_finalize()`.
-    #[allow(dead_code)]
     pub fn add_taproot_sub_account(&self, account: &mut bwk_sp::account::Account) {
         let signer =
             HotSigner::new_taproot_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();
-        let descriptor = signer.descriptors().into_iter().next().unwrap();
-        let sub = bwk::Account::new(bwk::Config {
-            data_dir: std::path::PathBuf::new(),
-            dir_name: String::new(),
-            account: "sub-tr".to_string(),
-            electrum_url: None,
-            electrum_port: None,
-            offline: Some(true),
-            network: bitcoin::Network::Regtest,
-            look_ahead: 20,
-            mnemonic: Some(bip32_mnemonic().to_string()),
-            descriptor,
-            persist: false,
-            skip_labels: true,
-            persist_kind: bwk::persist::PersistenceKind::default(),
-        });
-        account.add_sub_account(sub);
+        add_offline_sub_account(account, "sub-tr", &signer);
     }
 
     /// Add a segwit (P2WPKH) sub-account to an SP account so it can sign
     /// BIP32 segwit inputs via `sign_and_finalize()`.
-    #[allow(dead_code)]
     pub fn add_segwit_sub_account(&self, account: &mut bwk_sp::account::Account) {
         let signer =
             HotSigner::new_wpkh_from_mnemonics(bitcoin::Network::Regtest, bip32_mnemonic())
                 .unwrap();
-        let descriptor = signer.descriptors().into_iter().next().unwrap();
-        let sub = bwk::Account::new(bwk::Config {
-            data_dir: std::path::PathBuf::new(),
-            dir_name: String::new(),
-            account: "sub-sw".to_string(),
-            electrum_url: None,
-            electrum_port: None,
-            offline: Some(true),
-            network: bitcoin::Network::Regtest,
-            look_ahead: 20,
-            mnemonic: Some(bip32_mnemonic().to_string()),
-            descriptor,
-            persist: false,
-            skip_labels: true,
-            persist_kind: bwk::persist::PersistenceKind::default(),
-        });
-        account.add_sub_account(sub);
+        add_offline_sub_account(account, "sub-sw", &signer);
     }
 
     /// Create a funded taproot coin via bitcoind.
@@ -1102,7 +1064,7 @@ mod tests {
 
         assert_eq!(config.account_name, "test-account");
         assert_eq!(config.network, bitcoin::Network::Signet);
-        assert!(!config.persist);
+        assert!(config.persistence.is_none());
         assert!(config.mnemonic.is_some());
     }
 

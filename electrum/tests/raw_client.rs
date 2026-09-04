@@ -1,9 +1,6 @@
-#![allow(clippy::uninlined_format_args)]
-
 use std::{
     collections::HashMap,
     env,
-    path::PathBuf,
     str::FromStr,
     thread,
     time::{Duration, Instant},
@@ -11,38 +8,15 @@ use std::{
 
 use bwk_electrum::{
     electrum::{request::Request, response::*},
-    raw_client::Client,
+    raw_client::{CertificateCheck, Client},
 };
+use bwk_utils::test::regtest::bootstrap_electrs;
 use electrsd::{
-    bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD, P2P},
+    bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD},
     ElectrsD,
 };
 use miniscript::bitcoin::{hex::FromHex, OutPoint, Script};
 use serde_json::Value;
-
-fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
-
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let electrsd_conf = electrsd::Conf::default();
-    // electrsd_conf.view_stderr = true;
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
-}
 
 fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
     let (url, port, electrs, bitcoind) = bootstrap_electrs();
@@ -118,7 +92,9 @@ fn ssl_client_wo_certificate() {
         let (url, port) = split_url(address);
         let mut client = Client::new().ssl(&url, port);
         assert!(client.try_connect(None).is_err());
-        let mut client = client.verif_certificate(false);
+        let mut client = client
+            .certificate_check(CertificateCheck::DangerAcceptInvalid)
+            .unwrap();
         client.try_connect(None).unwrap();
         // blocking recv
         client.send_str("ping");
@@ -165,7 +141,8 @@ fn tcp_clone() {
 
 fn timeout_template(url: &str, port: u16, ssl: bool) {
     let mut client = Client::new_ssl_maybe(url, port, ssl)
-        .verif_certificate(false)
+        .certificate_check(CertificateCheck::DangerAcceptInvalid)
+        .unwrap()
         .read_timeout(Some(Duration::from_millis(100)));
     client.try_connect(None).unwrap();
     let start = Instant::now();
@@ -177,7 +154,9 @@ fn timeout_template(url: &str, port: u16, ssl: bool) {
         r#"Err(TcpStream(Os { code: 11, kind: WouldBlock, message: "Resource temporarily unavailable" }))"#
     );
 
-    let mut client = Client::new_ssl_maybe(url, port, ssl).verif_certificate(false);
+    let mut client = Client::new_ssl_maybe(url, port, ssl)
+        .certificate_check(CertificateCheck::DangerAcceptInvalid)
+        .unwrap();
     client.try_connect(None).unwrap();
     client
         .set_read_timeout(Some(Duration::from_millis(500)))

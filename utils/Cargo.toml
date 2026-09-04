@@ -16,13 +16,14 @@ doctest = false
 miniscript.workspace = true
 bitcoin.workspace = true
 rand.workspace = true
-env_logger.workspace = true
+env_logger = { workspace = true, optional = true }
 log.workspace = true
 ureq = { workspace = true, optional = true }
 corepc-node = { workspace = true, optional = true }
 temp-dir = { workspace = true, optional = true }
+electrsd = { workspace = true, optional = true }
 
 [features]
 default = []
-test = ["dep:corepc-node", "dep:temp-dir", "bitcoin/rand-std"]
+test = ["dep:corepc-node", "dep:temp-dir", "dep:env_logger", "dep:electrsd", "bitcoin/rand-std"]
 ureq = ["dep:ureq"]

@@ -25,6 +25,7 @@ use bitcoin::{
     Amount, BlockHash, OutPoint, Txid, XOnlyPublicKey,
 };
 
+use bwk::bwk_electrum::notification::{Notification, SpNotification};
 use crossbeam::channel;
 
 use crate::{
@@ -35,7 +36,6 @@ use crate::{
     receiver::{self, BlockData, FilterData, OutputSpendStatus, OwnedOutput, SpReceiver, UtxoData},
     scan::state::ScanState,
     thread_pool::ThreadPool,
-    SpNotification,
 };
 
 /// Progress callbacks invoked during a scan: one per fetched block, and one per
@@ -535,8 +535,8 @@ pub struct ScanStores<P: SpStorageProfile> {
     pub coin_store: Arc<Mutex<SpCoinStore<P>>>,
     pub tx_store: Arc<Mutex<crate::account::tx_store::SpTxStore<P>>>,
     pub scan_state: Arc<Mutex<ScanState>>,
-    pub sender: mpsc::Sender<crate::Notification>,
-    pub header_store: Arc<bwk::header_store::HeaderStore>,
+    pub sender: mpsc::Sender<Notification>,
+    pub header_store: Arc<bwk::bwk_electrum::header_store::HeaderStore>,
 }
 
 /// Resolve a block's time for `height` from the shared HeaderStore, whose worker
@@ -592,6 +592,7 @@ struct ScanContext<'a, P: SpStorageProfile> {
     block_data_observer: Option<BlockDataObserver>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn scan_blocks<P: SpStorageProfile>(
     agent: Arc<ureq::Agent>,
     blindbit_url: &str,
@@ -636,7 +637,7 @@ pub fn scan_blocks_with_observer<P: SpStorageProfile>(
     // `start > end` is allowed: it means the receive pass is already at the tip
     // and only the trailing spend sweep needs to run. `process_scan` decides
     // per phase and errors if neither phase has work.
-    log::info!("start: {} end: {}", start, end);
+    log::info!("start: {start} end: {end}");
     let start_time = Instant::now();
     let backend = BackendContext {
         agent,
@@ -693,7 +694,7 @@ fn record_outputs<P: SpStorageProfile>(
             store.insert(outpoint, output);
             let _ = stores
                 .sender
-                .send(crate::Notification::Sp(SpNotification::NewOutput(outpoint)));
+                .send(Notification::Sp(SpNotification::NewOutput(outpoint)));
         }
         store.persist();
     }
@@ -744,9 +745,7 @@ fn record_inputs<P: SpStorageProfile>(
             store.confirm_spend(&outpoint, *block_hash.as_byte_array());
             let _ = stores
                 .sender
-                .send(crate::Notification::Sp(SpNotification::OutputSpent(
-                    outpoint,
-                )));
+                .send(Notification::Sp(SpNotification::OutputSpent(outpoint)));
         }
         store.persist();
     }
@@ -772,12 +771,12 @@ fn record_receive_progress<P: SpStorageProfile>(
     current: Height,
     end: Height,
 ) -> Result<(), receiver::error::Error> {
-    let _ = stores.sender.send(crate::Notification::Sp(
-        SpNotification::ScanReceiveProgress {
+    let _ = stores
+        .sender
+        .send(Notification::Sp(SpNotification::ScanReceiveProgress {
             current: current.to_consensus_u32(),
             end: end.to_consensus_u32(),
-        },
-    ));
+        }));
     Ok(())
 }
 
@@ -788,7 +787,7 @@ fn record_spend_progress<P: SpStorageProfile>(
 ) -> Result<(), receiver::error::Error> {
     let _ = stores
         .sender
-        .send(crate::Notification::Sp(SpNotification::ScanSpendProgress {
+        .send(Notification::Sp(SpNotification::ScanSpendProgress {
             current: current.to_consensus_u32(),
             end: end.to_consensus_u32(),
         }));
@@ -1466,10 +1465,7 @@ fn process_scan<P: SpStorageProfile>(
 // [`Account`].
 #[cfg(feature = "mnemonic")]
 use {
-    crate::{
-        account::{AccountError, ScanMode},
-        Notification,
-    },
+    crate::account::{AccountError, ScanMode},
     std::{thread, time::Duration},
 };
 
@@ -1534,7 +1530,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let sender = self.sender.clone();
         let stop = self.scanner_stop.clone();
         let min_birthday = self.config.min_birthday_height();
-        let header_store = self.header_store.clone();
+        let header_store = self.header_store().clone();
         let runtime = self.scan_runtime;
 
         let handle = thread::spawn(move || {
@@ -1644,7 +1640,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
         let sender = self.sender.clone();
         let stop = self.scanner_stop.clone();
         let mut first_start = start.map(|h| h.max(self.config.min_birthday_height()));
-        let header_store = self.header_store.clone();
+        let header_store = self.header_store().clone();
         let runtime = self.scan_runtime;
 
         let handle = thread::spawn(move || {
@@ -1851,7 +1847,7 @@ impl<P: SpStorageProfile> crate::account::Account<P> {
             tx_store: self.tx_store.clone(),
             scan_state: self.scan_state.clone(),
             sender: self.sender.clone(),
-            header_store: self.header_store.clone(),
+            header_store: self.header_store().clone(),
         };
 
         scan_blocks(
@@ -1972,8 +1968,8 @@ mod tests {
     fn test_stores(
         coins: &[(OutPoint, u32)],
     ) -> (
-        ScanStores<crate::profile::SpRamProfile<crate::profile::DefaultBackend>>,
-        mpsc::Receiver<crate::Notification>,
+        ScanStores<crate::profile::SpRamProfile<bwk::bwk_electrum::profile::DefaultBackend>>,
+        mpsc::Receiver<Notification>,
     ) {
         use crate::account::tx_store::SpTxStore;
         let mut cs = SpCoinStore::new();
@@ -1986,7 +1982,9 @@ mod tests {
             tx_store: Arc::new(Mutex::new(SpTxStore::new())),
             scan_state: Arc::new(Mutex::new(ScanState::new(0))),
             sender: tx,
-            header_store: bwk::header_store::HeaderStore::new_in_memory(bitcoin::Network::Regtest),
+            header_store: bwk::bwk_electrum::header_store::HeaderStore::new_in_memory(
+                bitcoin::Network::Regtest,
+            ),
         };
         (stores, rx)
     }

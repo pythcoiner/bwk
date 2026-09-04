@@ -137,7 +137,7 @@ unsafe extern "C" fn secp256k1_default_illegal_callback_fn(
 ) {
     let slice = core::slice::from_raw_parts(message as *const u8, strlen(message));
     let msg = core::str::from_utf8_unchecked(slice);
-    panic!("[libsecp256k1] illegal argument. {}", msg);
+    panic!("[libsecp256k1] illegal argument. {msg}");
 }
 
 #[no_mangle]
@@ -147,7 +147,7 @@ unsafe extern "C" fn secp256k1_default_error_callback_fn(
 ) {
     let slice = core::slice::from_raw_parts(message as *const u8, strlen(message));
     let msg = core::str::from_utf8_unchecked(slice);
-    panic!("[libsecp256k1] internal consistency check failed {}", msg);
+    panic!("[libsecp256k1] internal consistency check failed {msg}");
 }
 
 // --- Safe Rust API ---

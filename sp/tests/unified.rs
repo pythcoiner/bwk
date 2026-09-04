@@ -37,7 +37,7 @@ fn all_spendable_coins_empty_account() {
 
 #[test]
 fn coin_origin_eq_and_copy() {
-    // Sanity check on CoinOrigin's derived impls — bindings rely on these.
+    // Sanity check on CoinOrigin's derived impls: bindings rely on these.
     let a = CoinOrigin::Sp;
     let b = CoinOrigin::SubAccount(0);
     let c = CoinOrigin::SubAccount(0);

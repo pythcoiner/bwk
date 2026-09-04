@@ -1,6 +1,6 @@
 # bwk-descriptor
 
-**Experimental — do not use in production or with real coins. API will break.**
+**Experimental. Do not use in production or with real coins. API will break.**
 
 Descriptor construction and SPK derivation utilities.
 
@@ -59,10 +59,10 @@ Validates on construction:
 
 ## Descriptor Helpers
 
-- `wpkh(xpub)` — Build P2WPKH descriptor with `<0;1>/*` multipath
-- `tr(xpub)` — Build P2TR key-path descriptor with `<0;1>/*` multipath
-- `wpkh_path(network, account)` — Returns BIP84 derivation path
-- `tr_path(network, account)` — Returns BIP86 derivation path
+- `wpkh(xpub)`: Build P2WPKH descriptor with `<0;1>/*` multipath
+- `tr(xpub)`: Build P2TR key-path descriptor with `<0;1>/*` multipath
+- `wpkh_path(network, account)`: Returns BIP84 derivation path
+- `tr_path(network, account)`: Returns BIP86 derivation path
 
 ## DescriptorDerivator Trait
 

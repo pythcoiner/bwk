@@ -23,16 +23,16 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: rustfmt
-        run: cargo fmt -- --check
+        run: scripts/ci-checks.sh fmt
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: scripts/ci-checks.sh clippy
 
   tests:
     needs: linter
     strategy:
       matrix:
         toolchain:
-          - 1.85
+          - 1.88
           - nightly
         os:
           - ubuntu-latest
@@ -49,17 +49,14 @@ jobs:
         # scan ever hangs, so the job fails fast with a trace instead of stalling.
         run: sudo apt-get update && sudo apt-get install -y libudev-dev gdb
       - name: tests
-        # Single-threaded: each integration test runs its own regtest daemons
-        # (bitcoind/blindbit/electrsd); running them concurrently starves the
-        # runner and causes flaky sync timeouts / wallet-state races.
-        run: cargo test --features test --verbose --color always -- --nocapture --test-threads=1
+        run: scripts/ci-checks.sh tests
 
   build:
     needs: tests
     strategy:
       matrix:
         toolchain:
-          - 1.85
+          - 1.88
           - nightly
         os:
           - ubuntu-latest
@@ -77,4 +74,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: build
-        run: cargo build --release
+        # The build matrix includes Windows, where `run:` defaults to pwsh.
+        shell: bash
+        run: scripts/ci-checks.sh build

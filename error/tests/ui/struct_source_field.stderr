@@ -1,0 +1,5 @@
+error: #[derive(Error)] does not support a `source` field on a struct, use an enum
+ --> tests/ui/struct_source_field.rs:6:5
+  |
+6 |     source: std::io::Error,
+  |     ^^^^^^

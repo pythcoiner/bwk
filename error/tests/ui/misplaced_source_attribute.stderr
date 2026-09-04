@@ -1,0 +1,23 @@
+error: #[from] or #[source] on an enum is not read, it belongs on a field of a variant
+ --> tests/ui/misplaced_source_attribute.rs:4:1
+  |
+4 | #[from]
+  | ^
+
+error: #[from] or #[source] on a variant is not read, it belongs on one of its fields
+  --> tests/ui/misplaced_source_attribute.rs:13:5
+   |
+13 |     #[from]
+   |     ^
+
+error: #[from] or #[source] on a variant is not read, it belongs on one of its fields
+  --> tests/ui/misplaced_source_attribute.rs:20:5
+   |
+20 |     #[source]
+   |     ^
+
+error: #[derive(Error)] does not support #[from] or #[source] on a struct, use an enum
+  --> tests/ui/misplaced_source_attribute.rs:26:1
+   |
+26 | #[source]
+   | ^

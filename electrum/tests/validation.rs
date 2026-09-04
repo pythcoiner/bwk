@@ -1,10 +1,9 @@
-use std::{env, path::PathBuf};
-
-use bwk_electrum::client::Client;
+use bwk_electrum::{client::Client, raw_client::CertificateCheck};
+use bwk_utils::test::regtest::bootstrap_electrs_with_args;
 use electrsd::{
     bitcoind::{
         bitcoincore_rpc::{self, RpcApi},
-        BitcoinD, P2P,
+        BitcoinD,
     },
     ElectrsD,
 };
@@ -13,28 +12,10 @@ use miniscript::bitcoin::{
     Transaction, TxIn, TxOut, Witness,
 };
 
+/// `-txindex`, so the node hands back any raw tx by txid and not only the ones
+/// its own wallet holds.
 fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
-
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    conf.args.push("-txindex");
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let electrsd_conf = electrsd::Conf::default();
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
+    bootstrap_electrs_with_args(&["-txindex"])
 }
 
 fn rpc_address(rpc: &bitcoincore_rpc::Client) -> Address {
@@ -57,7 +38,7 @@ fn validate_psbt_reports_reused_output() {
     let addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &addr);
 
-    let mut client = Client::new(&url, port).expect("connect");
+    let mut client = Client::new(&url, port, CertificateCheck::Validate).expect("connect");
 
     let unsigned = Transaction {
         version: transaction::Version(2),
@@ -89,7 +70,7 @@ fn validate_psbt_clean_when_no_history() {
     let addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &addr);
 
-    let mut client = Client::new(&url, port).expect("connect");
+    let mut client = Client::new(&url, port, CertificateCheck::Validate).expect("connect");
 
     // Fresh address: getnewaddress returns one that has never received funds.
     let fresh = rpc_address(rpc);
@@ -112,7 +93,7 @@ fn validate_psbt_clean_when_no_history() {
 #[test]
 fn validate_psbt_skips_op_return() {
     let (url, port, _electrs, _bitcoind) = bootstrap_electrs();
-    let mut client = Client::new(&url, port).expect("connect");
+    let mut client = Client::new(&url, port, CertificateCheck::Validate).expect("connect");
 
     use bitcoin::script::PushBytesBuf;
     let op_return = ScriptBuf::new_op_return(PushBytesBuf::try_from(b"hello".to_vec()).unwrap());
@@ -141,7 +122,7 @@ fn validate_psbt_reports_spent_input() {
     let mining_addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &mining_addr);
 
-    // Send to a known address — creates UTXO X owned by pay_addr.
+    // Send to a known address: creates UTXO X owned by pay_addr.
     let pay_addr = rpc_address(rpc);
     let funding_txid_hex: String = rpc
         .call(
@@ -187,7 +168,7 @@ fn validate_psbt_reports_spent_input() {
         .unwrap();
     mine_to_address(rpc, 1, &mining_addr);
 
-    let mut client = Client::new(&url, port).expect("connect");
+    let mut client = Client::new(&url, port, CertificateCheck::Validate).expect("connect");
     let unsigned = Transaction {
         version: transaction::Version(2),
         lock_time: absolute::LockTime::Blocks(absolute::Height::ZERO),

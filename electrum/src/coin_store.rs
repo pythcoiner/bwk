@@ -1,10 +1,7 @@
-use bwk_descriptor::derivator::SpkDerivator;
-use bwk_tx::{
-    coin::{self, KeyChain},
-    transaction::max_input_satisfaction_size,
-    tx_builder::{ChangeTip, CoinSource},
-    Coin, CoinStatus,
+use bwk_coin::{
+    max_input_satisfaction_size, ChangeTip, Coin, CoinSource, CoinSpendInfo, CoinStatus, KeyChain,
 };
+use bwk_descriptor::derivator::SpkDerivator;
 use miniscript::{
     bitcoin::{self, address::NetworkUnchecked, OutPoint, ScriptBuf, Sequence, Txid},
     Descriptor, DescriptorPublicKey,
@@ -16,12 +13,12 @@ use std::{
 };
 
 use crate::{
-    account::{CoinState, Notification},
     address_store::{AddressEntry, AddressStatus, AddressStore, AddressTip},
-    config::Config,
+    coin_state::CoinState,
     header_store::HeaderStore,
     label_store::{LabelKey, LabelStore},
-    profile::{DefaultBackend, RamProfile, StorageProfile},
+    notification::Notification,
+    profile::{DefaultBackend, RamProfile, ScanProfile},
     tx_store::{Inclusion, InputMetadata, OutputMetadata, TxEntry, TxStore},
 };
 
@@ -95,33 +92,29 @@ pub struct Payment {
     pub timestamp: Option<u64>,
 }
 
-pub struct CoinStoreSource<P: StorageProfile = RamProfile<DefaultBackend>>(
-    Arc<Mutex<CoinStore<P>>>,
-);
+pub struct CoinStoreSource<P: ScanProfile = RamProfile<DefaultBackend>>(Arc<Mutex<CoinStore<P>>>);
 
-impl<P: StorageProfile> CoinStoreSource<P> {
+impl<P: ScanProfile> CoinStoreSource<P> {
     pub fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
         Self(store)
     }
 }
 
-pub struct ChangeTipUpdater<P: StorageProfile = RamProfile<DefaultBackend>>(
-    Arc<Mutex<CoinStore<P>>>,
-);
+pub struct ChangeTipUpdater<P: ScanProfile = RamProfile<DefaultBackend>>(Arc<Mutex<CoinStore<P>>>);
 
-impl<P: StorageProfile> Clone for ChangeTipUpdater<P> {
+impl<P: ScanProfile> Clone for ChangeTipUpdater<P> {
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<P: StorageProfile> ChangeTipUpdater<P> {
-    pub(crate) fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
+impl<P: ScanProfile> ChangeTipUpdater<P> {
+    pub fn new(store: Arc<Mutex<CoinStore<P>>>) -> Self {
         Self(store)
     }
 }
 
-impl<P: StorageProfile> ChangeTip for ChangeTipUpdater<P> {
+impl<P: ScanProfile> ChangeTip for ChangeTipUpdater<P> {
     fn next_index(&mut self) -> u32 {
         let mut store = self.0.lock().expect("poisoned");
         let index = store
@@ -134,7 +127,53 @@ impl<P: StorageProfile> ChangeTip for ChangeTipUpdater<P> {
     }
 }
 
-impl<P: StorageProfile> CoinSource for CoinStoreSource<P> {
+pub struct SpendRecorder<P: ScanProfile = RamProfile<DefaultBackend>> {
+    coin_store: Arc<Mutex<CoinStore<P>>>,
+}
+
+impl<P: ScanProfile> Clone for SpendRecorder<P> {
+    fn clone(&self) -> Self {
+        Self {
+            coin_store: self.coin_store.clone(),
+        }
+    }
+}
+
+impl<P: ScanProfile> SpendRecorder<P> {
+    pub fn new(coin_store: Arc<Mutex<CoinStore<P>>>) -> Self {
+        Self { coin_store }
+    }
+
+    pub fn get_coin(&self, outpoint: &OutPoint) -> Option<Coin> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .get(outpoint)
+            .map(|e| e.coin)
+    }
+
+    pub fn address_scripts(&self) -> BTreeSet<ScriptBuf> {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .address_store()
+            .lock()
+            .expect("poisoned")
+            .entries()
+            .into_iter()
+            .map(|entry| entry.script())
+            .collect()
+    }
+
+    pub fn record_unconfirmed_spend(&self, tx: &bitcoin::Transaction) {
+        self.coin_store
+            .lock()
+            .expect("poisoned")
+            .record_unconfirmed_tx(tx.clone());
+    }
+}
+
+impl<P: ScanProfile> CoinSource for CoinStoreSource<P> {
     fn spendable_coins(&self) -> Vec<Coin> {
         self.0
             .lock()
@@ -153,7 +192,7 @@ impl<P: StorageProfile> CoinSource for CoinStoreSource<P> {
 /// TxStore update and acts as a cache for coins. It maintains mappings
 /// of outpoints to coin entries and tracks the history of script public
 /// keys (SPKs).
-pub struct CoinStore<P: StorageProfile = RamProfile<DefaultBackend>> {
+pub struct CoinStore<P: ScanProfile = RamProfile<DefaultBackend>> {
     store: BTreeMap<OutPoint, CoinEntry>,
     label_store: Arc<Mutex<LabelStore<P>>>,
     spk_to_outpoint: BTreeMap<ScriptBuf, HashSet<OutPoint>>,
@@ -163,7 +202,6 @@ pub struct CoinStore<P: StorageProfile = RamProfile<DefaultBackend>> {
     updates: Vec<Update>,
     derivator: SpkDerivator,
     notification: mpsc::Sender<Notification>,
-    config: Config,
     /// Pending claims indexed by server-reported height. A txid lands
     /// here when the server reports it at height H but the HeaderStore
     /// doesn't yet have a header at H; the next CTA resolves it.
@@ -277,7 +315,7 @@ impl SpkHistory {
     }
 }
 
-impl<P: StorageProfile> CoinStore<P> {
+impl<P: ScanProfile> CoinStore<P> {
     /// Creates a new instance of `CoinStore`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -289,7 +327,6 @@ impl<P: StorageProfile> CoinStore<P> {
         look_ahead: u32,
         tx_store: TxStore<P>,
         label_store: Arc<Mutex<LabelStore<P>>>,
-        config: Config,
         account_store: Arc<Mutex<P::AccountStore>>,
     ) -> Self {
         let derivator = SpkDerivator::new(descriptor, network).unwrap();
@@ -299,7 +336,6 @@ impl<P: StorageProfile> CoinStore<P> {
             recv_tip,
             change_tip,
             look_ahead,
-            config.clone(),
             account_store,
         )));
         Self {
@@ -312,7 +348,6 @@ impl<P: StorageProfile> CoinStore<P> {
             spk_history: BTreeMap::new(),
             notification,
             derivator,
-            config,
             pending_claims: BTreeMap::new(),
             merkle_in_flight: BTreeSet::new(),
         }
@@ -574,7 +609,7 @@ impl<P: StorageProfile> CoinStore<P> {
             for txid in diff.removed.keys() {
                 store.remove(txid);
             }
-            // Reset to Unconfirmed; re-claim handled in resolve_reported_heights.
+            // Reset to Unconfirmed; the re-claim is queued by record_reported_heights.
             for txid in diff.changed.keys() {
                 store.update_inclusion(txid, Inclusion::Unconfirmed);
             }
@@ -582,7 +617,7 @@ impl<P: StorageProfile> CoinStore<P> {
 
         // A demoted tx must not keep a stale pending claim, or a later CTA
         // would re-promote it at the old height. Still-confirmed txs are
-        // re-queued by resolve_reported_heights in the same history pass.
+        // re-queued by record_reported_heights in the same history pass.
         for txid in diff.changed.keys() {
             self.drop_all_pending_claims(txid);
         }
@@ -673,7 +708,7 @@ impl<P: StorageProfile> CoinStore<P> {
         let tx_store = &self.tx_store;
 
         let mut coins = BTreeMap::<OutPoint, CoinEntry>::new();
-        let descriptor = self.config.descriptor.clone();
+        let descriptor = self.derivator.descriptor();
 
         // NOTE: here we take the max satisfaction size at default, for descriptor with several
         // spending conditions, the correct satisfaction must be filled at tx crafting time.
@@ -697,9 +732,9 @@ impl<P: StorageProfile> CoinStore<P> {
                     let height = entry.height();
                     let status = CoinStatus::from(entry.inclusion());
                     let spk = match addr.account() {
-                        coin::KeyChain::Receive => self.derivator.receive_at(addr.index()),
-                        coin::KeyChain::Change => self.derivator.change_at(addr.index()),
-                        coin::KeyChain::Custom(_) => unimplemented!(),
+                        KeyChain::Receive => self.derivator.receive_at(addr.index()),
+                        KeyChain::Change => self.derivator.change_at(addr.index()),
+                        KeyChain::Custom(_) => unimplemented!(),
                     }
                     .script_pubkey();
                     assert!(spk == txout.script_pubkey);
@@ -718,7 +753,7 @@ impl<P: StorageProfile> CoinStore<P> {
                         status,
                         label,
                         satisfaction_size: satisfaction as u64,
-                        spend_info: bwk_tx::CoinSpendInfo::Bip32 {
+                        spend_info: CoinSpendInfo::Bip32 {
                             coin_path: (addr.account(), addr.index()),
                             descriptor: descriptor.clone(),
                             secret_key: None,
@@ -986,28 +1021,11 @@ impl<P: StorageProfile> CoinStore<P> {
 
     /// Queues a pending claim, to be promoted by a future CTA once the
     /// HeaderStore has a header at that height.
-    pub(crate) fn insert_pending_claim(&mut self, claim: ClaimAt) {
+    pub fn insert_pending_claim(&mut self, claim: ClaimAt) {
         self.pending_claims
             .entry(claim.height)
             .or_default()
             .insert(claim.txid);
-    }
-
-    /// Queue server-reported heights without promoting against the header store.
-    pub fn queue_reported_heights(&mut self, reported: &[ClaimAt]) -> bool {
-        let before = self.pending_claims.clone();
-        for &claim in reported {
-            self.prune_pending_claim(claim);
-            match self
-                .tx_store
-                .get(&claim.txid)
-                .map(|e| e.inclusion().clone())
-            {
-                Some(Inclusion::Unconfirmed) | None => self.insert_pending_claim(claim),
-                Some(_) => {}
-            }
-        }
-        before != self.pending_claims
     }
 
     /// Drops `keep.txid` from every pending-claim height set other than
@@ -1033,7 +1051,7 @@ impl<P: StorageProfile> CoinStore<P> {
     }
 
     /// Snapshot of the pending-claims queue.
-    pub(crate) fn pending_claims_snapshot(&self) -> BTreeMap<u32, BTreeSet<Txid>> {
+    pub fn pending_claims_snapshot(&self) -> BTreeMap<u32, BTreeSet<Txid>> {
         self.pending_claims.clone()
     }
 
@@ -1089,15 +1107,13 @@ impl<P: StorageProfile> CoinStore<P> {
         to_fetch.push(claim);
     }
 
-    /// Promote server-reported `(txid, height)` claims with a known header,
-    /// queue the rest in `pending_claims`. The caller persists, regenerates
-    /// and dispatches the returned fetches.
-    pub fn resolve_reported_heights(
-        &mut self,
-        header_store: &HeaderStore<P::HeaderStore>,
-        reported: &[ClaimAt],
-    ) -> ChainUpdateOutcome {
-        let mut to_fetch: Vec<ClaimAt> = Vec::new();
+    /// Queue every server-reported `(txid, height)` claim in
+    /// `pending_claims`. The scanner has no view of the validated chain, so
+    /// promotion is left to the reconciler's
+    /// [`resolve_pending_claims`](Self::resolve_pending_claims) pass. Returns
+    /// whether the queue changed.
+    pub fn record_reported_heights(&mut self, reported: &[ClaimAt]) -> bool {
+        let before = self.pending_claims.clone();
         for &ClaimAt { txid, height } in reported {
             // `reported` carries EVERY confirmed tx in each scripthash history,
             // not just the ones whose height changed. This pass is promote-only:
@@ -1105,7 +1121,6 @@ impl<P: StorageProfile> CoinStore<P> {
             // by history (`update_spk_history` resets changed txs to Unconfirmed),
             // so a tx already ConfirmedUnverified or Verified is left untouched.
             let current = self.tx_store.get(&txid).map(|e| e.inclusion().clone());
-            let have_header = header_store.block_hash(height);
 
             // Invariant: a txid has AT MOST ONE pending claim, its latest
             // server-reported height. A reorg can re-report the same tx at a
@@ -1113,8 +1128,8 @@ impl<P: StorageProfile> CoinStore<P> {
             // would linger and, because `on_chain_update` iterates ascending,
             // promote the tx to the wrong (lower) height, wedging it
             // ConfirmedUnverified forever (its merkle proof at the old height
-            // fails). So before inserting/queueing this claim, drop `txid` from
-            // every OTHER height-set.
+            // fails). So before queueing this claim, drop `txid` from every
+            // OTHER height-set.
             //
             // (A tx fully removed from the chain, `diff.removed` -> `store.remove`,
             // is not re-reported here and so keeps its stale pending entry until
@@ -1123,20 +1138,7 @@ impl<P: StorageProfile> CoinStore<P> {
             self.prune_pending_claim(ClaimAt { txid, height });
 
             match current {
-                // Unconfirmed with a known header: promote and fetch its proof.
-                Some(Inclusion::Unconfirmed) if have_header.is_some() => {
-                    let block_hash = have_header.expect("header present");
-                    Self::promote_claim(
-                        &mut self.tx_store,
-                        &mut self.merkle_in_flight,
-                        &txid,
-                        height,
-                        block_hash,
-                        &mut to_fetch,
-                    );
-                }
-                // Unconfirmed but no header yet, or tx not in the store yet:
-                // queue the claim for a future CTA to promote.
+                // Unconfirmed, or the tx bytes have not landed yet.
                 Some(Inclusion::Unconfirmed) | None => {
                     self.insert_pending_claim(ClaimAt { txid, height });
                 }
@@ -1144,8 +1146,7 @@ impl<P: StorageProfile> CoinStore<P> {
                 Some(_) => {}
             }
         }
-        let changed = !to_fetch.is_empty();
-        ChainUpdateOutcome { to_fetch, changed }
+        before != self.pending_claims
     }
 
     /// Re-queue the merkle fetch of every still-`ConfirmedUnverified` entry
@@ -1373,11 +1374,7 @@ impl Update {
     pub fn from_diff(spk: ScriptBuf, diff: HistoryDiff) -> Self {
         Update {
             spk,
-            txs: diff
-                .added
-                .into_iter()
-                .map(|(txid, _)| (txid, None))
-                .collect(),
+            txs: diff.added.into_keys().map(|txid| (txid, None)).collect(),
         }
     }
 
@@ -1410,7 +1407,7 @@ impl Update {
 /// The `CoinEntry` struct contains information about the coin's height,
 /// status, associated coin data, and the address it belongs to.
 pub struct CoinEntry {
-    pub coin: coin::Coin,
+    pub coin: Coin,
     pub address: bitcoin::Address<NetworkUnchecked>,
 }
 
@@ -1500,11 +1497,11 @@ impl CoinEntry {
     /// Returns the derivation path associated with the coin.
     ///
     /// # Returns
-    /// A tuple containing the `AddrAccount` and the index of the coin's derivation path.
+    /// A tuple containing the `KeyChain` and the index of the coin's derivation path.
     /// Returns `None` for non-descriptor coins (e.g., Silent Payment coins).
     pub fn deriv(&self) -> Option<(KeyChain, u32)> {
         match &self.coin.spend_info {
-            bwk_tx::CoinSpendInfo::Bip32 { coin_path, .. } => Some(*coin_path),
+            CoinSpendInfo::Bip32 { coin_path, .. } => Some(*coin_path),
             #[allow(unreachable_patterns)]
             _ => None,
         }
@@ -1530,7 +1527,7 @@ impl CoinEntry {
     /// Panics for non-descriptor coins.
     pub fn rust_address(&self) -> AddressEntry {
         let (account, index) = match &self.coin.spend_info {
-            bwk_tx::CoinSpendInfo::Bip32 { coin_path, .. } => *coin_path,
+            CoinSpendInfo::Bip32 { coin_path, .. } => *coin_path,
             #[allow(unreachable_patterns)]
             _ => panic!("rust_address not supported for non-descriptor coins"),
         };
@@ -1560,10 +1557,8 @@ mod tests {
     //! drives funding/spending txs through the in-memory
     //! [`TxStore`].
     use super::*;
-    use crate::config::Config;
-    use bip39::Mnemonic;
-    use bwk_descriptor::{descriptor::ScriptType, wpkh_path};
-    use bwk_sign::HotSigner;
+    use bwk_descriptor::wpkh_path;
+    use bwk_sign::{bip39::Mnemonic, HotSigner};
     use bwk_utils::test::{funding_tx, spending_tx};
     use miniscript::bitcoin::bip32::ChildNumber;
     use std::sync::mpsc;
@@ -1576,16 +1571,6 @@ mod tests {
         let xpub = signer.xpub(&path);
         let derivator = SpkDerivator::new_wpkh(xpub, network).unwrap();
         let descriptor = derivator.descriptor();
-        let dummy_config = Config::new(
-            Some(mnemo.to_string()),
-            "addr_history_test".into(),
-            network,
-            ScriptType::Segwit(ChildNumber::from_hardened_idx(0).unwrap()),
-            std::path::PathBuf::default(),
-            String::new(),
-            false,
-        )
-        .unwrap();
 
         let (notif_sender, _notif_recv) = mpsc::channel();
         let tx_store = TxStore::new();
@@ -1604,13 +1589,49 @@ mod tests {
             notif_sender,
             0, // recv_tip
             0, // change_tip
-            5, // look_ahead — populates spk indices 0..=5
+            5, // look_ahead: populates spk indices 0..=5
             tx_store,
             label_store,
-            dummy_config,
             account_store,
         );
         (cs, derivator)
+    }
+
+    /// A server can hand back a tx whose input names a vout the funding tx
+    /// does not have. Indexing the outputs with it would panic under the coin
+    /// store lock and poison it for every other thread.
+    #[test]
+    fn an_input_naming_a_missing_vout_is_skipped() {
+        let (mut cs, deriv) = build_coin_store();
+        let spk = deriv.receive_spk_at(1);
+        let funding = funding_tx(spk.clone(), 0.5);
+        let funding_txid = funding.compute_txid();
+        let vouts = funding.output.len() as u32;
+
+        let spend = bitcoin::Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::Blocks(bitcoin::absolute::Height::ZERO),
+            input: vec![bitcoin::TxIn {
+                previous_output: OutPoint::new(funding_txid, vouts),
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: bitcoin::Sequence(0xFFFFFFFF),
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![],
+        };
+        let spend_txid = spend.compute_txid();
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(funding));
+        cs.tx_store
+            .update(crate::tx_store::TxEntry::for_test(spend));
+
+        cs.generate();
+
+        let entry = cs.tx_store.get(&spend_txid).expect("the spend is stored");
+        assert_eq!(entry.inputs.len(), 1);
+        let input = entry.inputs.get(&0).expect("the input is populated");
+        assert!(!input.owned, "an unresolvable prevout cannot be owned");
+        assert_eq!(input.value, None);
     }
 
     #[test]
@@ -1936,12 +1957,11 @@ mod tests {
         let txid = tx.compute_txid();
         cs.tx_store.update(crate::tx_store::TxEntry::for_test(tx));
 
-        // Server reports the tx confirmed at height H. With no synced header,
-        // resolve_reported_heights queues it and leaves it Unconfirmed.
+        // Server reports the tx confirmed at height H. The scan only queues
+        // the claim, leaving the tx Unconfirmed.
         let height = 200u32;
         cs.update_spk_history(spk.clone(), vec![(txid, Some(height as u64))]);
-        let no_header = HeaderStore::new_in_memory(bitcoin::Network::Regtest);
-        cs.resolve_reported_heights(&no_header, &[ClaimAt { txid, height }]);
+        cs.record_reported_heights(&[ClaimAt { txid, height }]);
         assert!(cs
             .pending_claims_snapshot()
             .get(&height)

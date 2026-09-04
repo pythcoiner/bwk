@@ -1,3 +1,5 @@
+pub mod regtest;
+
 use std::{str::FromStr, sync::Once};
 
 pub use corepc_node::{self, Client, Node};

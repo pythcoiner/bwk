@@ -1,13 +1,13 @@
 //! Persistence backend abstraction for bwk.
 //!
 //! Stores (tx, label, coin, scan state, etc.) in `bwk` and `bwk-sp` do not
-//! write files themselves — they hand their serialized bytes to a
+//! write files themselves. They hand their serialized bytes to a
 //! [`PersistenceBackend`]. The main backends are:
 //!
-//! - [`JsonBackend`] — one JSON file per store inside a directory.
+//! - [`JsonBackend`]: one JSON file per store inside a directory.
 //! - [`HeaderBackend`]: one binary fixed-record file for the validated
 //!   header chain.
-//! - [`SqliteBackend`] — a single SQLite file per account, behind the
+//! - [`SqliteBackend`]: a single SQLite file per account, behind the
 //!   `sqlite` Cargo feature.
 //!
 //! [`NoopBackend`] replaces the old `persist: bool = false` escape hatch.
@@ -25,7 +25,7 @@
 //! Both on-disk layouts are treated as opaque key-value stores. Each
 //! store has rows keyed by a primary-key string (`key`) with a BLOB value
 //! holding serde-encoded bytes. There are **no typed columns, no
-//! relational structure, no schema migrations** — ever.
+//! relational structure, no schema migrations**, ever.
 //!
 //! The reason this is safe: bwk holds the whole account state in RAM at
 //! runtime. The DB is only a persistence medium, never a query layer;
@@ -153,7 +153,7 @@ pub enum PersistError {
     DbVersionTooNew { found: u32, max_supported: u32 },
     /// Another process (or another instance in this process) already
     /// holds the advisory lock on the account directory. Callers
-    /// should surface this to the user rather than retry silently —
+    /// should surface this to the user rather than retry silently:
     /// wallet state has a single owner.
     #[error("account directory {path:?} is already opened by another instance")]
     AlreadyOpen { path: std::path::PathBuf },
@@ -172,10 +172,10 @@ pub enum PersistenceKind {
 
 /// Build a concrete backend from `(kind, account_dir)`.
 ///
-/// - `None` → [`NoopBackend`] (persistence disabled).
-/// - `Some(Json)` → [`JsonBackend`] rooted at `account_dir` (opened
+/// - `None` -> [`NoopBackend`] (persistence disabled).
+/// - `Some(Json)` -> [`JsonBackend`] rooted at `account_dir` (opened
 ///   with a version check).
-/// - `Some(Sqlite)` → [`SqliteBackend`] at `{account_dir}/account.sqlite`.
+/// - `Some(Sqlite)` -> [`SqliteBackend`] at `{account_dir}/account.sqlite`.
 ///   Returns [`PersistError::SqliteDisabled`] when the `sqlite` feature is
 ///   off.
 pub fn build_backend(

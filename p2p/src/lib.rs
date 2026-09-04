@@ -1,5 +1,3 @@
-#![allow(clippy::uninlined_format_args)]
-
 mod client;
 mod connection;
 mod dns;
