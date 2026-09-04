@@ -3642,7 +3642,7 @@ mod integration_tests {
     use bwk_descriptor::descriptor::ScriptType;
     use bwk_electrum::client::Client;
     use bwk_utils::test::{
-        bootstrap_electrs as start_electrs_test, electrsd, TempDir, TestBitcoinD,
+        bootstrap_electrs as start_electrs_test, electrsd, wait_electrs_tip, TempDir, TestBitcoinD,
     };
     use miniscript::bitcoin::{
         self, bip32::ChildNumber, Address, Amount, Network, Transaction, Txid,
@@ -3664,7 +3664,6 @@ mod integration_tests {
         TestBitcoinD,
     ) {
         let (url, port, electrsd, bitcoind) = start_electrs_test(false);
-
         generate(&bitcoind, 101);
 
         // Without root we cannot raise electrsd's priority directly, so lower
@@ -3679,28 +3678,9 @@ mod integration_tests {
         // test starts pushing transactions. Avoids a race where the first
         // send_to_address lands while the indexer is still ingesting the
         // initial 101 blocks.
-        wait_electrsd_synced(&bitcoind, &electrsd);
+        wait_electrs_tip(&bitcoind, &electrsd);
 
         (url, port, electrsd, bitcoind)
-    }
-
-    fn wait_electrsd_synced(bitcoind: &BitcoinD, electrsd: &ElectrsD) {
-        use electrsd::electrum_client::ElectrumApi;
-        let target = bitcoind
-            .client
-            .call::<Value>("getblockcount", &[])
-            .unwrap()
-            .as_u64()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            if let Ok(header) = electrsd.client.block_headers_subscribe() {
-                if header.height as u64 >= target {
-                    return;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
     }
 
     #[allow(unused)]

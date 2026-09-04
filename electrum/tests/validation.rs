@@ -1,7 +1,10 @@
 mod common;
 
 use bwk_electrum::client::Client;
-use bwk_utils::test::electrsd::bitcoind::bitcoincore_rpc::{self, RpcApi};
+use bwk_utils::test::{
+    electrsd::bitcoind::bitcoincore_rpc::{self, RpcApi},
+    wait_electrs_tip,
+};
 use miniscript::bitcoin::{
     self, absolute, transaction, Address, Amount, Network, OutPoint, Psbt, ScriptBuf, Sequence,
     Transaction, TxIn, TxOut, Witness,
@@ -23,11 +26,12 @@ fn mine_to_address(rpc: &bitcoincore_rpc::Client, n: u64, addr: &Address) {
 
 #[test]
 fn validate_psbt_reports_reused_output() {
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
+    let (url, port, electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &addr);
+    wait_electrs_tip(&bitcoind, &electrs);
 
     let mut client = Client::new(&url, port).expect("connect");
 
@@ -55,11 +59,12 @@ fn validate_psbt_reports_reused_output() {
 
 #[test]
 fn validate_psbt_clean_when_no_history() {
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
+    let (url, port, electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &addr);
+    wait_electrs_tip(&bitcoind, &electrs);
 
     let mut client = Client::new(&url, port).expect("connect");
 
@@ -107,13 +112,14 @@ fn validate_psbt_reports_spent_input() {
     use bitcoin::consensus::encode::deserialize as consensus_deserialize;
     use hex_conservative::FromHex;
 
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
+    let (url, port, electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let mining_addr = rpc_address(rpc);
     mine_to_address(rpc, 110, &mining_addr);
+    wait_electrs_tip(&bitcoind, &electrs);
 
-    // Send to a known address — creates UTXO X owned by pay_addr.
+    // Send to a known address, creating a UTXO owned by pay_addr.
     let pay_addr = rpc_address(rpc);
     let funding_txid_hex: String = rpc
         .call(
@@ -123,6 +129,7 @@ fn validate_psbt_reports_spent_input() {
         .unwrap();
     let funding_txid: bitcoin::Txid = funding_txid_hex.parse().unwrap();
     mine_to_address(rpc, 1, &mining_addr);
+    wait_electrs_tip(&bitcoind, &electrs);
 
     let raw_hex: String = rpc
         .call("getrawtransaction", &[funding_txid_hex.clone().into()])
@@ -158,6 +165,7 @@ fn validate_psbt_reports_spent_input() {
         .call("sendrawtransaction", &[signed_hex.into()])
         .unwrap();
     mine_to_address(rpc, 1, &mining_addr);
+    wait_electrs_tip(&bitcoind, &electrs);
 
     let mut client = Client::new(&url, port).expect("connect");
     let unsigned = Transaction {

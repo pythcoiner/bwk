@@ -505,12 +505,16 @@ mod tests {
 
         p2p_client.broadcast_tx(tx).unwrap();
 
-        // Double-check via RPC
-        let mempool = node_b.client.get_raw_mempool().unwrap().0;
-        let mempool_txids: Vec<bitcoin::Txid> =
-            mempool.iter().map(|s| s.parse().unwrap()).collect();
-        assert!(
-            mempool_txids.contains(&broadcast_txid),
+        for _ in 0..50 {
+            let mempool = node_b.client.get_raw_mempool().unwrap().0;
+            let mempool_txids: Vec<bitcoin::Txid> =
+                mempool.iter().map(|s| s.parse().unwrap()).collect();
+            if mempool_txids.contains(&broadcast_txid) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
             "Transaction {broadcast_txid} not found in Node B's mempool after confirmed P2P broadcast"
         );
     }

@@ -201,13 +201,30 @@ pub fn start_electrs(bitcoind: &electrsd::bitcoind::BitcoinD) -> (String, u16, e
     electrs_path.push("electrs_0_9_11");
 
     let mut electrsd_conf = electrsd::Conf::default();
-    electrsd_conf.args = vec!["--log-filters", "DEBUG"];
+    electrsd_conf.args = vec!["--skip-default-conf-files", "--log-filters", "DEBUG"];
     electrsd_conf.buffered_logs = true;
     let electrsd = electrsd::ElectrsD::with_conf(electrs_path, bitcoind, &electrsd_conf).unwrap();
     let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
     let port = port.parse::<u16>().unwrap();
 
     (url.into(), port, electrsd)
+}
+
+pub fn wait_electrs_tip(bitcoind: &electrsd::bitcoind::BitcoinD, electrsd: &electrsd::ElectrsD) {
+    use electrsd::bitcoind::bitcoincore_rpc::RpcApi;
+    use electrsd::electrum_client::ElectrumApi;
+
+    let target: u64 = bitcoind.client.call("getblockcount", &[]).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        if let Ok(header) = electrsd.client.block_headers_subscribe() {
+            if header.height as u64 >= target {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("electrs did not catch up to height {target}");
 }
 
 impl Deref for TestNode {

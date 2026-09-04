@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub use bwk_utils::test::{electrsd, start_electrs, TestBitcoinD};
+pub use bwk_utils::test::{electrsd, start_electrs, wait_electrs_tip, TestBitcoinD};
 
 use electrsd::{
     bitcoind::{
@@ -19,6 +19,7 @@ use electrsd::{
 pub fn bootstrap_electrs(txindex: bool) -> (String, u16, ElectrsD, TestBitcoinD) {
     let (url, port, electrsd, bitcoind) = bwk_utils::test::bootstrap_electrs(txindex);
     generate(&bitcoind, 101);
+    wait_electrs_tip(&bitcoind, &electrsd);
     (url, port, electrsd, bitcoind)
 }
 

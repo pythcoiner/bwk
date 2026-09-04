@@ -63,7 +63,8 @@ use temp_dir::TempDir;
 
 mod common;
 use common::{
-    bootstrap_electrs, generate, get_block_hash_str, get_block_height, restart_electrs, wait_until,
+    bootstrap_electrs, generate, get_block_hash_str, get_block_height, restart_electrs,
+    wait_electrs_tip, wait_until,
 };
 
 fn send_to_address(bitcoind: &BitcoinD, addr: &Address, amount: Amount) {
@@ -590,7 +591,8 @@ fn restart_requeues_stranded_merkle_fetch() {
 
     send_to_address(&bitcoind, &addr, Amount::from_btc(0.1).unwrap());
     generate(&bitcoind, 1);
-    let (new_url, new_port, _new_electrsd) = restart_electrs(electrsd, &bitcoind);
+    let (new_url, new_port, new_electrsd) = restart_electrs(electrsd, &bitcoind);
+    wait_electrs_tip(&bitcoind, &new_electrsd);
 
     account.set_electrum_config(Some(new_url), Some(new_port));
     account.restart_electrum();

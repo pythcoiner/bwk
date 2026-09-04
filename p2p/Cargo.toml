@@ -11,6 +11,9 @@ repository.workspace = true
 crate-type = ["rlib", "cdylib", "staticlib"]
 doctest = false
 
+[features]
+ci-p2p = []
+
 [dependencies]
 bitcoin = { workspace = true }
 bwk-backoff = { workspace = true }
@@ -23,6 +26,3 @@ rand = { workspace = true }
 corepc-node = { workspace = true }
 env_logger = { workspace = true }
 temp-dir.workspace = true
-
-[features]
-ci-p2p = []
