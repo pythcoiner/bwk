@@ -1735,7 +1735,7 @@ fn handle_ledger<Message, Id>(
                 let sender_ = sender.clone();
                 let jh = thread::spawn(move || {
                     tracing::trace!("handle_ledger[{}]: calling handle_ledger_device", id_clone);
-                    match handle_ledger_device(id_clone.clone(), device, sender_) {
+                    match handle_ledger_device(id_clone.clone(), device, sender_.clone()) {
                         Ok(hw) => {
                             if let SigningDevice::Supported(SupportedDevice {
                                 fingerprint,
@@ -1761,6 +1761,7 @@ fn handle_ledger<Message, Id>(
                                 id_clone
                             );
                             devices.lock().expect("poisoned").insert(id_clone, hw);
+                            let _ = sender_.send(SigningDeviceMsg::Update.into());
                         }
                         Err(e) => {
                             tracing::debug!("Failed to initialize Ledger {}: {:?}", id_clone, e);
@@ -1768,7 +1769,6 @@ fn handle_ledger<Message, Id>(
                     }
                 });
                 handles.insert(id, jh);
-                let _ = sender.send(SigningDeviceMsg::Update.into());
             }
             Err(HWIError::DeviceNotFound) => {
                 tracing::trace!("handle_ledger: device {} returned DeviceNotFound", id);
