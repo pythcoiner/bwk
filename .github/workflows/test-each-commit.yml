@@ -1,12 +1,16 @@
-name: Commit history check
+name: commit
 on:
   pull_request:
     branches:
       - master
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # first we list all commits
   list-commits:
+    name: "tip: list commits"
     # Single-commit PRs are already fully covered by main.yml.
     if: github.event.pull_request.commits > 1
     runs-on: ubuntu-latest
@@ -18,31 +22,29 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Fetch base branch
-        run: |
-          git fetch --no-tags --prune --depth=1 origin \
-            "+refs/heads/${GITHUB_BASE_REF}:refs/remotes/origin/${GITHUB_BASE_REF}"
-
       - id: list
         name: List intermediate commits
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # HEAD is the PR tip -- already covered by main.yml.
-          # Emit {sha, label} objects so the matrix job name in the GH UI
-          # shows "<short sha> <subject>" instead of a raw 40-char SHA.
-          range="origin/${GITHUB_BASE_REF}..HEAD~"
-          commits=$(git log --reverse --pretty=format:'%H%x09%h %s' "$range" \
-            | jq -R -s -c 'split("\n") | map(select(length > 0))
-                | map(split("\t") | {sha: .[0], label: .[1]})')
+          commits=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/commits" \
+            --jq '.[] | [.sha, .sha[0:7]] | @tsv' \
+            | jq -R -s -c 'split("\n") | map(select(length > 0)) as $commits
+                | ($commits | length) as $total
+                | $commits[0:-1]
+                | to_entries
+                | map({sha: (.value | split("\t")[0]),
+                    label: "\(.key + 1)/\($total) \((.value | split("\t"))[1])"})')
           echo "Intermediate commits: $commits"
           echo "commits=$commits" >> "$GITHUB_OUTPUT"
 
-  # second we start one CI task per commit
-  check-commit:
+  lint-commit:
     needs: list-commits
     if: needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
-    name: ${{ matrix.commit.label }}
+    name: "${{ matrix.commit.label }}: lint"
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -52,26 +54,162 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ matrix.commit.sha }}
-
       - name: Stage ci-checks.sh from PR tip
         run: |
-          # Intermediate commits may predate scripts/ci-checks.sh, so pull
-          # the script from the PR tip and run it from $RUNNER_TEMP.
           git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
             > "$RUNNER_TEMP/ci-checks.sh"
           chmod +x "$RUNNER_TEMP/ci-checks.sh"
-
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: 1.85.0
+          toolchain: 1.88.0
           components: rustfmt, clippy
           override: true
           profile: minimal
-
       - name: Install system dependencies
-        # gdb: lets the integration-test watchdog dump thread backtraces if a
-        # scan ever hangs, so the job fails fast with a trace instead of stalling.
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev gdb
-
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: Run CI checks
-        run: "$RUNNER_TEMP/ci-checks.sh"
+        run: '"$RUNNER_TEMP/ci-checks.sh" per-commit-lint'
+
+  build-test-bins:
+    needs: list-commits
+    if: needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
+    name: "${{ matrix.commit.label }}: build tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list-commits.outputs.commits) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.commit.sha }}
+      - name: Stage ci-checks.sh from PR tip
+        run: |
+          git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
+            > "$RUNNER_TEMP/ci-checks.sh"
+          chmod +x "$RUNNER_TEMP/ci-checks.sh"
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.88.0
+          override: true
+          profile: minimal
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Build test binaries
+        run: '"$RUNNER_TEMP/ci-checks.sh" build-test-bins'
+        env:
+          CARGO_INCREMENTAL: 0
+          CARGO_PROFILE_TEST_DEBUG: 0
+          CARGO_TARGET_DIR: ${{ runner.temp }}/bwk-target-${{ matrix.commit.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-bins-${{ matrix.commit.sha }}
+          path: test-bins.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  test-commit:
+    needs: [list-commits, build-test-bins]
+    if: always() && needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
+    name: "${{ matrix.commit.label }}: test ${{ matrix.shard.name }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list-commits.outputs.commits) }}
+        shard:
+          - name: bwk
+            packages: bwk
+          - name: bwk-sp
+            packages: bwk-sp
+    env:
+      TEST_PACKAGES: ${{ matrix.shard.packages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.commit.sha }}
+      - name: Stage ci-checks.sh from PR tip
+        run: |
+          git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
+            > "$RUNNER_TEMP/ci-checks.sh"
+          chmod +x "$RUNNER_TEMP/ci-checks.sh"
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-bins-${{ matrix.commit.sha }}
+          path: ${{ runner.temp }}/test-artifact
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.88.0
+          override: true
+          profile: minimal
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev gdb
+      - name: Run test binaries
+        run: '"$RUNNER_TEMP/ci-checks.sh" run-test-bins'
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/bwk-target-${{ matrix.commit.sha }}
+          TEST_ARTIFACT_FILE: ${{ runner.temp }}/test-artifact/test-bins.tar.gz
+
+  doc-tests-commit:
+    needs: list-commits
+    if: needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
+    name: "${{ matrix.commit.label }}: test doc"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list-commits.outputs.commits) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.commit.sha }}
+      - name: Stage ci-checks.sh from PR tip
+        run: |
+          git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
+            > "$RUNNER_TEMP/ci-checks.sh"
+          chmod +x "$RUNNER_TEMP/ci-checks.sh"
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.88.0
+          override: true
+          profile: minimal
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Run CI checks
+        run: '"$RUNNER_TEMP/ci-checks.sh" doc-tests'
+
+  build-commit:
+    needs: list-commits
+    if: needs.list-commits.outputs.commits != '[]' && needs.list-commits.outputs.commits != ''
+    name: "${{ matrix.commit.label }}: build"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        commit: ${{ fromJSON(needs.list-commits.outputs.commits) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ matrix.commit.sha }}
+      - name: Stage ci-checks.sh from PR tip
+        run: |
+          git show ${{ github.event.pull_request.head.sha }}:scripts/ci-checks.sh \
+            > "$RUNNER_TEMP/ci-checks.sh"
+          chmod +x "$RUNNER_TEMP/ci-checks.sh"
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: 1.88.0
+          override: true
+          profile: minimal
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: Run build
+        run: '"$RUNNER_TEMP/ci-checks.sh" build'

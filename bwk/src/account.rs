@@ -3628,9 +3628,7 @@ mod tests {
 mod integration_tests {
 
     use rand::random_range;
-    use std::{
-        collections::BTreeMap, env, path::PathBuf, sync::mpsc, thread::sleep, time::Duration,
-    };
+    use std::{collections::BTreeMap, sync::mpsc, thread::sleep, time::Duration};
 
     use super::{Notification, TxListenerNotif};
     use crate::{
@@ -3643,16 +3641,18 @@ mod integration_tests {
     use bip39::Mnemonic;
     use bwk_descriptor::descriptor::ScriptType;
     use bwk_electrum::client::Client;
+    use bwk_utils::test::{
+        bootstrap_electrs as start_electrs_test, electrsd, TempDir, TestBitcoinD,
+    };
     use miniscript::bitcoin::{
         self, bip32::ChildNumber, Address, Amount, Network, Transaction, Txid,
     };
     use miniscript::psbt::PsbtExt;
-    use temp_dir::TempDir;
 
     use electrsd::{
         bitcoind::{
             bitcoincore_rpc::{jsonrpc::serde_json::Value, RpcApi},
-            BitcoinD, P2P,
+            BitcoinD,
         },
         ElectrsD,
     };
@@ -3661,37 +3661,11 @@ mod integration_tests {
         String, /* url */
         u16,    /* port */
         ElectrsD,
-        BitcoinD,
+        TestBitcoinD,
     ) {
-        let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-        cwd.push("tests");
+        let (url, port, electrsd, bitcoind) = start_electrs_test(false);
 
-        let mut electrs_path = cwd.clone();
-        electrs_path.push("bin");
-        electrs_path.push("electrs_0_9_11");
-
-        let mut bitcoind_path = cwd.clone();
-        bitcoind_path.push("bin");
-        bitcoind_path.push("bitcoind_25_2");
-
-        let mut conf = electrsd::bitcoind::Conf::default();
-        conf.p2p = P2P::Yes;
-        let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-        let mut electrsd_conf = electrsd::Conf::default();
-        electrsd_conf.args = vec!["--log-filters", "DEBUG"];
-        electrsd_conf.buffered_logs = true;
-
-        let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-        let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-        let port = port.parse::<u16>().unwrap();
-
-        // mine 101 blocks
-        let node_address = bitcoind.client.call::<Value>("getnewaddress", &[]).unwrap();
-        bitcoind
-            .client
-            .call::<Value>("generatetoaddress", &[101.into(), node_address])
-            .unwrap();
+        generate(&bitcoind, 101);
 
         // Without root we cannot raise electrsd's priority directly, so lower
         // the test process instead. Gives electrsd's indexer relatively more
@@ -3707,7 +3681,7 @@ mod integration_tests {
         // initial 101 blocks.
         wait_electrsd_synced(&bitcoind, &electrsd);
 
-        (url.into(), port, electrsd, bitcoind)
+        (url, port, electrsd, bitcoind)
     }
 
     fn wait_electrsd_synced(bitcoind: &BitcoinD, electrsd: &ElectrsD) {
@@ -3730,7 +3704,7 @@ mod integration_tests {
     }
 
     #[allow(unused)]
-    pub fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
+    pub fn tcp_client() -> (Client, ElectrsD, TestBitcoinD) {
         let (url, port, e, b) = bootstrap_electrs();
         let client = Client::new(&url, port).unwrap();
 

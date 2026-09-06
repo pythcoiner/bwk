@@ -35,17 +35,7 @@ pub struct ScriptPubKey {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ReceivingVinData {
-    pub txid: String,
-    pub vout: u32,
-    pub scriptSig: String,
-    pub txinwitness: String,
-    pub prevout: ScriptPubKey,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct ReceivingDataGiven {
-    pub vin: Vec<ReceivingVinData>,
     pub key_material: ReceivingKeyMaterial,
     pub labels: Vec<u32>,
     pub outputs: Vec<String>,
@@ -73,8 +63,6 @@ pub struct SendingDataGiven {
 pub struct SendingVinData {
     pub txid: String,
     pub vout: u32,
-    pub scriptSig: String,
-    pub txinwitness: String,
     pub prevout: ScriptPubKey,
     pub private_key: String,
 }

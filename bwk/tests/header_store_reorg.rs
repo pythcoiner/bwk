@@ -30,7 +30,7 @@ fn drain(rx: &mpsc::Receiver<()>, timeout: Duration) -> usize {
 
 #[test]
 fn header_store_follows_tip_and_resolves_reorg() {
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
     let base_height = get_block_height(&bitcoind);
 
     let tmp = TempDir::new().unwrap();

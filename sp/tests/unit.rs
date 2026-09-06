@@ -23,6 +23,11 @@ use bwk_sp::{
     Notification, SpNotification,
 };
 
+#[test]
+fn test_common_helpers() {
+    common::tests::run();
+}
+
 // MockBackend Tests
 
 /// Test that MockBackend returns the configured block height.
@@ -51,10 +56,8 @@ fn test_mock_backend_failure() {
     // Second call fails
     let result = backend.block_height();
     assert!(result.is_err());
-    match result.unwrap_err() {
-        MockBackendError::SimulatedFailure(n) => assert_eq!(n, 1),
-        _ => panic!("expected SimulatedFailure"),
-    }
+    let MockBackendError::SimulatedFailure(n) = result.unwrap_err();
+    assert_eq!(n, 1);
 
     // Further calls also fail
     assert!(backend.block_height().is_err());

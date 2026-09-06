@@ -32,7 +32,7 @@ pub fn fetch_peers_with_port(dns_seed: &str, port: u16) -> Result<Vec<SocketAddr
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ci-p2p"))]
 mod tests {
     use super::*;
 

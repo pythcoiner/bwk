@@ -3,7 +3,7 @@
 //! Covers 16 spending scenarios:
 //! - SP-only inputs (to SP, taproot, segwit, and mixed outputs)
 //! - Mixed SP + BIP32 inputs (to standard outputs)
-//! - Mixed SP + BIP32 inputs (to SP outputs — regression for partial secret)
+//! - Mixed SP + BIP32 inputs (to SP outputs, regression for partial secret)
 
 mod common;
 
@@ -14,6 +14,34 @@ use bwk_sp::account::recipient::{SpRecipientAddress, TxBuilderSpExt};
 use bwk_tx::{transaction::Amount, Recipient};
 
 use common::{test_mnemonic, test_mnemonic_2, TestEnv};
+
+#[test]
+fn test_transactions() {
+    let mut env = TestEnv::new();
+
+    test_insufficient_funds(&env);
+    test_bip32_only_sp_change_bookkeeping(&mut env);
+    test_standard_output_ownership_is_counted_once(&mut env);
+    test_drain(&mut env);
+    test_sp_to_sp_self(&mut env);
+    test_sp_to_sp_other(&mut env);
+    test_sp_to_taproot(&mut env);
+    test_sp_to_segwit(&mut env);
+    test_sp_to_mixed_sp_taproot(&mut env);
+    test_sp_to_mixed_sp_segwit(&mut env);
+    test_multi_sp_to_mixed_sp_taproot(&mut env);
+    test_multi_sp_to_taproot(&mut env);
+    test_mixed_sp_taproot_to_taproot(&mut env);
+    test_mixed_sp_taproot_to_segwit(&mut env);
+    test_mixed_sp_segwit_to_taproot(&mut env);
+    test_mixed_sp_segwit_to_segwit(&mut env);
+    test_multi_sp_inputs_to_sp_and_taproot(&mut env);
+    test_sp_to_three_sp_outputs_self(&mut env);
+    test_multi_sp_inputs_to_three_sp_outputs(&mut env);
+    test_sp_to_sp_other_and_self(&mut env);
+    test_mixed_sp_taproot_to_sp(&mut env);
+    test_mixed_sp_segwit_to_sp(&mut env);
+}
 
 /// Create a drain recipient for a standard address (Amount::Max, no change).
 fn drain_to(addr: bitcoin::Address) -> Recipient {
@@ -27,9 +55,7 @@ fn drain_to(addr: bitcoin::Address) -> Recipient {
 }
 
 /// Empty account cannot build a transaction.
-#[test]
-fn test_insufficient_funds() {
-    let env = TestEnv::new();
+fn test_insufficient_funds(env: &TestEnv) {
     let account = env.sp_account("test-insufficient");
 
     assert_eq!(account.balance(), 0);
@@ -46,9 +72,8 @@ fn test_insufficient_funds() {
 
 /// BIP32-only inputs with automatic SP change retain the change metadata until
 /// scanning records the SP coin and its spend tweak.
-#[test]
-fn test_bip32_only_sp_change_bookkeeping() {
-    let mut env = TestEnv::new();
+fn test_bip32_only_sp_change_bookkeeping(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test-bip32-only-sp-change");
     env.add_taproot_sub_account(&mut account);
     env.add_segwit_sub_account(&mut account);
@@ -97,7 +122,9 @@ fn test_bip32_only_sp_change_bookkeeping() {
     assert_eq!(payment.amount, input_value.to_sat() - change);
 
     env.broadcast_and_mine(&tx);
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
 
     let change_coins: Vec<_> = account
         .coins()
@@ -123,9 +150,7 @@ fn test_bip32_only_sp_change_bookkeeping() {
     account.sign_and_finalize(&mut psbt).unwrap();
 }
 
-#[test]
-fn test_standard_output_ownership_is_counted_once() {
-    let mut env = TestEnv::new();
+fn test_standard_output_ownership_is_counted_once(env: &mut TestEnv) {
     let mut account = env.sp_account("test-standard-output-ownership");
     env.add_taproot_sub_account(&mut account);
     env.add_segwit_sub_account(&mut account);
@@ -174,9 +199,7 @@ fn test_standard_output_ownership_is_counted_once() {
 }
 
 /// Drain uses all UTXOs.
-#[test]
-fn test_drain() {
-    let mut env = TestEnv::new();
+fn test_drain(env: &mut TestEnv) {
     let mut account = env.sp_account("test-drain");
 
     // Fund with 2 separate SP outputs
@@ -194,10 +217,9 @@ fn test_drain() {
     assert_eq!(psbt.unsigned_tx.input.len(), 2);
 }
 
-/// SP → SP (self): send to own address, verify change.
-#[test]
-fn test_sp_to_sp_self() {
-    let mut env = TestEnv::new();
+/// SP -> SP (self): send to own address, verify change.
+fn test_sp_to_sp_self(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test-self");
     env.fund_sp(&mut account, 0.5);
 
@@ -216,7 +238,9 @@ fn test_sp_to_sp_self() {
     env.broadcast_and_mine(&tx);
 
     // Rescan to detect change outputs
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -229,10 +253,9 @@ fn test_sp_to_sp_self() {
     );
 }
 
-/// SP → SP (other wallet): verify recipient detects the output.
-#[test]
-fn test_sp_to_sp_other() {
-    let mut env = TestEnv::new();
+/// SP -> SP (other wallet): verify recipient detects the output.
+fn test_sp_to_sp_other(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut sender = env.sp_account_with_mnemonic("sender", test_mnemonic());
     let mut receiver = env.sp_account_with_mnemonic("receiver", test_mnemonic_2());
 
@@ -257,7 +280,9 @@ fn test_sp_to_sp_other() {
     env.broadcast_and_mine(&tx);
 
     // Receiver scans and finds the output
-    receiver.scan_blocks(Some(1), Some(env.height)).unwrap();
+    receiver
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let receiver_coins = receiver.coins();
     assert_eq!(receiver_coins.len(), 1);
     let received_op = receiver_coins.keys().next().unwrap();
@@ -265,10 +290,8 @@ fn test_sp_to_sp_other() {
     assert!(receiver.balance() >= send_amount);
 }
 
-/// SP → taproot address.
-#[test]
-fn test_sp_to_taproot() {
-    let mut env = TestEnv::new();
+/// SP -> taproot address.
+fn test_sp_to_taproot(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.5);
 
@@ -284,10 +307,8 @@ fn test_sp_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP → segwit (P2WPKH) address.
-#[test]
-fn test_sp_to_segwit() {
-    let mut env = TestEnv::new();
+/// SP -> segwit (P2WPKH) address.
+fn test_sp_to_segwit(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.5);
 
@@ -303,10 +324,9 @@ fn test_sp_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP → SP + taproot (mixed outputs).
-#[test]
-fn test_sp_to_mixed_sp_taproot() {
-    let mut env = TestEnv::new();
+/// SP -> SP + taproot (mixed outputs).
+fn test_sp_to_mixed_sp_taproot(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.5);
 
@@ -321,7 +341,9 @@ fn test_sp_to_mixed_sp_taproot() {
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -333,10 +355,9 @@ fn test_sp_to_mixed_sp_taproot() {
     );
 }
 
-/// SP → SP + segwit (mixed outputs).
-#[test]
-fn test_sp_to_mixed_sp_segwit() {
-    let mut env = TestEnv::new();
+/// SP -> SP + segwit (mixed outputs).
+fn test_sp_to_mixed_sp_segwit(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.5);
 
@@ -351,7 +372,9 @@ fn test_sp_to_mixed_sp_segwit() {
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -363,10 +386,9 @@ fn test_sp_to_mixed_sp_segwit() {
     );
 }
 
-/// 2 SP → SP + taproot (multiple SP inputs, mixed outputs).
-#[test]
-fn test_multi_sp_to_mixed_sp_taproot() {
-    let mut env = TestEnv::new();
+/// 2 SP -> SP + taproot (multiple SP inputs, mixed outputs).
+fn test_multi_sp_to_mixed_sp_taproot(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.fund_sp(&mut account, 0.1);
@@ -382,7 +404,9 @@ fn test_multi_sp_to_mixed_sp_taproot() {
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -394,10 +418,8 @@ fn test_multi_sp_to_mixed_sp_taproot() {
     );
 }
 
-/// 2 SP → taproot (drain to standard output).
-#[test]
-fn test_multi_sp_to_taproot() {
-    let mut env = TestEnv::new();
+/// 2 SP -> taproot (drain to standard output).
+fn test_multi_sp_to_taproot(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.fund_sp(&mut account, 0.1);
@@ -412,10 +434,8 @@ fn test_multi_sp_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + taproot → taproot (drain, no SP change).
-#[test]
-fn test_mixed_sp_taproot_to_taproot() {
-    let mut env = TestEnv::new();
+/// SP + taproot -> taproot (drain, no SP change).
+fn test_mixed_sp_taproot_to_taproot(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_taproot_sub_account(&mut account);
@@ -430,10 +450,8 @@ fn test_mixed_sp_taproot_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + taproot → segwit (drain, no SP change).
-#[test]
-fn test_mixed_sp_taproot_to_segwit() {
-    let mut env = TestEnv::new();
+/// SP + taproot -> segwit (drain, no SP change).
+fn test_mixed_sp_taproot_to_segwit(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_taproot_sub_account(&mut account);
@@ -448,10 +466,8 @@ fn test_mixed_sp_taproot_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + segwit → taproot (drain, no SP change).
-#[test]
-fn test_mixed_sp_segwit_to_taproot() {
-    let mut env = TestEnv::new();
+/// SP + segwit -> taproot (drain, no SP change).
+fn test_mixed_sp_segwit_to_taproot(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_segwit_sub_account(&mut account);
@@ -466,10 +482,8 @@ fn test_mixed_sp_segwit_to_taproot() {
     env.broadcast_and_mine(&tx);
 }
 
-/// SP + segwit → segwit (drain, no SP change).
-#[test]
-fn test_mixed_sp_segwit_to_segwit() {
-    let mut env = TestEnv::new();
+/// SP + segwit -> segwit (drain, no SP change).
+fn test_mixed_sp_segwit_to_segwit(env: &mut TestEnv) {
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_segwit_sub_account(&mut account);
@@ -484,10 +498,9 @@ fn test_mixed_sp_segwit_to_segwit() {
     env.broadcast_and_mine(&tx);
 }
 
-/// 3 SP inputs → SP + taproot (drain multiple SP coins).
-#[test]
-fn test_multi_sp_inputs_to_sp_and_taproot() {
-    let mut env = TestEnv::new();
+/// 3 SP inputs -> SP + taproot (drain multiple SP coins).
+fn test_multi_sp_inputs_to_sp_and_taproot(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test-multi-in");
 
     // Fund with 3 separate SP outputs
@@ -508,7 +521,9 @@ fn test_multi_sp_inputs_to_sp_and_taproot() {
     let txid = tx.compute_txid();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -522,10 +537,9 @@ fn test_multi_sp_inputs_to_sp_and_taproot() {
     );
 }
 
-/// SP → 3 SP outputs to self (2 receive + 1 change, same scan key, k=0..2).
-#[test]
-fn test_sp_to_three_sp_outputs_self() {
-    let mut env = TestEnv::new();
+/// SP -> 3 SP outputs to self (2 receive + 1 change, same scan key, k=0..2).
+fn test_sp_to_three_sp_outputs_self(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test-3sp-self");
     env.fund_sp(&mut account, 0.5);
 
@@ -544,7 +558,9 @@ fn test_sp_to_three_sp_outputs_self() {
     let txid = tx.compute_txid();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -558,10 +574,9 @@ fn test_sp_to_three_sp_outputs_self() {
     );
 }
 
-/// 2 SP inputs → 3 SP outputs to self (multiple inputs, multiple outputs).
-#[test]
-fn test_multi_sp_inputs_to_three_sp_outputs() {
-    let mut env = TestEnv::new();
+/// 2 SP inputs -> 3 SP outputs to self (multiple inputs, multiple outputs).
+fn test_multi_sp_inputs_to_three_sp_outputs(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test-multi-3sp");
     env.fund_sp(&mut account, 0.3);
     env.fund_sp(&mut account, 0.3);
@@ -579,7 +594,9 @@ fn test_multi_sp_inputs_to_three_sp_outputs() {
     let txid = tx.compute_txid();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -592,10 +609,9 @@ fn test_multi_sp_inputs_to_three_sp_outputs() {
     );
 }
 
-/// SP → SP other + SP self + SP change (3 outputs, 2 scan-key groups).
-#[test]
-fn test_sp_to_sp_other_and_self() {
-    let mut env = TestEnv::new();
+/// SP -> SP other + SP self + SP change (3 outputs, 2 scan-key groups).
+fn test_sp_to_sp_other_and_self(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut sender = env.sp_account_with_mnemonic("sender", test_mnemonic());
     let mut receiver = env.sp_account_with_mnemonic("receiver", test_mnemonic_2());
 
@@ -616,7 +632,9 @@ fn test_sp_to_sp_other_and_self() {
     env.broadcast_and_mine(&tx);
 
     // Sender scans: should find self-receive + change
-    sender.scan_blocks(Some(1), Some(env.height)).unwrap();
+    sender
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let sender_new: Vec<_> = sender
         .coins()
         .into_iter()
@@ -629,7 +647,9 @@ fn test_sp_to_sp_other_and_self() {
     );
 
     // Receiver scans: should find the output sent to them
-    receiver.scan_blocks(Some(1), Some(env.height)).unwrap();
+    receiver
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let receiver_new: Vec<_> = receiver
         .coins()
         .into_iter()
@@ -643,13 +663,12 @@ fn test_sp_to_sp_other_and_self() {
     assert!(receiver.balance() >= 50_000);
 }
 
-/// SP + taproot → SP address (drain, triggers partial secret with mixed inputs).
+/// SP + taproot -> SP address (drain, triggers partial secret with mixed inputs).
 ///
 /// Regression test: before the fix, `compute_partial_secret()` failed with
 /// `CoinNotFound` because it tried to look up BIP32 coins in the SP coin store.
-#[test]
-fn test_mixed_sp_taproot_to_sp() {
-    let mut env = TestEnv::new();
+fn test_mixed_sp_taproot_to_sp(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_taproot_sub_account(&mut account);
@@ -663,7 +682,9 @@ fn test_mixed_sp_taproot_to_sp() {
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()
@@ -675,12 +696,11 @@ fn test_mixed_sp_taproot_to_sp() {
     );
 }
 
-/// SP + segwit → SP address (drain, triggers partial secret with mixed inputs).
+/// SP + segwit -> SP address (drain, triggers partial secret with mixed inputs).
 ///
 /// Regression test: same as above but with segwit BIP32 coins.
-#[test]
-fn test_mixed_sp_segwit_to_sp() {
-    let mut env = TestEnv::new();
+fn test_mixed_sp_segwit_to_sp(env: &mut TestEnv) {
+    let start_height = env.next_scan_height();
     let mut account = env.sp_account("test");
     env.fund_sp(&mut account, 0.1);
     env.add_segwit_sub_account(&mut account);
@@ -694,7 +714,9 @@ fn test_mixed_sp_segwit_to_sp() {
     let tx = account.sign_and_finalize(&mut psbt).unwrap();
     env.broadcast_and_mine(&tx);
 
-    account.scan_blocks(Some(1), Some(env.height)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let new_outputs: Vec<_> = account
         .coins()
         .into_iter()

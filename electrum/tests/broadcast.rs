@@ -1,43 +1,18 @@
-use std::{env, path::PathBuf};
+mod common;
 
 use bwk_electrum::client::{Client, Error};
-use electrsd::{
-    bitcoind::{BitcoinD, P2P},
-    ElectrsD,
-};
 use miniscript::bitcoin::{
     self, absolute, transaction, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
 
-fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
-
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let electrsd_conf = electrsd::Conf::default();
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
-}
+use common::bootstrap_electrs;
 
 /// A tx referencing a non-existent UTXO triggers `Response::Error` from electrs;
 /// the new `broadcast_tx` must map that to `Error::Rejected` rather than the
 /// opaque `Error::WrongResponse` returned by `broadcast`.
 #[test]
 fn broadcast_tx_rejection_is_typed() {
-    let (url, port, _electrs, _bitcoind) = bootstrap_electrs();
+    let (url, port, _electrs, _bitcoind) = bootstrap_electrs(false);
     let mut client = Client::new(&url, port).expect("connect");
 
     // Random outpoint guaranteed not to exist on regtest.

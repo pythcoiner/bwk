@@ -1,41 +1,13 @@
-use std::{env, path::PathBuf};
+mod common;
 
 use bwk_electrum::client::Client;
-use electrsd::{
-    bitcoind::{
-        bitcoincore_rpc::{self, RpcApi},
-        BitcoinD, P2P,
-    },
-    ElectrsD,
-};
+use bwk_utils::test::electrsd::bitcoind::bitcoincore_rpc::{self, RpcApi};
 use miniscript::bitcoin::{
     self, absolute, transaction, Address, Amount, Network, OutPoint, Psbt, ScriptBuf, Sequence,
     Transaction, TxIn, TxOut, Witness,
 };
 
-fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
-
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    conf.args.push("-txindex");
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let electrsd_conf = electrsd::Conf::default();
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
-}
+use common::bootstrap_electrs;
 
 fn rpc_address(rpc: &bitcoincore_rpc::Client) -> Address {
     let raw: String = rpc.call("getnewaddress", &[]).unwrap();
@@ -51,7 +23,7 @@ fn mine_to_address(rpc: &bitcoincore_rpc::Client, n: u64, addr: &Address) {
 
 #[test]
 fn validate_psbt_reports_reused_output() {
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let addr = rpc_address(rpc);
@@ -83,7 +55,7 @@ fn validate_psbt_reports_reused_output() {
 
 #[test]
 fn validate_psbt_clean_when_no_history() {
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let addr = rpc_address(rpc);
@@ -111,7 +83,7 @@ fn validate_psbt_clean_when_no_history() {
 
 #[test]
 fn validate_psbt_skips_op_return() {
-    let (url, port, _electrs, _bitcoind) = bootstrap_electrs();
+    let (url, port, _electrs, _bitcoind) = bootstrap_electrs(true);
     let mut client = Client::new(&url, port).expect("connect");
 
     use bitcoin::script::PushBytesBuf;
@@ -135,7 +107,7 @@ fn validate_psbt_reports_spent_input() {
     use bitcoin::consensus::encode::deserialize as consensus_deserialize;
     use hex_conservative::FromHex;
 
-    let (url, port, _electrs, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrs, bitcoind) = bootstrap_electrs(true);
     let rpc = &bitcoind.client;
 
     let mining_addr = rpc_address(rpc);

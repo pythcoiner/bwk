@@ -304,11 +304,12 @@ impl Drop for Client {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ci-p2p"))]
 mod tests {
     use bitcoin::{BlockHash, Network};
     use corepc_node::{Client as RpcClient, Conf, P2P};
     use std::{net::SocketAddr, str::FromStr, time::Duration};
+    use temp_dir::TempDir;
 
     use crate::dns::fetch_peers;
 
@@ -328,10 +329,17 @@ mod tests {
         assert_eq!(new_height, height + blocks as u64);
     }
 
+    fn use_tmpdir(conf: &mut Conf) -> TempDir {
+        let tmp = TempDir::with_prefix("bwk-p2p-bitcoind").unwrap();
+        conf.staticdir = Some(tmp.path().to_path_buf());
+        tmp
+    }
+
     #[test]
     fn test_get_block() {
         let mut conf = Conf::default();
         conf.p2p = P2P::Yes;
+        let _tmp = use_tmpdir(&mut conf);
         let mut node = corepc_node::Node::from_downloaded_with_conf(&conf).unwrap();
         let p2p_addr = match node.p2p_connect(true).unwrap() {
             P2P::Connect(addr, _) => SocketAddr::V4(addr),
@@ -432,11 +440,13 @@ mod tests {
         // Node A: has wallet, creates the TX
         let mut conf_a = Conf::default();
         conf_a.p2p = P2P::Yes;
+        let _tmp_a = use_tmpdir(&mut conf_a);
         let mut node_a = corepc_node::Node::from_downloaded_with_conf(&conf_a).unwrap();
 
         // Node B: connected to Node A, receives the broadcast
         let mut conf_b = Conf::default();
         conf_b.p2p = node_a.p2p_connect(true).unwrap();
+        let _tmp_b = use_tmpdir(&mut conf_b);
         let mut node_b = corepc_node::Node::from_downloaded_with_conf(&conf_b).unwrap();
         let node_b_p2p = match node_b.p2p_connect(true).unwrap() {
             P2P::Connect(addr, _) => SocketAddr::V4(addr),

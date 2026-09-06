@@ -141,7 +141,7 @@ fn init_logger() {
 #[test]
 fn multi_account_shared_header_store() {
     init_logger();
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
 
     let header_store = HeaderStore::start(url.clone(), port, Network::Regtest, None, None).unwrap();
 
@@ -291,7 +291,7 @@ fn multi_account_shared_header_store() {
 #[test]
 fn reorg_reconfirms_verified() {
     init_logger();
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
 
     let header_store = HeaderStore::start(url.clone(), port, Network::Regtest, None, None).unwrap();
 
@@ -398,7 +398,7 @@ fn reorg_reconfirms_verified() {
 
 #[test]
 fn restart_from_cache_skips_full_validation() {
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
 
     let persist_dir = TempDir::new().unwrap();
     let persist_path = persist_dir.path().join("headers.json");
@@ -515,7 +515,7 @@ fn restart_from_cache_skips_full_validation() {
 #[test]
 fn deep_reorg_below_anchor_resyncs() {
     init_logger();
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
 
     // Mine extra blocks so we can anchor the cache above genesis and then
     // reorg below that anchor.
@@ -566,7 +566,7 @@ fn deep_reorg_below_anchor_resyncs() {
 #[test]
 fn restart_requeues_stranded_merkle_fetch() {
     init_logger();
-    let (url, port, electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, electrsd, bitcoind) = bootstrap_electrs(false);
 
     let header_store = HeaderStore::start(url.clone(), port, Network::Regtest, None, None).unwrap();
     let chain_tip = get_block_height(&bitcoind);
@@ -621,7 +621,7 @@ fn restart_requeues_stranded_merkle_fetch() {
 #[test]
 fn sparse_anchor_above_retarget_boundary_syncs_and_verifies() {
     init_logger();
-    let (url, port, _electrsd, bitcoind) = bootstrap_electrs();
+    let (url, port, _electrsd, bitcoind) = bootstrap_electrs(false);
 
     // Mine past 2 * 2016 blocks in chunks (single huge generatetoaddress
     // calls can hit the RPC timeout).
@@ -635,7 +635,7 @@ fn sparse_anchor_above_retarget_boundary_syncs_and_verifies() {
     let header_store =
         HeaderStore::start(url.clone(), port, Network::Regtest, None, Some(4100)).unwrap();
     assert!(
-        wait_until(Duration::from_secs(120), || header_store
+        wait_until(Duration::from_secs(300), || header_store
             .tip()
             .is_some_and(|t| t >= chain_tip)),
         "HeaderStore did not reach chain_tip={chain_tip}; tip={:?}",

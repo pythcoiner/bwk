@@ -1,7 +1,7 @@
 //! Tests for `Account::all_coins` and `Account::all_spendable_coins`.
 //!
 //! Real-coin scenarios across SP + sub-accounts run as part of the regtest
-//! integration suite (gated by `BWK_SP_INTEGRATION_TEST=1`); these tests cover
+//! integration suite; these tests cover
 //! the empty-account aggregation path and the type-level shape of the
 //! returned views.
 
@@ -37,7 +37,7 @@ fn all_spendable_coins_empty_account() {
 
 #[test]
 fn coin_origin_eq_and_copy() {
-    // Sanity check on CoinOrigin's derived impls — bindings rely on these.
+    // Sanity check on CoinOrigin's derived impls: bindings rely on these.
     let a = CoinOrigin::Sp;
     let b = CoinOrigin::SubAccount(0);
     let c = CoinOrigin::SubAccount(0);

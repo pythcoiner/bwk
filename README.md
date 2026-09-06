@@ -73,8 +73,8 @@ See crate READMEs:
 
 ```bash
 cargo build --release
-cargo test --features test
-cargo clippy --all-targets -- -D warnings
+scripts/ci-checks.sh tests
+scripts/ci-checks.sh clippy
 ```
 
 MSRV: 1.78

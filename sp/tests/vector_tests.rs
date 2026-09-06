@@ -114,7 +114,7 @@ mod tests {
 
             let mut receiving_addresses: HashSet<SilentPaymentAddress> = HashSet::new();
             receiving_addresses.insert(sp_receiver.get_receiving_address());
-            if given.labels.iter().any(|l| *l == 0) {
+            if given.labels.contains(&0) {
                 receiving_addresses.insert(sp_receiver.get_change_address());
             }
 

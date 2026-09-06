@@ -16,17 +16,17 @@ See [CODE_GUIDELINES.md](CODE_GUIDELINES.md) for code style rules.
 # Build release
 cargo build --release
 
-# Run all tests (requires test feature)
-cargo test --features test
+# Run all tests
+scripts/ci-checks.sh tests
 
 # Run tests with output
-cargo test --features test -- --nocapture
+scripts/ci-checks.sh tests
 
 # Single test
-cargo test --features test <test_name>
+cargo test --features test,sqlite <test_name>
 
 # Lint
-cargo clippy --all-targets -- -D warnings
+scripts/ci-checks.sh clippy
 cargo fmt -- --check
 ```
 

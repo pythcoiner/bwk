@@ -3,52 +3,48 @@
 use std::{
     collections::HashMap,
     env,
-    path::PathBuf,
     str::FromStr,
     thread,
     time::{Duration, Instant},
 };
 
+mod common;
+
 use bwk_electrum::{
     electrum::{request::Request, response::*},
     raw_client::Client,
 };
-use electrsd::{
-    bitcoind::{bitcoincore_rpc::RpcApi, BitcoinD, P2P},
-    ElectrsD,
-};
+use bwk_utils::test::electrsd::bitcoind::bitcoincore_rpc::RpcApi;
 use miniscript::bitcoin::{hex::FromHex, OutPoint, Script};
 use serde_json::Value;
 
-fn bootstrap_electrs() -> (String, u16, ElectrsD, BitcoinD) {
-    let mut cwd: PathBuf = env::current_dir().expect("Failed to get current directory");
-    cwd.push("tests");
+use bwk_utils::test::TestBitcoinD;
+use common::bootstrap_electrs;
 
-    let mut electrs_path = cwd.clone();
-    electrs_path.push("bin");
-    electrs_path.push("electrs_0_9_11");
-
-    let mut bitcoind_path = cwd.clone();
-    bitcoind_path.push("bin");
-    bitcoind_path.push("bitcoind_25_2");
-
-    let mut conf = electrsd::bitcoind::Conf::default();
-    conf.p2p = P2P::Yes;
-    let bitcoind = BitcoinD::with_conf(bitcoind_path, &conf).unwrap();
-
-    let electrsd_conf = electrsd::Conf::default();
-    // electrsd_conf.view_stderr = true;
-    let electrsd = ElectrsD::with_conf(electrs_path, &bitcoind, &electrsd_conf).unwrap();
-    let (url, port) = electrsd.electrum_url.split_once(':').unwrap();
-    let port = port.parse::<u16>().unwrap();
-    (url.into(), port, electrsd, bitcoind)
-}
-
-fn tcp_client() -> (Client, ElectrsD, BitcoinD) {
-    let (url, port, electrs, bitcoind) = bootstrap_electrs();
+fn tcp_client() -> (Client, bwk_utils::test::electrsd::ElectrsD, TestBitcoinD) {
+    let (url, port, electrs, bitcoind) = bootstrap_electrs(false);
     let mut c = Client::new().tcp(&url, port);
     c.try_connect(None).unwrap();
     (c, electrs, bitcoind)
+}
+
+fn recv_response(client: &mut Client, request: Request) -> Response {
+    client.send(&request);
+    let mut index = HashMap::new();
+    index.insert(request.id, request);
+    client.recv(&index).unwrap().remove(0)
+}
+
+fn try_recv_str_until(client: &mut Client) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match client.try_recv_str() {
+            Ok(Some(response)) => return Some(response),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            Ok(None) => return None,
+            Err(e) => panic!("failed to receive response: {e:?}"),
+        }
+    }
 }
 
 fn env_var(arg: &str) -> Option<String> {
@@ -83,8 +79,7 @@ fn ping() {
 
     // non blocking recv
     client.send_str("ping");
-    thread::sleep(Duration::from_secs(1));
-    assert!(client.try_recv_str().unwrap().is_some());
+    assert!(try_recv_str_until(&mut client).is_some());
     assert!(client.try_recv_str().unwrap().is_none());
 
     client.close().unwrap();
@@ -126,8 +121,7 @@ fn ssl_client_wo_certificate() {
 
         // non blocking recv
         client.send_str("ping");
-        thread::sleep(Duration::from_secs(1));
-        assert!(client.try_recv_str().unwrap().is_some());
+        assert!(try_recv_str_until(&mut client).is_some());
         assert!(client.try_recv_str().unwrap().is_none());
 
         client.close().unwrap();
@@ -215,13 +209,10 @@ fn timeout_ssl() {
 fn banner() {
     let request = Request::banner();
     let (mut client, _e, _b) = tcp_client();
-    client.send(&request);
-    let mut index = HashMap::new();
-    index.insert(request.id, request);
-    matches!(
-        client.recv(&index).unwrap()[0],
+    assert!(matches!(
+        recv_response(&mut client, request),
         Response::Banner(BannerResponse { id: 0, .. })
-    );
+    ));
 }
 
 #[test]
@@ -459,40 +450,33 @@ fn tx_get() {
 // }
 
 #[test]
-// TODO: use tcp_client() instead
 fn sh_get_balance() {
-    let mut client = acinq_client();
-    client.try_connect(None).unwrap();
+    let (mut client, _e, _b) = tcp_client();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
 
-    let mut index = HashMap::new();
-    let request = Request::sh_get_balance(script);
-    client.send(&request);
-    index.insert(request.id, request);
-    let response = &client.recv(&index).unwrap()[0];
-    if let Response::SHGetBalance(_) = response {
+    if let Response::SHGetBalance(response) =
+        recv_response(&mut client, Request::sh_get_balance(script))
+    {
+        assert_eq!(response.balance.confirmed, 0);
+        assert_eq!(response.balance.unconfirmed, 0);
     } else {
         panic!("wrong response")
     }
 }
 
 #[test]
-// TODO: use tcp_client() instead
 fn sh_get_history() {
-    let mut client = acinq_client();
-    client.try_connect(None).unwrap();
+    let (mut client, _e, _b) = tcp_client();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
 
-    let mut index = HashMap::new();
-    let request = Request::sh_get_history(script);
-    client.send(&request);
-    index.insert(request.id, request);
-    let response = &client.recv(&index).unwrap()[0];
-    if let Response::SHGetHistory(_) = response {
+    if let Response::SHGetHistory(response) =
+        recv_response(&mut client, Request::sh_get_history(script))
+    {
+        assert!(response.history.is_empty());
     } else {
         panic!("wrong response")
     }
@@ -515,20 +499,16 @@ fn sh_get_history() {
 // }
 
 #[test]
-// TODO: use tcp_client() instead
 fn sh_list_unspent() {
-    let mut client = acinq_client();
-    client.try_connect(None).unwrap();
+    let (mut client, _e, _b) = tcp_client();
 
     let raw_script = Vec::from_hex("0014992f8cc4f6d284acac5f603e233592b566c04b2a").unwrap();
     let script = Script::from_bytes(raw_script.as_slice());
 
-    let mut index = HashMap::new();
-    let request = Request::sh_list_unspent(script);
-    client.send(&request);
-    index.insert(request.id, request);
-    let response = &client.recv(&index).unwrap()[0];
-    if let Response::SHListUnspent(_) = response {
+    if let Response::SHListUnspent(response) =
+        recv_response(&mut client, Request::sh_list_unspent(script))
+    {
+        assert!(response.unspent.is_empty());
     } else {
         panic!("wrong response")
     }
@@ -538,12 +518,7 @@ fn sh_list_unspent() {
 fn features() {
     let (mut client, _e, _b) = tcp_client();
 
-    let mut index = HashMap::new();
-    let request = Request::features();
-    client.send(&request);
-    index.insert(request.id, request);
-    let response = &client.recv(&index).unwrap()[0];
-    if let Response::Features(_) = response {
+    if let Response::Features(_) = recv_response(&mut client, Request::features()) {
         //
     } else {
         panic!("wrong response")

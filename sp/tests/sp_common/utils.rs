@@ -12,48 +12,6 @@ use serde_json::from_str;
 
 use super::structs::{OutputWithSignature, TestData};
 
-use std::io::{self, Cursor};
-
-fn deser_compact_size(f: &mut Cursor<&Vec<u8>>) -> io::Result<u64> {
-    let mut buf = [0; 8];
-    f.read_exact(&mut buf[..1])?;
-    match buf[0] {
-        0xfd => {
-            f.read_exact(&mut buf[..2])?;
-            Ok(u16::from_le_bytes(buf[..2].try_into().unwrap()) as u64)
-        }
-        0xfe => {
-            f.read_exact(&mut buf[..4])?;
-            Ok(u32::from_le_bytes(buf[..4].try_into().unwrap()) as u64)
-        }
-        0xff => {
-            f.read_exact(&mut buf)?;
-            Ok(u64::from_le_bytes(buf))
-        }
-        _ => Ok(buf[0] as u64),
-    }
-}
-
-fn deser_string(f: &mut Cursor<&Vec<u8>>) -> io::Result<Vec<u8>> {
-    let size = deser_compact_size(f)? as usize;
-    let mut buf = vec![0; size];
-    f.read_exact(&mut buf)?;
-    Ok(buf)
-}
-
-pub fn deser_string_vector(f: &mut Cursor<&Vec<u8>>) -> io::Result<Vec<Vec<u8>>> {
-    // Check if the buffer is empty before attempting to deserialize the size
-    if f.get_ref().is_empty() {
-        return Ok(Vec::new()); // Return an empty vector if the buffer is empty
-    }
-    let size = deser_compact_size(f)? as usize;
-    let mut vec = Vec::with_capacity(size);
-    for _ in 0..size {
-        vec.push(deser_string(f)?);
-    }
-    Ok(vec)
-}
-
 pub fn read_file() -> Vec<TestData> {
     let mut file = File::open("tests/resources/send_and_receive_test_vectors.json").unwrap();
     let mut contents = String::new();

@@ -1,7 +1,6 @@
 //! Scanning integration tests for bwk-sp.
 //!
-//! These tests require a real BlindbitD backend with regtest.
-//! Set BWK_SP_INTEGRATION_TEST=1 to run them.
+//! These tests start a real BlindbitD backend with regtest.
 
 mod common;
 
@@ -12,12 +11,11 @@ use std::{
 };
 
 use bitcoin::OutPoint;
-use blindbitd::BlindbitD;
 use bwk_utils::test as bwk_test;
 
 use common::{
     test_account, test_account_named, test_account_persistent, test_account_persistent_named,
-    test_mnemonic, test_outpoint, wait_for_sync_and_index, TempDir,
+    test_mnemonic, test_outpoint, TempDir, TestEnv,
 };
 
 use bwk::{
@@ -35,31 +33,50 @@ fn backend_height(blindbit_url: &str) -> u32 {
         .to_consensus_u32()
 }
 
-fn backend_with_cutthrough(blindbit_url: &str) -> bool {
-    let agent = bwk_sp::blindbit::agent().expect("blindbit agent");
-    bwk_sp::blindbit::info(&agent, blindbit_url)
-        .map(|i| i.tweaks_cut_through_with_dust_filter)
-        .unwrap_or(false)
+fn account_with_birthday(name: &str, env: &TestEnv) -> bwk_sp::account::Account {
+    let mut config = Config::new(
+        name.to_string(),
+        bitcoin::Network::Regtest,
+        test_mnemonic().to_string(),
+        env.url(),
+        std::path::PathBuf::from("/unused"),
+    )
+    .enable_persist(false);
+    config.set_birthday_height(Some(env.next_scan_height()));
+    bwk_sp::account::Account::new(config).expect("create test account")
 }
 
-//
-// These tests require the `blindbitd` crate which provides:
-// - BlindbitD server (Silent Payment indexer)
-// - Embedded Bitcoin Core node (regtest mode)
-//
-// IMPORTANT: Due to feature unification issues with the bip39 crate in the
-// bwk workspace (bwk-sign requires bip39/rand which conflicts with other deps),
-// the blindbitd dev-dependencies are commented out in Cargo.toml.
-//
-// To enable these tests:
-// 1. Create a standalone test crate (like backend_tests/blindbit-native-non-async)
-// 2. Or add the bip39 rand feature to bwk/Cargo.toml workspace dependencies
-//
-// Reference implementation: See /home/user/spdk/backend_tests/blindbit-native-non-async/
-// for working blindbitd integration tests that can be adapted.
-//
-// The test implementations below are complete and ready to use once dependencies
-// are resolved. Each test documents exactly what it verifies.
+#[test]
+fn test_scanning() {
+    let mut env = TestEnv::new();
+
+    test_account_connects_to_blindbitd(&mut env);
+    test_account_block_height_growth(&mut env);
+    test_scan_no_matches(&mut env);
+    test_scan_single_sp_output(&mut env);
+    test_scan_oneshot_from_chosen_height(&mut env);
+    test_scan_multiple_sp_outputs(&mut env);
+    test_incremental_scanning(&mut env);
+    test_rescan_idempotent(&mut env);
+    test_scan_notifications(&mut env);
+    test_new_output_notification(&mut env);
+    test_persistence_after_scan(&mut env);
+    test_background_scanner_start_stop(&mut env);
+    test_drop_stops_scanner(&mut env);
+    test_background_scanner_detects_new_blocks(&mut env);
+    test_label_coin_persists(&mut env);
+    test_label_transaction(&mut env);
+    test_full_wallet_flow(&mut env);
+    test_full_wallet_lifecycle(&mut env);
+    test_watch_only_mode(&mut env);
+    test_sp_address_generation(&mut env);
+    test_spend_frontier_resume_skips_swept_heights(&mut env);
+    test_spend_only_resume_at_same_tip(&mut env);
+    test_unconfirmed_spend_injection(&mut env);
+    test_unconfirmed_spend_no_sp_coin(&mut env);
+    test_broadcast_requires_electrum_endpoint(&mut env);
+    test_sp_scan_timestamps(&mut env);
+}
 
 /// Test 10.4.1.1: Account connects to BlindbitD and reports online.
 ///
@@ -73,24 +90,10 @@ fn backend_with_cutthrough(blindbit_url: &str) -> bool {
 /// 2. Generate 100 blocks
 /// 3. Create Account pointing to BlindbitD
 /// 4. Verify connectivity and block height
-#[test]
-fn test_account_connects_to_blindbitd() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account
+fn test_account_connects_to_blindbitd(env: &mut TestEnv) {
+    let blindbit_url = env.url();
     let account = test_account(&blindbit_url);
 
-    // 5. Test assertions
     assert!(account.backend_online());
     let height = backend_height(&blindbit_url);
     assert!(height >= 100, "Expected height >= 100, got {height}");
@@ -101,33 +104,16 @@ fn test_account_connects_to_blindbitd() {
 /// This test verifies:
 /// - Account tracks chain growth correctly
 /// - Multiple block_height() calls reflect new blocks
-#[test]
-fn test_account_block_height_growth() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 50 blocks
-    bwk_test::generate_blocks(bitcoind, 50);
-    wait_for_sync_and_index(&blindbit_url, 50);
-
-    // 4. Create Account
+fn test_account_block_height_growth(env: &mut TestEnv) {
+    let blindbit_url = env.url();
     let account = test_account(&blindbit_url);
 
-    // 5. Verify initial height
-    let height1 = backend_height(&blindbit_url);
+    let height1 = account.block_height().unwrap();
     assert!(height1 >= 50, "Expected height >= 50, got {height1}");
 
-    // 6. Generate 50 more blocks
-    bwk_test::generate_blocks(bitcoind, 50);
-    wait_for_sync_and_index(&blindbit_url, 100);
+    env.mine(50);
 
-    // 7. Verify height increased
-    let height2 = backend_height(&blindbit_url);
+    let height2 = account.block_height().unwrap();
     assert!(height2 >= 100, "Expected height >= 100, got {height2}");
     assert!(height2 > height1, "Height should have grown");
 }
@@ -138,27 +124,16 @@ fn test_account_block_height_growth() {
 /// - scan_blocks() completes without error on empty chain
 /// - balance remains 0 when no SP transactions exist
 /// - coins() returns empty after scan
-#[test]
-fn test_scan_no_matches() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 100 standard blocks (no SP tx)
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account
+fn test_scan_no_matches(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
+    env.mine(100);
     let mut account = test_account(&blindbit_url);
 
-    // 5. Scan blocks
-    account.scan_blocks(Some(1), Some(100)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
 
-    // 6. Verify empty results
     assert_eq!(
         account.balance(),
         0,
@@ -180,26 +155,16 @@ fn test_scan_no_matches() {
 /// 3. Create SP transaction to account's SP address
 /// 4. Scan and verify detection
 ///
-#[test]
-fn test_scan_single_sp_output() {
+fn test_scan_single_sp_output(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{generate_recipient_pubkey, swap_to_sp};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -213,12 +178,12 @@ fn test_scan_single_sp_output() {
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&blindbit_url, 103);
+    let fund_txid =
+        bwk_test::send(&mut env.bitcoind.client, taproot_addr.clone(), 0.1).expect("fund taproot");
+    env.mine(2);
 
     // 7. Get the funded UTXO
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+    let tx = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid).expect("get tx");
     let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
         .into_iter()
         .next()
@@ -245,17 +210,18 @@ fn test_scan_single_sp_output() {
 
     // 9. Broadcast and mine
     let sp_txid = sp_tx.compute_txid();
-    bitcoind
+    env.bitcoind
+        .client
         .send_raw_transaction(&sp_tx)
         .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&blindbit_url, sp_tx_height);
+    env.mine(1);
+    let sp_tx_height =
+        bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid).expect("get tx height") as u32;
 
     // 10. Scan
     let mut account = test_account_named("scan-single-sp-output", &blindbit_url);
     account
-        .scan_blocks(Some(1), Some(sp_tx_height))
+        .scan_blocks(Some(start_height), Some(sp_tx_height))
         .expect("scan");
 
     // 11. Verify found output
@@ -274,25 +240,16 @@ fn test_scan_single_sp_output() {
     );
 }
 
-#[test]
-fn test_scan_oneshot_from_chosen_height() {
+fn test_scan_oneshot_from_chosen_height(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{
-        generate_recipient_pubkey, swap_to_sp, wait_for_oneshot_done, wait_until_sync_at_height,
-    };
+    use common::{generate_recipient_pubkey, swap_to_sp, wait_for_oneshot_done};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     let mnemonic_str = test_mnemonic();
     let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
@@ -303,11 +260,11 @@ fn test_scan_oneshot_from_chosen_height() {
         .expect("create taproot signer");
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&blindbit_url, 103);
+    let fund_txid =
+        bwk_test::send(&mut env.bitcoind.client, taproot_addr.clone(), 0.1).expect("fund taproot");
+    env.mine(2);
 
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+    let tx = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid).expect("get tx");
     let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
         .into_iter()
         .next()
@@ -332,17 +289,18 @@ fn test_scan_oneshot_from_chosen_height() {
     .expect("create sp tx");
 
     let sp_txid = sp_tx.compute_txid();
-    bitcoind
+    env.bitcoind
+        .client
         .send_raw_transaction(&sp_tx)
         .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let tip = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&blindbit_url, tip);
+    env.mine(1);
+    let tip =
+        bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid).expect("get tx height") as u32;
 
     let mut account = test_account_named("scan-oneshot-from-height", &blindbit_url);
     assert_eq!(account.last_scanned_height(), None);
 
-    account.scan_oneshot(Some(1)).expect("scan");
+    account.scan_oneshot(Some(start_height)).expect("scan");
     wait_for_oneshot_done(&account, Duration::from_secs(60));
 
     let coins = account.coins();
@@ -372,26 +330,16 @@ fn test_scan_oneshot_from_chosen_height() {
 /// - Scanner finds multiple SP outputs across different blocks
 /// - All outputs are tracked in coin_store
 /// - Total balance is sum of all outputs
-#[test]
-fn test_scan_multiple_sp_outputs() {
+fn test_scan_multiple_sp_outputs(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{generate_recipient_pubkey, swap_to_sp};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -405,20 +353,19 @@ fn test_scan_multiple_sp_outputs() {
 
     let sp_address = sp_receiver.get_receiving_address();
     let mut sp_txids = Vec::new();
-    let mut final_height = 101u32;
+    let mut final_height = env.height;
 
     // Create 3 SP outputs in separate blocks
     for i in 0..3 {
         let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address
-        let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
-        bwk_test::generate_blocks(bitcoind, 2);
-        let current_height = 101 + (i + 1) * 2;
-        wait_until_sync_at_height(&blindbit_url, current_height);
+        let fund_txid = bwk_test::send(&mut env.bitcoind.client, taproot_addr.clone(), 0.1)
+            .expect("fund taproot");
+        env.mine(2);
 
         // Get the funded UTXO
-        let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+        let tx = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid).expect("get tx");
         let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
             .into_iter()
             .next()
@@ -444,12 +391,13 @@ fn test_scan_multiple_sp_outputs() {
 
         // Broadcast and mine
         let sp_txid = sp_tx.compute_txid();
-        bitcoind
+        env.bitcoind
+            .client
             .send_raw_transaction(&sp_tx)
             .expect("broadcast sp tx");
-        bwk_test::generate_blocks(bitcoind, 1);
-        final_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-        wait_for_sync_and_index(&blindbit_url, final_height);
+        env.mine(1);
+        final_height = bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid)
+            .expect("get tx height") as u32;
 
         sp_txids.push(sp_txid);
     }
@@ -457,7 +405,7 @@ fn test_scan_multiple_sp_outputs() {
     // Scan
     let mut account = test_account_named("scan-multiple-sp-outputs", &blindbit_url);
     account
-        .scan_blocks(Some(1), Some(final_height))
+        .scan_blocks(Some(start_height), Some(final_height))
         .expect("scan");
 
     // Verify found outputs
@@ -481,29 +429,19 @@ fn test_scan_multiple_sp_outputs() {
 /// Test 10.4.3.1: Incremental scanning in multiple passes.
 ///
 /// This test verifies:
-/// - Scanning can be done in multiple passes (1-100, then 101-200)
+/// - Scanning can be done in multiple passes over consecutive ranges
 /// - Each pass adds newly found outputs
 /// - No duplicates from overlapping ranges
-#[test]
-fn test_incremental_scanning() {
+fn test_incremental_scanning(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{generate_recipient_pubkey, swap_to_sp};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -517,16 +455,16 @@ fn test_incremental_scanning() {
 
     let sp_address = sp_receiver.get_receiving_address();
 
-    // --- First SP output in block ~106 ---
+    // --- First SP output in the first range ---
     let (taproot_addr0, sk0) = tr_signer.taproot_receive_address_and_key(0);
 
     // Fund the taproot address
-    let fund_txid0 = bwk_test::send(bitcoind, taproot_addr0.clone(), 0.1).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 3); // now at block 104
-    wait_until_sync_at_height(&blindbit_url, 104);
+    let fund_txid0 =
+        bwk_test::send(&mut env.bitcoind.client, taproot_addr0.clone(), 0.1).expect("fund taproot");
+    env.mine(3);
 
     // Get the funded UTXO
-    let tx0 = bwk_test::get_tx(bitcoind, fund_txid0).expect("get tx");
+    let tx0 = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid0).expect("get tx");
     let (index0, txout0) = bwk_test::txouts_for(&taproot_addr0, &tx0)
         .into_iter()
         .next()
@@ -551,20 +489,21 @@ fn test_incremental_scanning() {
     .expect("create sp tx");
 
     let sp_txid0 = sp_tx0.compute_txid();
-    bitcoind
+    env.bitcoind
+        .client
         .send_raw_transaction(&sp_tx0)
         .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 2); // SP tx in block ~106
-    let sp_height0 = bwk_test::get_tx_height(bitcoind, sp_txid0).expect("get tx height") as u32;
-    wait_for_sync_and_index(&blindbit_url, sp_height0);
+    env.mine(2);
 
     // Generate more blocks to reach ~110
-    bwk_test::generate_blocks(bitcoind, 4);
-    wait_for_sync_and_index(&blindbit_url, 110);
+    env.mine(4);
+    let first_end = env.height;
 
-    // --- First scan: 1-110, should find 1 output ---
+    // --- First scan should find 1 output ---
     let mut account = test_account_named("incremental-scanning", &blindbit_url);
-    account.scan_blocks(Some(1), Some(110)).expect("scan");
+    account
+        .scan_blocks(Some(start_height), Some(first_end))
+        .expect("scan");
 
     let coins = account.coins();
     assert_eq!(coins.len(), 1, "First scan should find exactly 1 SP output");
@@ -577,16 +516,17 @@ fn test_incremental_scanning() {
         "Should find first output"
     );
 
-    // --- Second SP output in block ~116 ---
+    // --- Second SP output in the next range ---
     let (taproot_addr1, sk1) = tr_signer.taproot_receive_address_and_key(1);
 
     // Fund the taproot address
-    let fund_txid1 = bwk_test::send(bitcoind, taproot_addr1.clone(), 0.1).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 3); // now at ~113
-    wait_until_sync_at_height(&blindbit_url, 113);
+    let second_start = first_end + 1;
+    let fund_txid1 =
+        bwk_test::send(&mut env.bitcoind.client, taproot_addr1.clone(), 0.1).expect("fund taproot");
+    env.mine(3);
 
     // Get the funded UTXO
-    let tx1 = bwk_test::get_tx(bitcoind, fund_txid1).expect("get tx");
+    let tx1 = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid1).expect("get tx");
     let (index1, txout1) = bwk_test::txouts_for(&taproot_addr1, &tx1)
         .into_iter()
         .next()
@@ -611,16 +551,17 @@ fn test_incremental_scanning() {
     .expect("create sp tx");
 
     let sp_txid1 = sp_tx1.compute_txid();
-    bitcoind
+    env.bitcoind
+        .client
         .send_raw_transaction(&sp_tx1)
         .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 3); // SP tx in block ~116
-    let sp_height1 = bwk_test::get_tx_height(bitcoind, sp_txid1).expect("get tx height") as u32;
-    wait_for_sync_and_index(&blindbit_url, sp_height1);
+    env.mine(3);
+    let sp_height1 =
+        bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid1).expect("get tx height") as u32;
 
-    // --- Second scan: 111-sp_height1 using same scanner, should find 1 more ---
+    // --- Second scan using same scanner should find 1 more ---
     account
-        .scan_blocks(Some(111), Some(sp_height1))
+        .scan_blocks(Some(second_start), Some(sp_height1))
         .expect("scan");
 
     // After second scan, should have 2 outputs total
@@ -649,30 +590,21 @@ fn test_incremental_scanning() {
 /// This test verifies:
 /// - Scanning the same range twice doesn't create duplicates
 /// - Balance and coin count remain consistent
-#[test]
-fn test_rescan_idempotent() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account
+fn test_rescan_idempotent(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
+    env.mine(100);
     let mut account = test_account(&blindbit_url);
 
-    // 5. First scan
-    account.scan_blocks(Some(1), Some(100)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let coins_after_first = account.coins().len();
     let balance_after_first = account.balance();
 
-    // 6. Second scan (same range)
-    account.scan_blocks(Some(1), Some(100)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     let coins_after_second = account.coins().len();
     let balance_after_second = account.balance();
 
@@ -692,28 +624,19 @@ fn test_rescan_idempotent() {
 /// This test verifies:
 /// - ScanProgress notifications are sent during scan
 /// - ScanCompleted notification is sent when scan finishes
-#[test]
-fn test_scan_notifications() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account
+fn test_scan_notifications(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
+    env.mine(100);
     let mut account = test_account(&blindbit_url);
 
     // 5. Take the receiver
     let receiver = account.receiver().expect("receiver should be available");
 
     // 6. Scan blocks
-    account.scan_blocks(Some(1), Some(100)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
 
     // 7. Collect notifications
     let mut saw_progress = false;
@@ -746,26 +669,16 @@ fn test_scan_notifications() {
 /// - NewOutput(outpoint) notification is sent for each found output
 /// - Notification contains correct outpoint
 ///
-#[test]
-fn test_new_output_notification() {
+fn test_new_output_notification(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{generate_recipient_pubkey, swap_to_sp};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -779,12 +692,12 @@ fn test_new_output_notification() {
     let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(0);
 
     // 6. Fund the taproot address
-    let fund_txid = bwk_test::send(bitcoind, taproot_addr.clone(), 0.1).expect("fund taproot");
-    bwk_test::generate_blocks(bitcoind, 2);
-    wait_until_sync_at_height(&blindbit_url, 103);
+    let fund_txid =
+        bwk_test::send(&mut env.bitcoind.client, taproot_addr.clone(), 0.1).expect("fund taproot");
+    env.mine(2);
 
     // 7. Get the funded UTXO
-    let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+    let tx = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid).expect("get tx");
     let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
         .into_iter()
         .next()
@@ -811,18 +724,19 @@ fn test_new_output_notification() {
 
     // 9. Broadcast and mine
     let sp_txid = sp_tx.compute_txid();
-    bitcoind
+    env.bitcoind
+        .client
         .send_raw_transaction(&sp_tx)
         .expect("broadcast sp tx");
-    bwk_test::generate_blocks(bitcoind, 1);
-    let sp_tx_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-    wait_for_sync_and_index(&blindbit_url, sp_tx_height);
+    env.mine(1);
+    let sp_tx_height =
+        bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid).expect("get tx height") as u32;
 
     // 10. Scan with Account and collect public notifications.
     let mut account = test_account_named("new-output-notification", &blindbit_url);
     let receiver = account.receiver().expect("receiver should be available");
     account
-        .scan_blocks(Some(1), Some(sp_tx_height))
+        .scan_blocks(Some(start_height), Some(sp_tx_height))
         .expect("scan");
 
     let expected_op = OutPoint {
@@ -854,26 +768,19 @@ fn test_new_output_notification() {
 /// Note: When scanning blocks with no SP outputs, the scanner doesn't update
 /// last_scanned_height since record_block_outputs is only called when outputs
 /// are found. We test persistence through store file creation.
-#[test]
-fn test_persistence_after_scan() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
+fn test_persistence_after_scan(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
+    env.mine(100);
 
     // 4. Create Account with persist=true
     let (mut account, config, _dir) = test_account_persistent(&blindbit_url);
     let account_dir = config.account_dir();
 
     // 5. Scan and drop (persists on drop)
-    account.scan_blocks(Some(1), Some(100)).unwrap();
+    account
+        .scan_blocks(Some(start_height), Some(env.height))
+        .unwrap();
     assert_eq!(account.balance(), 0); // No SP outputs in standard blocks
     drop(account);
 
@@ -915,22 +822,8 @@ fn test_persistence_after_scan() {
 /// - start_scanner() fails if already running
 /// - stop_scanner() stops the background thread
 /// - scanner_running() returns false after stop
-#[test]
-fn test_background_scanner_start_stop() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account
-    let mut account = test_account(&blindbit_url);
+fn test_background_scanner_start_stop(env: &mut TestEnv) {
+    let mut account = account_with_birthday("background-scanner-start-stop", env);
 
     // 5. Verify scanner is not running initially
     assert!(
@@ -969,23 +862,10 @@ fn test_background_scanner_start_stop() {
 /// This test verifies:
 /// - Starting scanner, then dropping account doesn't panic or hang
 /// - Scanner thread automatically stops when account is dropped
-#[test]
-fn test_drop_stops_scanner() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
+fn test_drop_stops_scanner(env: &mut TestEnv) {
     // 4. Create Account and start scanner in a scope
     {
-        let mut account = test_account_named("test-drop-scanner", &blindbit_url);
+        let mut account = account_with_birthday("test-drop-scanner", env);
 
         // Start scanner
         account.start_scanner().expect("start scanner");
@@ -1017,24 +897,13 @@ fn test_drop_stops_scanner() {
 /// Account.scan_blocks queries info to determine cutthrough which may not work
 /// with BlindbitD. The SP output detection is tested separately in
 /// test_scan_single_sp_output.
-#[test]
-fn test_background_scanner_detects_new_blocks() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+fn test_background_scanner_detects_new_blocks(env: &mut TestEnv) {
+    let blindbit_url = env.url();
 
     // 4. Create Account
     let dir = TempDir::new().unwrap();
     let mnemonic_str = test_mnemonic();
-    let config = Config::new(
+    let mut config = Config::new(
         "test-bg-scanner-new-blocks".to_string(),
         bitcoin::Network::Regtest,
         mnemonic_str.to_string(),
@@ -1042,6 +911,7 @@ fn test_background_scanner_detects_new_blocks() {
         dir.path().to_path_buf(),
     )
     .enable_persist(false);
+    config.set_birthday_height(Some(env.next_scan_height()));
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
 
@@ -1054,8 +924,7 @@ fn test_background_scanner_detects_new_blocks() {
     assert!(account.scanner_running(), "Scanner should be running");
 
     // 7. Mine some new blocks while scanner is running
-    bwk_test::generate_blocks(bitcoind, 5);
-    wait_for_sync_and_index(&blindbit_url, 106);
+    env.mine(5);
 
     // 8. Wait for some scan activity (progress notifications)
     let timeout = Duration::from_secs(30);
@@ -1101,29 +970,13 @@ fn test_background_scanner_detects_new_blocks() {
 /// - Add a label to the coin_store
 /// - Persist and reload
 /// - Verify label is retained
-#[test]
-fn test_label_coin_persists() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account with persist=true
-    let (account, config, _dir) = test_account_persistent_named("test-label-coin", &blindbit_url);
+fn test_label_coin_persists(env: &mut TestEnv) {
+    let (account, config, _dir) = test_account_persistent_named("test-label-coin", &env.url());
     let outpoint = test_outpoint();
 
-    // 5. Add label and persist
     account.update_coin_label(outpoint, "rent payment".to_string());
     drop(account);
 
-    // 6. Reload and verify label persisted
     let reloaded = bwk_sp::account::Account::load(config).unwrap();
     let label = reloaded.get_coin_label(&outpoint);
     assert_eq!(
@@ -1139,29 +992,13 @@ fn test_label_coin_persists() {
 /// - Add a label to a transaction via update_tx_label
 /// - Persist and reload
 /// - Verify label is retained in label_store
-#[test]
-fn test_label_transaction() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
-
-    // 4. Create Account with persist=true
-    let (account, config, _dir) = test_account_persistent_named("test-label-tx", &blindbit_url);
+fn test_label_transaction(env: &mut TestEnv) {
+    let (account, config, _dir) = test_account_persistent_named("test-label-tx", &env.url());
     let txid = test_outpoint().txid;
 
-    // 5. Add tx label and persist
     account.update_tx_label(txid, "groceries".to_string());
     drop(account);
 
-    // 6. Verify label persists by checking the label file directly
     let account_dir = config.account_dir();
     let typed_backend = JsonBackend::open(account_dir).unwrap();
     assert!(
@@ -1189,26 +1026,16 @@ fn test_label_transaction() {
 /// 5. Verify correct balance and coin count
 /// 6. Verify spendable_coins() returns correct data
 /// 7. Verify can_sign() returns true for mnemonic-based account
-#[test]
-fn test_full_wallet_flow() {
+fn test_full_wallet_flow(env: &mut TestEnv) {
     use bwk_sign::{bip39, HotSigner};
     use bwk_sp::receiver::SpReceiver;
-    use common::{generate_recipient_pubkey, swap_to_sp, wait_until_sync_at_height};
+    use common::{generate_recipient_pubkey, swap_to_sp};
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let network = bitcoin::Network::Regtest;
 
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate 101 blocks (coinbase maturity)
-    bwk_test::generate_blocks(bitcoind, 101);
-    wait_for_sync_and_index(&blindbit_url, 101);
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
 
     // 4. Setup SP client and taproot signer with the same mnemonic
     let mnemonic_str = test_mnemonic();
@@ -1222,7 +1049,7 @@ fn test_full_wallet_flow() {
 
     let sp_address = sp_receiver.get_receiving_address();
     let mut sp_txids = Vec::new();
-    let mut final_height = 101u32;
+    let mut final_height = env.height;
     #[allow(unused_assignments)]
     let mut _expected_balance: u64 = 0;
 
@@ -1235,14 +1062,12 @@ fn test_full_wallet_flow() {
         let (taproot_addr, sk) = tr_signer.taproot_receive_address_and_key(i);
 
         // Fund the taproot address
-        let fund_txid =
-            bwk_test::send(bitcoind, taproot_addr.clone(), *amount).expect("fund taproot");
-        bwk_test::generate_blocks(bitcoind, 2);
-        let current_height = 101 + (i + 1) * 2;
-        wait_until_sync_at_height(&blindbit_url, current_height);
+        let fund_txid = bwk_test::send(&mut env.bitcoind.client, taproot_addr.clone(), *amount)
+            .expect("fund taproot");
+        env.mine(2);
 
         // Get the funded UTXO
-        let tx = bwk_test::get_tx(bitcoind, fund_txid).expect("get tx");
+        let tx = bwk_test::get_tx(&mut env.bitcoind.client, fund_txid).expect("get tx");
         let (index, txout) = bwk_test::txouts_for(&taproot_addr, &tx)
             .into_iter()
             .next()
@@ -1271,12 +1096,13 @@ fn test_full_wallet_flow() {
 
         // Broadcast and mine
         let sp_txid = sp_tx.compute_txid();
-        bitcoind
+        env.bitcoind
+            .client
             .send_raw_transaction(&sp_tx)
             .expect("broadcast sp tx");
-        bwk_test::generate_blocks(bitcoind, 1);
-        final_height = bwk_test::get_tx_height(bitcoind, sp_txid).expect("get tx height") as u32;
-        wait_for_sync_and_index(&blindbit_url, final_height);
+        env.mine(1);
+        final_height = bwk_test::get_tx_height(&mut env.bitcoind.client, sp_txid)
+            .expect("get tx height") as u32;
 
         sp_txids.push(sp_txid);
     }
@@ -1294,7 +1120,7 @@ fn test_full_wallet_flow() {
 
     let mut account = bwk_sp::account::Account::new(config).unwrap();
     account
-        .scan_blocks(Some(1), Some(final_height))
+        .scan_blocks(Some(start_height), Some(final_height))
         .expect("scan");
 
     // 7. Verify backend connectivity
@@ -1330,19 +1156,10 @@ fn test_full_wallet_flow() {
 /// - All stores (coins, labels, txs) survive reload
 /// - Configuration is preserved
 /// - Scan state is consistent after reload
-#[test]
-fn test_full_wallet_lifecycle() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
+fn test_full_wallet_lifecycle(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
+    env.mine(100);
 
     // 4. Create Account with persist=true
     let (mut account, config, _dir) =
@@ -1354,7 +1171,7 @@ fn test_full_wallet_lifecycle() {
     {
         // Scan blocks
         account
-            .scan_blocks(Some(1), Some(100))
+            .scan_blocks(Some(start_height), Some(env.height))
             .expect("scan should succeed");
 
         // Add labels (these will be stored even though we have no actual coins)
@@ -1435,19 +1252,8 @@ fn test_full_wallet_lifecycle() {
 /// - Scanning works normally
 /// - can_sign() returns false
 /// - SP address can still be generated
-#[test]
-fn test_watch_only_mode() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
+fn test_watch_only_mode(env: &mut TestEnv) {
+    let blindbit_url = env.url();
 
     // 4. Create watch-only config with scan_sk and PUBLIC spend_key (66 hex chars = 33 bytes)
     let dir = TempDir::new().unwrap();
@@ -1489,19 +1295,8 @@ fn test_watch_only_mode() {
 /// This test verifies:
 /// - sp_address() returns a valid Silent Payment address
 /// - Address starts with appropriate prefix (sp or tsp)
-#[test]
-fn test_sp_address_generation() {
-    // 1. Create BlindbitD
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    // 2. Get bitcoind client
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
-    // 3. Generate blocks
-    bwk_test::generate_blocks(bitcoind, 100);
-    wait_for_sync_and_index(&blindbit_url, 100);
+fn test_sp_address_generation(env: &mut TestEnv) {
+    let blindbit_url = env.url();
 
     // 4. Create Account
     let account = test_account_named("test-sp-address-gen", &blindbit_url);
@@ -1523,35 +1318,32 @@ fn test_sp_address_generation() {
 /// Spend-frontier resume: a second `scan_blocks` over a fresh tail must not
 /// re-sweep heights an earlier scan already swept. The first scan advances the
 /// scan state to its end; the second advances it to the new tail.
-#[test]
-fn test_spend_frontier_resume_skips_swept_heights() {
-    let mut bbd = BlindbitD::new().unwrap();
-    let blindbit_url = bbd.url();
-
-    let mut bitcoind_node = bbd.bitcoin().unwrap();
-    let bitcoind = &mut bitcoind_node.client;
-
+fn test_spend_frontier_resume_skips_swept_heights(env: &mut TestEnv) {
+    let blindbit_url = env.url();
+    let start_height = env.next_scan_height();
     // Plain blocks: no SP outputs are expected; this checks public scan progress.
-    bwk_test::generate_blocks(bitcoind, 120);
-    wait_for_sync_and_index(&blindbit_url, 120);
+    env.mine(120);
+    let middle_height = start_height + 59;
 
     let mut account = test_account_named("spend-frontier-resume", &blindbit_url);
 
-    // First scan over [1, 60]: scan state ends at 60.
-    account.scan_blocks(Some(1), Some(60)).expect("first scan");
+    // First scan over the first half: scan state ends at the midpoint.
+    account
+        .scan_blocks(Some(start_height), Some(middle_height))
+        .expect("first scan");
     assert_eq!(
         account.last_scanned_height(),
-        Some(60),
+        Some(middle_height),
         "scan state should advance to the first scan's end"
     );
 
-    // Second scan over [61, 120]: scan state advances to the new tail.
+    // Second scan over the second half: scan state advances to the new tail.
     account
-        .scan_blocks(Some(61), Some(120))
+        .scan_blocks(Some(middle_height + 1), Some(env.height))
         .expect("second scan");
     assert_eq!(
         account.last_scanned_height(),
-        Some(120),
+        Some(env.height),
         "scan state should advance to the second scan's end"
     );
 }
@@ -1559,12 +1351,10 @@ fn test_spend_frontier_resume_skips_swept_heights() {
 /// A scan stopped during the spend sweep (receive frontier already at the tip,
 /// spend frontier still behind) must finish the spend sweep on resume at the
 /// SAME tip, and must not re-run the receive pass.
-#[test]
-fn test_spend_only_resume_at_same_tip() {
+fn test_spend_only_resume_at_same_tip(env: &mut TestEnv) {
     use bwk_sp::scan::state::ScanState;
-    use common::{wait_for_oneshot_done, TestEnv};
+    use common::wait_for_oneshot_done;
 
-    let mut env = TestEnv::new();
     let (mut account, config, _dir) =
         test_account_persistent_named("spend-only-resume", &env.url());
 
@@ -1638,12 +1428,10 @@ fn test_spend_only_resume_at_same_tip() {
 
 /// A scan records incoming txs; a broadcast injects the spend as unconfirmed; a
 /// later scan confirms it without turning the self-spend change into an incoming.
-#[test]
-fn test_unconfirmed_spend_injection() {
+fn test_unconfirmed_spend_injection(env: &mut TestEnv) {
     use bwk::coin_store::PaymentType;
-    use common::{wait_for_oneshot_done, TestEnv};
+    use common::wait_for_oneshot_done;
 
-    let mut env = TestEnv::new();
     let (mut account, _config, _dir) =
         test_account_persistent_named("unconfirmed-spend", &env.url());
 
@@ -1747,12 +1535,9 @@ fn test_unconfirmed_spend_injection() {
 
 /// A spend with an input absent from every wallet coin store is refused before
 /// any state changes.
-#[test]
-fn test_unconfirmed_spend_no_sp_coin() {
+fn test_unconfirmed_spend_no_sp_coin(env: &mut TestEnv) {
     use bitcoin::hashes::Hash;
-    use common::TestEnv;
 
-    let mut env = TestEnv::new();
     let (mut account, _config, _dir) =
         test_account_persistent_named("unconfirmed-no-sp-coin", &env.url());
 
@@ -1816,12 +1601,8 @@ fn test_unconfirmed_spend_no_sp_coin() {
 /// `broadcast` refuses when no Electrum endpoint is configured, and the refusal
 /// leaves state untouched: it resolves the endpoint and broadcasts before
 /// recording anything, so a real spend of an SP coin must not be injected.
-#[test]
-fn test_broadcast_requires_electrum_endpoint() {
-    use common::TestEnv;
-
+fn test_broadcast_requires_electrum_endpoint(env: &mut TestEnv) {
     // Reachable blindbit (to fund/scan) but no Electrum endpoint configured.
-    let mut env = TestEnv::new();
     let (mut account, _config, _dir) =
         test_account_persistent_named("broadcast-no-endpoint", &env.url());
 
@@ -1889,11 +1670,7 @@ fn test_broadcast_requires_electrum_endpoint() {
 
 /// The scan stamps a confirmation block time on recorded txs, fetched from
 /// blindbitd's embedded Electrum (blindbit itself has no block time).
-#[test]
-fn test_sp_scan_timestamps() {
-    use common::TestEnv;
-
-    let mut env = TestEnv::new();
+fn test_sp_scan_timestamps(env: &mut TestEnv) {
     let (host, port) = env.electrum_endpoint();
 
     let dir = common::TempDir::new().unwrap();
